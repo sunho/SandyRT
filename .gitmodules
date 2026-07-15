@@ -1,0 +1,8 @@
+[submodule "external/stablehlo"]
+	path = external/stablehlo
+	url = https://github.com/openxla/stablehlo.git
+[submodule "external/llvm-project"]
+	path = external/llvm-project
+	url = git@github.com:sunho/llvm-project.git
+	branch = sandy/stablehlo
+	shallow = true
