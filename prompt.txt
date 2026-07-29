@@ -1,0 +1,4 @@
+ let's build lexer, parser, interpreter and the name of the module will be "sandygo." it will run the program to lower it to final IR which
+  will be named high_ir that will be a SSA IR graph with builtin(name="name", values=...) and weight(value=string literal value) value having
+  one of node, int, float, string type. (note it does not have function since function calls are evaluated at sandygo level and weight names
+  are also all evaluated)
