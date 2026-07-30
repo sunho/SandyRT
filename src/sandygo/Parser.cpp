@@ -2,7 +2,7 @@
 #include <cstdlib>
 #include <sstream>
 
-namespace sandygo {
+namespace sandy::sandygo {
 
 Parser::Parser(std::vector<Token> tokens) : tokens_(std::move(tokens)) {}
 
@@ -444,4 +444,4 @@ std::vector<ExprPtr> Parser::parseCallArgs(std::vector<NamedArg>& namedArgs) {
     return args;
 }
 
-} // namespace sandygo
+} // namespace sandy::sandygo

@@ -49,3 +49,37 @@ set_target_properties(load_safetensors PROPERTIES
   CXX_STANDARD 20
   CXX_STANDARD_REQUIRED ON
 )
+
+add_executable(mid_ir_tests
+  ir/MidIRTest.cpp
+)
+
+target_link_libraries(mid_ir_tests
+  PRIVATE
+  IRLib
+  GTest::gtest_main
+)
+
+set_target_properties(mid_ir_tests PROPERTIES
+  CXX_STANDARD 20
+  CXX_STANDARD_REQUIRED ON
+)
+
+gtest_discover_tests(mid_ir_tests)
+
+add_executable(materialize_tests
+  compiler/MaterializeTest.cpp
+)
+
+target_link_libraries(materialize_tests
+  PRIVATE
+  SandyCompilerLib
+  GTest::gtest_main
+)
+
+set_target_properties(materialize_tests PROPERTIES
+  CXX_STANDARD 20
+  CXX_STANDARD_REQUIRED ON
+)
+
+gtest_discover_tests(materialize_tests)

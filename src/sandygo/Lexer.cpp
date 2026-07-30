@@ -1,7 +1,7 @@
 #include "Lexer.h"
 #include <cctype>
 
-namespace sandygo {
+namespace sandy::sandygo {
 
 const char* tokenKindName(TokenKind kind) {
     switch (kind) {
@@ -269,4 +269,4 @@ std::vector<Token> Lexer::tokenize() {
     return tokens;
 }
 
-} // namespace sandygo
+} // namespace sandy::sandygo

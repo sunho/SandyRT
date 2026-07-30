@@ -5,7 +5,7 @@
 #include <sstream>
 #include <string>
 
-using namespace sandygo;
+using namespace sandy::sandygo;
 
 static void indent(int depth) {
     for (int i = 0; i < depth; i++) std::cout << "  ";

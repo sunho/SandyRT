@@ -5,7 +5,7 @@
 #include <string>
 #include <vector>
 
-namespace sandygo {
+namespace sandy::sandygo {
 
 struct Expr;
 struct Stmt;
@@ -184,4 +184,4 @@ inline ExprPtr makeIndex(ExprPtr target, ExprPtr index,
     return e;
 }
 
-} // namespace sandygo
+} // namespace sandy::sandygo

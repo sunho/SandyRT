@@ -7,7 +7,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace weight {
+namespace sandy::weight {
 
 class EagerSafeTensorWeights : public Weights {
 public:
@@ -32,4 +32,4 @@ private:
     std::vector<std::string> names_;
 };
 
-} // namespace weight
+} // namespace sandy::weight

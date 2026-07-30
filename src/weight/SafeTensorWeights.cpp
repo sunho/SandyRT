@@ -7,7 +7,7 @@
 #include <cstring>
 #include <fstream>
 
-namespace weight {
+namespace sandy::weight {
 
 static ir::DType parse_dtype(const std::string& s) {
     if (s == "F32") return ir::DType::F32;
@@ -105,4 +105,4 @@ std::span<const uint8_t> EagerSafeTensorWeights::get_buffer(
     return {data_.data() + dataOffset_ + it->second.offset, it->second.size};
 }
 
-} // namespace weight
+} // namespace sandy::weight

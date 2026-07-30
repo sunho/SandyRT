@@ -1,8 +1,7 @@
 #include "HighIR.h"
 #include <iostream>
-#include <sstream>
 
-namespace high_ir {
+namespace sandy::ir::high_ir {
 
 const char* typeName(Type type) {
     switch (type) {
@@ -15,104 +14,95 @@ const char* typeName(Type type) {
 }
 
 Attr Attr::fromInt(const std::string& name, int64_t v) {
-    Attr a;
-    a.name = name;
-    a.type = Type::Int;
-    a.intVal = v;
-    return a;
+    Attr a; a.name = name; a.type = Type::Int; a.intVal = v; return a;
 }
 
 Attr Attr::fromFloat(const std::string& name, double v) {
-    Attr a;
-    a.name = name;
-    a.type = Type::Float;
-    a.floatVal = v;
-    return a;
+    Attr a; a.name = name; a.type = Type::Float; a.floatVal = v; return a;
 }
 
 Attr Attr::fromString(const std::string& name, const std::string& v) {
-    Attr a;
-    a.name = name;
-    a.type = Type::String;
-    a.strVal = v;
-    return a;
+    Attr a; a.name = name; a.type = Type::String; a.strVal = v; return a;
 }
 
-Value Graph::addInput(const std::string& name) {
-    Op op;
+Value* Graph::newValue(Type type) {
+    auto& v = values_.emplace_back();
+    v.id = nextId_++;
+    v.type = type;
+    return &v;
+}
+
+Value* Graph::addInput(const std::string& name) {
+    auto& op = ops_.emplace_back();
     op.kind = Op::Input;
     op.inputName = name;
-    auto v = newValue(Type::Node);
+    auto* v = newValue(Type::Node);
+    v->def = &op;
     op.results.push_back(v);
-    ops_.push_back(std::move(op));
     return v;
 }
 
-Value Graph::addWeight(const std::string& name) {
-    Op op;
+Value* Graph::addWeight(const std::string& name) {
+    auto& op = ops_.emplace_back();
     op.kind = Op::Weight;
     op.weightName = name;
-    auto v = newValue(Type::Node);
+    auto* v = newValue(Type::Node);
+    v->def = &op;
     op.results.push_back(v);
-    ops_.push_back(std::move(op));
     return v;
 }
 
-Value Graph::addIntConst(int64_t val) {
-    Op op;
+Value* Graph::addIntConst(int64_t val) {
+    auto& op = ops_.emplace_back();
     op.kind = Op::IntConst;
     op.intVal = val;
-    auto v = newValue(Type::Int);
+    auto* v = newValue(Type::Int);
+    v->def = &op;
     op.results.push_back(v);
-    ops_.push_back(std::move(op));
     return v;
 }
 
-Value Graph::addFloatConst(double val) {
-    Op op;
+Value* Graph::addFloatConst(double val) {
+    auto& op = ops_.emplace_back();
     op.kind = Op::FloatConst;
     op.floatVal = val;
-    auto v = newValue(Type::Float);
+    auto* v = newValue(Type::Float);
+    v->def = &op;
     op.results.push_back(v);
-    ops_.push_back(std::move(op));
     return v;
 }
 
-Value Graph::addStringConst(const std::string& val) {
-    Op op;
+Value* Graph::addStringConst(const std::string& val) {
+    auto& op = ops_.emplace_back();
     op.kind = Op::StringConst;
     op.strVal = val;
-    auto v = newValue(Type::String);
+    auto* v = newValue(Type::String);
+    v->def = &op;
     op.results.push_back(v);
-    ops_.push_back(std::move(op));
     return v;
 }
 
-std::vector<Value> Graph::addBuiltin(const std::string& name,
-                                     const std::vector<Value>& operands,
-                                     const std::vector<Attr>& attrs,
-                                     int numResults) {
-    Op op;
+std::vector<Value*> Graph::addBuiltin(const std::string& name,
+                                      const std::vector<Value*>& operands,
+                                      const std::vector<Attr>& attrs,
+                                      int numResults) {
+    auto& op = ops_.emplace_back();
     op.kind = Op::Builtin;
     op.name = name;
     op.operands = operands;
     op.attrs = attrs;
-    std::vector<Value> results;
+    std::vector<Value*> results;
     for (int i = 0; i < numResults; i++) {
-        auto v = newValue(Type::Node);
+        auto* v = newValue(Type::Node);
+        v->def = &op;
         op.results.push_back(v);
         results.push_back(v);
     }
-    ops_.push_back(std::move(op));
     return results;
 }
 
-void Graph::setOutputs(const std::vector<Value>& outputs) {
+void Graph::setOutputs(const std::vector<Value*>& outputs) {
     outputs_ = outputs;
-}
-
-static void printValue(const Value& v) {
-    std::cout << "%" << v.id;
 }
 
 static void printAttrVal(const Attr& a) {
@@ -127,41 +117,34 @@ static void printAttrVal(const Attr& a) {
 void Graph::dump() const {
     for (auto& op : ops_) {
         switch (op.kind) {
-            case Op::Input: {
-                printValue(op.results[0]);
-                std::cout << " = input(\"" << op.inputName << "\") : node\n";
+            case Op::Input:
+                std::cout << "%" << op.results[0]->id
+                          << " = input(\"" << op.inputName << "\") : node\n";
                 break;
-            }
-            case Op::Weight: {
-                printValue(op.results[0]);
-                std::cout << " = weight(\"" << op.weightName << "\") : node\n";
+            case Op::Weight:
+                std::cout << "%" << op.results[0]->id
+                          << " = weight(\"" << op.weightName << "\") : node\n";
                 break;
-            }
-            case Op::IntConst: {
-                printValue(op.results[0]);
-                std::cout << " = int(" << op.intVal << ")\n";
+            case Op::IntConst:
+                std::cout << "%" << op.results[0]->id
+                          << " = int(" << op.intVal << ")\n";
                 break;
-            }
-            case Op::FloatConst: {
-                printValue(op.results[0]);
-                std::cout << " = float(" << op.floatVal << ")\n";
+            case Op::FloatConst:
+                std::cout << "%" << op.results[0]->id
+                          << " = float(" << op.floatVal << ")\n";
                 break;
-            }
-            case Op::StringConst: {
-                printValue(op.results[0]);
-                std::cout << " = string(\"" << op.strVal << "\")\n";
+            case Op::StringConst:
+                std::cout << "%" << op.results[0]->id
+                          << " = string(\"" << op.strVal << "\")\n";
                 break;
-            }
-            case Op::Builtin: {
+            case Op::Builtin:
                 for (size_t i = 0; i < op.results.size(); i++) {
                     if (i > 0) std::cout << ", ";
-                    printValue(op.results[i]);
+                    std::cout << "%" << op.results[i]->id;
                 }
                 std::cout << " = builtin(\"" << op.name << "\"";
-                for (auto& v : op.operands) {
-                    std::cout << ", ";
-                    printValue(v);
-                }
+                for (auto* v : op.operands)
+                    std::cout << ", %" << v->id;
                 for (auto& a : op.attrs) {
                     std::cout << ", " << a.name << "=";
                     printAttrVal(a);
@@ -169,11 +152,10 @@ void Graph::dump() const {
                 std::cout << ") : ";
                 for (size_t i = 0; i < op.results.size(); i++) {
                     if (i > 0) std::cout << ", ";
-                    std::cout << typeName(op.results[i].type);
+                    std::cout << typeName(op.results[i]->type);
                 }
                 std::cout << "\n";
                 break;
-            }
         }
     }
 
@@ -181,10 +163,10 @@ void Graph::dump() const {
         std::cout << "return ";
         for (size_t i = 0; i < outputs_.size(); i++) {
             if (i > 0) std::cout << ", ";
-            printValue(outputs_[i]);
+            std::cout << "%" << outputs_[i]->id;
         }
         std::cout << "\n";
     }
 }
 
-} // namespace high_ir
+} // namespace sandy::ir::high_ir

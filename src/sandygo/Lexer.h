@@ -3,7 +3,7 @@
 #include <string>
 #include <vector>
 
-namespace sandygo {
+namespace sandy::sandygo {
 
 enum class TokenKind {
     Func, Return, For, If, Else, Var, WeightScope,
@@ -72,4 +72,4 @@ private:
     bool hasError_ = false;
 };
 
-} // namespace sandygo
+} // namespace sandy::sandygo

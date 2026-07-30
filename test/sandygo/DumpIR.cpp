@@ -23,22 +23,22 @@ int main(int argc, char* argv[]) {
     ss << file.rdbuf();
     std::string source = ss.str();
 
-    sandygo::Lexer lexer(source);
+    sandy::sandygo::Lexer lexer(source);
     auto tokens = lexer.tokenize();
     if (lexer.hasError()) {
         std::cerr << "lexer error: " << lexer.errorMessage() << "\n";
         return 1;
     }
 
-    sandygo::Parser parser(std::move(tokens));
+    sandy::sandygo::Parser parser(std::move(tokens));
     auto program = parser.parse();
     if (parser.hasError()) {
         std::cerr << "parser error: " << parser.errorMessage() << "\n";
         return 1;
     }
 
-    high_ir::Graph graph;
-    sandygo::Interpreter interp(program, graph);
+    sandy::ir::high_ir::Graph graph;
+    sandy::sandygo::Interpreter interp(program, graph);
     interp.interpret();
     graph.dump();
     return 0;

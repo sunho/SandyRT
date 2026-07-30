@@ -2,7 +2,7 @@
 #include "Parser.h"
 #include <gtest/gtest.h>
 
-using namespace sandygo;
+using namespace sandy::sandygo;
 
 static Program parseSource(const std::string& src) {
     Lexer lexer(src);

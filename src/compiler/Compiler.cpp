@@ -1,4 +1,5 @@
 #include "Compiler.h"
+#include "MidIRMaterializer.h"
 #include "Lexer.h"
 #include "Parser.h"
 #include "Interpreter.h"
@@ -9,7 +10,7 @@
 
 namespace sandy {
 
-high_ir::Graph Compiler::load_sandygo(const std::string& path) {
+ir::high_ir::Graph Compiler::load_sandygo(const std::string& path) {
     std::ifstream file(path);
     if (!file) {
         fprintf(stderr, "cannot open %s\n", path.c_str());
@@ -32,16 +33,18 @@ high_ir::Graph Compiler::load_sandygo(const std::string& path) {
         abort();
     }
 
-    high_ir::Graph graph;
+    ir::high_ir::Graph graph;
     sandygo::Interpreter interp(program, graph);
     interp.interpret();
     return graph;
 }
 
-mid_ir::Graph Compiler::materialize_mid_ir(const high_ir::Graph& graph,
-                                           const weight::Weights& weights) {
-    // TODO: implement
-    return mid_ir::Graph{};
+Result<ir::mid_ir::Graph> Compiler::materialize_mid_ir(
+        const ir::high_ir::Graph& graph,
+        const weight::Weights& weights,
+        const ir::mid_ir::MaterializeOptions& options) {
+    ir::mid_ir::MidIRMaterializer materializer;
+    return materializer.materialize(graph, weights, options);
 }
 
 } // namespace sandy

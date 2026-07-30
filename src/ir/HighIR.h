@@ -1,18 +1,22 @@
 #pragma once
 
 #include <cstdint>
+#include <deque>
 #include <string>
 #include <vector>
 
-namespace high_ir {
+namespace sandy::ir::high_ir {
 
 enum class Type { Node, Int, Float, String };
 
 const char* typeName(Type type);
 
+struct Op;
+
 struct Value {
     int id;
     Type type;
+    Op* def = nullptr;
 };
 
 struct Attr {
@@ -30,10 +34,10 @@ struct Attr {
 struct Op {
     enum Kind { Input, Builtin, Weight, IntConst, FloatConst, StringConst };
     Kind kind;
-    std::vector<Value> results;
+    std::vector<Value*> results;
 
     std::string name;
-    std::vector<Value> operands;
+    std::vector<Value*> operands;
     std::vector<Attr> attrs;
 
     std::string weightName;
@@ -46,28 +50,29 @@ struct Op {
 
 class Graph {
 public:
-    Value addInput(const std::string& name);
-    Value addWeight(const std::string& name);
-    Value addIntConst(int64_t val);
-    Value addFloatConst(double val);
-    Value addStringConst(const std::string& val);
-    std::vector<Value> addBuiltin(const std::string& name,
-                                  const std::vector<Value>& operands,
-                                  const std::vector<Attr>& attrs,
-                                  int numResults);
+    Value* addInput(const std::string& name);
+    Value* addWeight(const std::string& name);
+    Value* addIntConst(int64_t val);
+    Value* addFloatConst(double val);
+    Value* addStringConst(const std::string& val);
+    std::vector<Value*> addBuiltin(const std::string& name,
+                                   const std::vector<Value*>& operands,
+                                   const std::vector<Attr>& attrs,
+                                   int numResults);
 
-    void setOutputs(const std::vector<Value>& outputs);
+    void setOutputs(const std::vector<Value*>& outputs);
     void dump() const;
 
-    const std::vector<Op>& ops() const { return ops_; }
-    const std::vector<Value>& outputs() const { return outputs_; }
+    const std::deque<Op>& ops() const { return ops_; }
+    const std::vector<Value*>& outputs() const { return outputs_; }
 
 private:
-    std::vector<Op> ops_;
-    std::vector<Value> outputs_;
+    std::deque<Value> values_;
+    std::deque<Op> ops_;
+    std::vector<Value*> outputs_;
     int nextId_ = 0;
 
-    Value newValue(Type type) { return {nextId_++, type}; }
+    Value* newValue(Type type);
 };
 
-} // namespace high_ir
+} // namespace sandy::ir::high_ir

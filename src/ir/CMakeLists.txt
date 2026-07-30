@@ -1,10 +1,18 @@
 add_library(IRLib
+  BuiltinLowering.cpp
   HighIR.cpp
+  MidIR.cpp
+  MidIRMaterializer.cpp
   Shape.cpp
 )
 
 target_include_directories(IRLib
   PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
+  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../weight
+)
+
+target_link_libraries(IRLib
+  PUBLIC CoreLib
 )
 
 set_target_properties(IRLib PROPERTIES

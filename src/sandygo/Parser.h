@@ -4,7 +4,7 @@
 #include "Lexer.h"
 #include <vector>
 
-namespace sandygo {
+namespace sandy::sandygo {
 
 class Parser {
 public:
@@ -56,4 +56,4 @@ private:
     bool hasError_ = false;
 };
 
-} // namespace sandygo
+} // namespace sandy::sandygo

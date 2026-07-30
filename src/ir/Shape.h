@@ -5,7 +5,7 @@
 #include <string>
 #include <vector>
 
-namespace ir {
+namespace sandy::ir {
 
 enum class DType { F32, F16, BF16, I32, I64, U8 };
 
@@ -37,9 +37,13 @@ private:
 };
 
 struct TensorDesc {
+    TensorDesc() = default;
+    TensorDesc(Shape shape, DType dtype) : shape(std::move(shape)), dtype(dtype) {}
+    TensorDesc(std::string name, Shape shape, DType dtype)
+        : name(std::move(name)), shape(std::move(shape)), dtype(dtype) {}
     std::string name;
     Shape shape;
     DType dtype;
 };
 
-} // namespace ir
+} // namespace sandy::ir

@@ -1,7 +1,7 @@
 #include "Lexer.h"
 #include <gtest/gtest.h>
 
-using namespace sandygo;
+using namespace sandy::sandygo;
 
 static std::vector<Token> lex(const std::string& src) {
     Lexer lexer(src);

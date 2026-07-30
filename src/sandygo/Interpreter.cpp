@@ -2,9 +2,9 @@
 #include <cstdio>
 #include <cstdlib>
 
-namespace sandygo {
+namespace sandy::sandygo {
 
-Interpreter::Interpreter(const Program& program, high_ir::Graph& graph)
+Interpreter::Interpreter(const Program& program, ir::high_ir::Graph& graph)
     : program_(program), graph_(graph) {
     for (auto& func : program_.funcs) {
         funcTable_[func.name] = &func;
@@ -26,7 +26,7 @@ void Interpreter::interpret() {
     RuntimeValue result = callFunc(mainFunc, mainArgs);
 
     if (result.kind == RuntimeValue::Tuple) {
-        std::vector<high_ir::Value> outputs;
+        std::vector<ir::high_ir::Value*> outputs;
         for (auto& v : result.tupleVals)
             outputs.push_back(toGraphValue(v));
         graph_.setOutputs(outputs);
@@ -205,24 +205,24 @@ RuntimeValue Interpreter::evalCall(const Expr& expr) {
         int saved = expectedResults_;
         expectedResults_ = 1;
 
-        std::vector<high_ir::Value> operands;
+        std::vector<ir::high_ir::Value*> operands;
         for (auto& arg : expr.args) {
             RuntimeValue val = evalExpr(*arg);
             operands.push_back(toGraphValue(val));
         }
 
-        std::vector<high_ir::Attr> attrs;
+        std::vector<ir::high_ir::Attr> attrs;
         for (auto& na : expr.namedArgs) {
             RuntimeValue val = evalExpr(*na.value);
             switch (val.kind) {
                 case RuntimeValue::Int:
-                    attrs.push_back(high_ir::Attr::fromInt(na.name, val.intVal));
+                    attrs.push_back(ir::high_ir::Attr::fromInt(na.name, val.intVal));
                     break;
                 case RuntimeValue::Float:
-                    attrs.push_back(high_ir::Attr::fromFloat(na.name, val.floatVal));
+                    attrs.push_back(ir::high_ir::Attr::fromFloat(na.name, val.floatVal));
                     break;
                 case RuntimeValue::String:
-                    attrs.push_back(high_ir::Attr::fromString(na.name, val.strVal));
+                    attrs.push_back(ir::high_ir::Attr::fromString(na.name, val.strVal));
                     break;
                 default:
                     error("named arg '" + na.name + "' must be compile-time");
@@ -357,7 +357,7 @@ std::string Interpreter::interpolateString(const std::string& s) {
     return result;
 }
 
-high_ir::Value Interpreter::toGraphValue(const RuntimeValue& val) {
+ir::high_ir::Value* Interpreter::toGraphValue(const RuntimeValue& val) {
     switch (val.kind) {
         case RuntimeValue::NodeVal: return val.nodeVal;
         case RuntimeValue::Int:     return graph_.addIntConst(val.intVal);
@@ -372,4 +372,4 @@ void Interpreter::error(const std::string& msg) {
     abort();
 }
 
-} // namespace sandygo
+} // namespace sandy::sandygo

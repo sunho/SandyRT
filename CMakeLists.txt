@@ -58,6 +58,7 @@ set(CMAKE_CXX_STANDARD 20 CACHE STRING "" FORCE)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 add_subdirectory(external/json)
+add_subdirectory(src/core)
 add_subdirectory(src/ir)
 add_subdirectory(src/sandygo)
 add_subdirectory(src/weight)

@@ -14,8 +14,14 @@ int main(int argc, char* argv[]) {
     graph.dump();
 
     if (argc >= 3) {
-        auto weights = weight::EagerSafeTensorWeights::load(argv[2]);
-        auto midGraph = compiler.materialize_mid_ir(graph, weights);
+        auto weights = sandy::weight::EagerSafeTensorWeights::load(argv[2]);
+        auto result = compiler.materialize_mid_ir(graph, weights);
+        if (!result) {
+            fprintf(stderr, "materialize error: %s\n", result.error().c_str());
+            return 1;
+        }
+        auto midGraph = result.take();
+        midGraph.dump();
     }
 
     return 0;

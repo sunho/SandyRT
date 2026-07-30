@@ -7,7 +7,7 @@
 #include <string>
 #include <vector>
 
-namespace weight {
+namespace sandy::weight {
 
 class Weights {
 public:
@@ -18,4 +18,4 @@ public:
     virtual std::span<const uint8_t> get_buffer(const std::string& name) const = 0;
 };
 
-} // namespace weight
+} // namespace sandy::weight

@@ -7,7 +7,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace sandygo {
+namespace sandy::sandygo {
 
 struct RuntimeValue {
     enum Kind { Void, Int, Float, String, NodeVal, Tuple };
@@ -15,7 +15,7 @@ struct RuntimeValue {
     int64_t intVal = 0;
     double floatVal = 0.0;
     std::string strVal;
-    high_ir::Value nodeVal = {-1, high_ir::Type::Node};
+    ir::high_ir::Value* nodeVal = nullptr;
     std::vector<RuntimeValue> tupleVals;
 
     static RuntimeValue makeInt(int64_t v) {
@@ -27,7 +27,7 @@ struct RuntimeValue {
     static RuntimeValue makeString(const std::string& v) {
         RuntimeValue rv; rv.kind = String; rv.strVal = v; return rv;
     }
-    static RuntimeValue makeNode(high_ir::Value v) {
+    static RuntimeValue makeNode(ir::high_ir::Value* v) {
         RuntimeValue rv; rv.kind = NodeVal; rv.nodeVal = v; return rv;
     }
     static RuntimeValue makeTuple(std::vector<RuntimeValue> vals) {
@@ -38,12 +38,12 @@ struct RuntimeValue {
 
 class Interpreter {
 public:
-    Interpreter(const Program& program, high_ir::Graph& graph);
+    Interpreter(const Program& program, ir::high_ir::Graph& graph);
     void interpret();
 
 private:
     const Program& program_;
-    high_ir::Graph& graph_;
+    ir::high_ir::Graph& graph_;
 
     std::unordered_map<std::string, const FuncDecl*> funcTable_;
 
@@ -79,9 +79,9 @@ private:
 
     std::string resolveWeight(const std::string& localName);
     std::string interpolateString(const std::string& s);
-    high_ir::Value toGraphValue(const RuntimeValue& val);
+    ir::high_ir::Value* toGraphValue(const RuntimeValue& val);
 
     [[noreturn]] void error(const std::string& msg);
 };
 
-} // namespace sandygo
+} // namespace sandy::sandygo
