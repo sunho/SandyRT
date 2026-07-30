@@ -52,7 +52,7 @@ Result<std::unique_ptr<Plan>> Engine::create_plan(const ir::mid_ir::Graph& graph
     return plan;
 }
 
-Result<void> Engine::run(
+Result<backend::BackendRunResult> Engine::run(
         const Plan& plan,
         const TensorMap& inputs,
         const TensorMap& weights,

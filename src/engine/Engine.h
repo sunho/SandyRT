@@ -23,7 +23,7 @@ public:
 
     Result<std::unique_ptr<Plan>> create_plan(const ir::mid_ir::Graph& graph);
 
-    Result<void> run(
+    Result<backend::BackendRunResult> run(
         const Plan& plan,
         const TensorMap& inputs,
         const TensorMap& weights,

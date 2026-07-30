@@ -100,3 +100,19 @@ set_target_properties(engine_tests PROPERTIES
 )
 
 gtest_discover_tests(engine_tests)
+
+add_executable(cpu_runner
+  engine/CpuRunner.cpp
+)
+
+target_link_libraries(cpu_runner
+  PRIVATE
+  SandyCompilerLib
+  EngineLib
+  WeightLib
+)
+
+set_target_properties(cpu_runner PROPERTIES
+  CXX_STANDARD 20
+  CXX_STANDARD_REQUIRED ON
+)

@@ -1,6 +1,7 @@
 add_library(CoreLib
   Tensor.cpp
   TensorBuffer.cpp
+  TensorCalc.cpp
 )
 
 target_include_directories(CoreLib

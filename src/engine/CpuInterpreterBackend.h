@@ -11,10 +11,10 @@ public:
     Result<std::unique_ptr<Program>> compile(
         const ir::mid_ir::Graph& graph) override;
 
-    Result<void> run(
+    Result<BackendRunResult> run(
         const Program& program,
-        const BackendBufferMap& inputs,
-        const BackendBufferMap& weights,
+        BackendBufferMap inputs,
+        BackendBufferMap weights,
         const RunOptions& options) override;
 };
 

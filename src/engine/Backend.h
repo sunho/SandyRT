@@ -5,6 +5,7 @@
 #include "TensorBuffer.h"
 
 #include <memory>
+#include <span>
 #include <string>
 #include <unordered_map>
 
@@ -23,10 +24,12 @@ class BackendBuffer {
 public:
     virtual ~BackendBuffer() = default;
     virtual const core::TensorDesc& desc() const = 0;
+    virtual std::span<const uint8_t> data() const = 0;
 };
 
-using BackendBufferPtr = std::shared_ptr<BackendBuffer>;
+using BackendBufferPtr = std::unique_ptr<BackendBuffer>;
 using BackendBufferMap = std::unordered_map<std::string, BackendBufferPtr>;
+using BackendRunResult = BackendBufferMap;
 
 class Backend {
 public:
@@ -37,10 +40,10 @@ public:
     virtual Result<std::unique_ptr<Program>> compile(
         const ir::mid_ir::Graph& graph) = 0;
 
-    virtual Result<void> run(
+    virtual Result<BackendRunResult> run(
         const Program& program,
-        const BackendBufferMap& inputs,
-        const BackendBufferMap& weights,
+        BackendBufferMap inputs,
+        BackendBufferMap weights,
         const RunOptions& options) = 0;
 };
 

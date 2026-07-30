@@ -1,9 +1,16 @@
 #include "CpuInterpreterBackend.h"
 
 #include "MidIR.h"
+#include "TensorCalc.h"
 
+#include <cstdio>
+#include <cstdlib>
 #include <memory>
+#include <span>
+#include <string>
+#include <unordered_map>
 #include <utility>
+#include <vector>
 
 namespace sandy::engine::backend {
 
@@ -22,25 +29,160 @@ private:
 
 class CpuBackendBuffer final : public BackendBuffer {
 public:
-    explicit CpuBackendBuffer(core::TensorBuffer::Access access)
-        : access_(std::move(access)) {
-        (void)access_.data();
-    }
+    CpuBackendBuffer(core::TensorDesc desc, std::vector<uint8_t> data)
+        : desc_(std::move(desc)), data_(std::move(data)) {}
 
-    const core::TensorDesc& desc() const override { return access_.desc(); }
+    const core::TensorDesc& desc() const override { return desc_; }
+    std::span<const uint8_t> data() const override { return data_; }
 
 private:
-    core::TensorBuffer::Access access_;
+    core::TensorDesc desc_;
+    std::vector<uint8_t> data_;
 };
 
-Result<void> validate_buffers(const BackendBufferMap& buffers) {
-    for (const auto& [name, buffer] : buffers) {
-        if (!buffer)
-            return make_error("null backend buffer for '" + name + "'");
-
-        (void)buffer->desc();
+std::string attr_string(const ir::mid_ir::Op& op, const std::string& name) {
+    auto it = op.attrs.find(name);
+    if (it == op.attrs.end() || it->second.kind != ir::mid_ir::AttrValue::String) {
+        fprintf(stderr, "missing string attr '%s'\n", name.c_str());
+        abort();
     }
+    return it->second.strVal;
+}
+
+Result<const BackendBuffer*> lookup_buffer(
+        const BackendBufferMap& buffers,
+        const std::string& name,
+        const std::string& kind) {
+    auto it = buffers.find(name);
+    if (it == buffers.end())
+        return make_error("missing " + kind + " buffer: " + name);
+    if (!it->second)
+        return make_error("null " + kind + " buffer: " + name);
+    return it->second.get();
+}
+
+Result<const BackendBuffer*> lookup_value(
+        const std::unordered_map<const ir::mid_ir::Value*, const BackendBuffer*>& values,
+        const ir::mid_ir::Value* value) {
+    auto it = values.find(value);
+    if (it == values.end())
+        return make_error("value not available during cpu interpretation");
+    return it->second;
+}
+
+std::unique_ptr<CpuBackendBuffer> make_cpu_buffer(core::OwnedTensor tensor) {
+    return std::make_unique<CpuBackendBuffer>(
+        std::move(tensor.desc), std::move(tensor.data));
+}
+
+Result<void> bind_single_result(
+        const ir::mid_ir::Op& op,
+        const BackendBuffer* buffer,
+        std::unordered_map<const ir::mid_ir::Value*, const BackendBuffer*>& values) {
+    if (op.results.size() != 1)
+        return make_error("cpu interpreter expects single-result ops");
+    values[op.results[0]] = buffer;
     return {};
+}
+
+Result<core::OwnedTensor> eval_linear(
+        const ir::mid_ir::Op& op,
+        const std::unordered_map<const ir::mid_ir::Value*, const BackendBuffer*>& values) {
+    if (op.operands.size() != 3)
+        return make_error("linear expects three operands");
+
+    auto x = lookup_value(values, op.operands[0]);
+    if (!x) return make_error(x.error());
+    auto weight = lookup_value(values, op.operands[1]);
+    if (!weight) return make_error(weight.error());
+    auto bias = lookup_value(values, op.operands[2]);
+    if (!bias) return make_error(bias.error());
+
+    return core::linear_f32(
+        (*x)->data(), (*x)->desc(),
+        (*weight)->data(), (*weight)->desc(),
+        (*bias)->data(), (*bias)->desc());
+}
+
+Result<core::OwnedTensor> eval_relu(
+        const ir::mid_ir::Op& op,
+        const std::unordered_map<const ir::mid_ir::Value*, const BackendBuffer*>& values) {
+    if (op.operands.size() != 1)
+        return make_error("relu expects one operand");
+
+    auto x = lookup_value(values, op.operands[0]);
+    if (!x) return make_error(x.error());
+
+    return core::relu_f32((*x)->data(), (*x)->desc());
+}
+
+Result<void> copy_output(BackendBufferMap& outputs,
+                         const std::string& name,
+                         const BackendBuffer& source) {
+    auto desc = source.desc();
+    desc.name = name;
+    auto view = source.data();
+    outputs[name] = std::make_unique<CpuBackendBuffer>(
+        std::move(desc),
+        std::vector<uint8_t>(view.begin(), view.end()));
+    return {};
+}
+
+Result<BackendRunResult> interpret_graph(
+        const ir::mid_ir::Graph& graph,
+        BackendBufferMap inputs,
+        BackendBufferMap weights) {
+    std::unordered_map<const ir::mid_ir::Value*, const BackendBuffer*> values;
+    std::vector<std::unique_ptr<CpuBackendBuffer>> temporaries;
+
+    for (auto* op : graph.entry()->ops) {
+        switch (op->kind) {
+            case ir::mid_ir::OpKind::Input: {
+                auto name = attr_string(*op, "name");
+                auto buffer = lookup_buffer(inputs, name, "input");
+                if (!buffer) return make_error(buffer.error());
+                auto bind = bind_single_result(*op, *buffer, values);
+                if (!bind) return make_error(bind.error());
+                break;
+            }
+            case ir::mid_ir::OpKind::Weight: {
+                auto name = attr_string(*op, "name");
+                auto buffer = lookup_buffer(weights, name, "weight");
+                if (!buffer) return make_error(buffer.error());
+                auto bind = bind_single_result(*op, *buffer, values);
+                if (!bind) return make_error(bind.error());
+                break;
+            }
+            case ir::mid_ir::OpKind::Linear: {
+                auto tensor = eval_linear(*op, values);
+                if (!tensor) return make_error(tensor.error());
+                temporaries.push_back(make_cpu_buffer(tensor.take()));
+                auto bind = bind_single_result(*op, temporaries.back().get(), values);
+                if (!bind) return make_error(bind.error());
+                break;
+            }
+            case ir::mid_ir::OpKind::ReLU: {
+                auto tensor = eval_relu(*op, values);
+                if (!tensor) return make_error(tensor.error());
+                temporaries.push_back(make_cpu_buffer(tensor.take()));
+                auto bind = bind_single_result(*op, temporaries.back().get(), values);
+                if (!bind) return make_error(bind.error());
+                break;
+            }
+            case ir::mid_ir::OpKind::NUM_KINDS:
+                return make_error("invalid op kind");
+        }
+    }
+
+    BackendRunResult outputs;
+    const auto& graphOutputs = graph.outputs();
+    for (size_t i = 0; i < graphOutputs.size(); i++) {
+        auto value = lookup_value(values, graphOutputs[i]);
+        if (!value) return make_error(value.error());
+        auto copy = copy_output(outputs, "output" + std::to_string(i), **value);
+        if (!copy) return make_error(copy.error());
+    }
+    return outputs;
 }
 
 } // namespace
@@ -50,7 +192,10 @@ Result<BackendBufferPtr> CpuInterpreterBackend::create_buffer(core::TensorBuffer
     if (!access)
         return make_error(access.error());
 
-    BackendBufferPtr backendBuffer = std::make_shared<CpuBackendBuffer>(access.take());
+    auto view = (*access).data();
+    BackendBufferPtr backendBuffer = std::make_unique<CpuBackendBuffer>(
+        (*access).desc(),
+        std::vector<uint8_t>(view.begin(), view.end()));
     return backendBuffer;
 }
 
@@ -60,18 +205,13 @@ Result<std::unique_ptr<Program>> CpuInterpreterBackend::compile(
     return program;
 }
 
-Result<void> CpuInterpreterBackend::run(
+Result<BackendRunResult> CpuInterpreterBackend::run(
         const Program& program,
-        const BackendBufferMap& inputs,
-        const BackendBufferMap& weights,
+        BackendBufferMap inputs,
+        BackendBufferMap weights,
         const RunOptions&) {
-    (void)program;
-
-    auto inputResult = validate_buffers(inputs);
-    if (!inputResult)
-        return inputResult;
-
-    return validate_buffers(weights);
+    const auto& cpuProgram = static_cast<const CpuProgram&>(program);
+    return interpret_graph(cpuProgram.graph(), std::move(inputs), std::move(weights));
 }
 
 } // namespace sandy::engine::backend
