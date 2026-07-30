@@ -1,22 +1,22 @@
 #include "Compiler.h"
+#include "SafeTensorWeights.h"
 
-#include "llvm/Support/CommandLine.h"
-#include "llvm/Support/raw_ostream.h"
+#include <cstdio>
 
-static llvm::cl::opt<std::string> inputFilename(
-    llvm::cl::Positional, llvm::cl::desc("<input .mlir file>"),
-    llvm::cl::Required);
+int main(int argc, char* argv[]) {
+    if (argc < 2) {
+        fprintf(stderr, "usage: sandy <model.sandy.go> [weights.safetensors]\n");
+        return 1;
+    }
 
-int main(int argc, char **argv) {
-  llvm::cl::ParseCommandLineOptions(argc, argv, "Sandy Compiler\n");
+    sandy::Compiler compiler;
+    auto graph = compiler.load_sandygo(argv[1]);
+    graph.dump();
 
-  sandy::Compiler compiler;
-  auto module = compiler.loadModule(inputFilename);
-  if (!module) {
-    llvm::errs() << "Failed to parse: " << inputFilename << "\n";
-    return 1;
-  }
+    if (argc >= 3) {
+        auto weights = weight::EagerSafeTensorWeights::load(argv[2]);
+        auto midGraph = compiler.materialize_mid_ir(graph, weights);
+    }
 
-  compiler.dump(*module);
-  return 0;
+    return 0;
 }

@@ -8,10 +8,12 @@ target_include_directories(SandyCompilerLib
 
 target_link_libraries(SandyCompilerLib
   PUBLIC
-  StablehloRegister
-  StablehloOps
-  MLIRFuncDialect
-  MLIRParser
-  MLIRIR
-  MLIRSupport
+  IRLib
+  SandyGoLib
+  WeightLib
+)
+
+set_target_properties(SandyCompilerLib PROPERTIES
+  CXX_STANDARD 20
+  CXX_STANDARD_REQUIRED ON
 )

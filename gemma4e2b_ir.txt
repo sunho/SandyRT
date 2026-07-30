@@ -1,0 +1,638 @@
+%0 = input("input_ids") : node
+%1 = weight("language_model.model.embed_tokens.weight") : node
+%2 = builtin("embedding", %0, %1) : node
+%3 = int(1536)
+%4 = builtin("sqrt", %3) : node
+%5 = builtin("mul", %2, %4) : node
+%6 = weight("language_model.model.layers.0.input_layernorm.weight") : node
+%7 = builtin("rms_norm", %5, %6) : node
+%8 = weight("language_model.model.layers.0.self_attn.q_proj.weight") : node
+%9 = weight("language_model.model.layers.0.self_attn.k_proj.weight") : node
+%10 = weight("language_model.model.layers.0.self_attn.v_proj.weight") : node
+%11 = weight("language_model.model.layers.0.self_attn.o_proj.weight") : node
+%12, %13 = builtin("kv_attention", %7, %8, %9, %10, %11, heads=8, kv_heads=1, head_dim=256, window=512, rope_theta=10000) : node, node
+%14 = weight("language_model.model.layers.0.post_attention_layernorm.weight") : node
+%15 = builtin("rms_norm", %12, %14) : node
+%16 = builtin("add", %5, %15) : node
+%17 = weight("language_model.model.layers.0.pre_feedforward_layernorm.weight") : node
+%18 = builtin("rms_norm", %16, %17) : node
+%19 = weight("language_model.model.layers.0.mlp.gate_proj.weight") : node
+%20 = weight("language_model.model.layers.0.mlp.up_proj.weight") : node
+%21 = weight("language_model.model.layers.0.mlp.down_proj.weight") : node
+%22 = builtin("gated_mlp", %18, %19, %20, %21, act="gelu") : node
+%23 = weight("language_model.model.layers.0.post_feedforward_layernorm.weight") : node
+%24 = builtin("rms_norm", %22, %23) : node
+%25 = builtin("add", %16, %24) : node
+%26 = weight("language_model.model.layers.1.input_layernorm.weight") : node
+%27 = builtin("rms_norm", %25, %26) : node
+%28 = weight("language_model.model.layers.1.self_attn.q_proj.weight") : node
+%29 = weight("language_model.model.layers.1.self_attn.k_proj.weight") : node
+%30 = weight("language_model.model.layers.1.self_attn.v_proj.weight") : node
+%31 = weight("language_model.model.layers.1.self_attn.o_proj.weight") : node
+%32, %33 = builtin("kv_attention", %27, %28, %29, %30, %31, heads=8, kv_heads=1, head_dim=256, window=512, rope_theta=10000) : node, node
+%34 = weight("language_model.model.layers.1.post_attention_layernorm.weight") : node
+%35 = builtin("rms_norm", %32, %34) : node
+%36 = builtin("add", %25, %35) : node
+%37 = weight("language_model.model.layers.1.pre_feedforward_layernorm.weight") : node
+%38 = builtin("rms_norm", %36, %37) : node
+%39 = weight("language_model.model.layers.1.mlp.gate_proj.weight") : node
+%40 = weight("language_model.model.layers.1.mlp.up_proj.weight") : node
+%41 = weight("language_model.model.layers.1.mlp.down_proj.weight") : node
+%42 = builtin("gated_mlp", %38, %39, %40, %41, act="gelu") : node
+%43 = weight("language_model.model.layers.1.post_feedforward_layernorm.weight") : node
+%44 = builtin("rms_norm", %42, %43) : node
+%45 = builtin("add", %36, %44) : node
+%46 = weight("language_model.model.layers.2.input_layernorm.weight") : node
+%47 = builtin("rms_norm", %45, %46) : node
+%48 = weight("language_model.model.layers.2.self_attn.q_proj.weight") : node
+%49 = weight("language_model.model.layers.2.self_attn.k_proj.weight") : node
+%50 = weight("language_model.model.layers.2.self_attn.v_proj.weight") : node
+%51 = weight("language_model.model.layers.2.self_attn.o_proj.weight") : node
+%52, %53 = builtin("kv_attention", %47, %48, %49, %50, %51, heads=8, kv_heads=1, head_dim=256, window=512, rope_theta=10000) : node, node
+%54 = weight("language_model.model.layers.2.post_attention_layernorm.weight") : node
+%55 = builtin("rms_norm", %52, %54) : node
+%56 = builtin("add", %45, %55) : node
+%57 = weight("language_model.model.layers.2.pre_feedforward_layernorm.weight") : node
+%58 = builtin("rms_norm", %56, %57) : node
+%59 = weight("language_model.model.layers.2.mlp.gate_proj.weight") : node
+%60 = weight("language_model.model.layers.2.mlp.up_proj.weight") : node
+%61 = weight("language_model.model.layers.2.mlp.down_proj.weight") : node
+%62 = builtin("gated_mlp", %58, %59, %60, %61, act="gelu") : node
+%63 = weight("language_model.model.layers.2.post_feedforward_layernorm.weight") : node
+%64 = builtin("rms_norm", %62, %63) : node
+%65 = builtin("add", %56, %64) : node
+%66 = weight("language_model.model.layers.3.input_layernorm.weight") : node
+%67 = builtin("rms_norm", %65, %66) : node
+%68 = weight("language_model.model.layers.3.self_attn.q_proj.weight") : node
+%69 = weight("language_model.model.layers.3.self_attn.k_proj.weight") : node
+%70 = weight("language_model.model.layers.3.self_attn.v_proj.weight") : node
+%71 = weight("language_model.model.layers.3.self_attn.o_proj.weight") : node
+%72, %73 = builtin("kv_attention", %67, %68, %69, %70, %71, heads=8, kv_heads=1, head_dim=256, window=512, rope_theta=10000) : node, node
+%74 = weight("language_model.model.layers.3.post_attention_layernorm.weight") : node
+%75 = builtin("rms_norm", %72, %74) : node
+%76 = builtin("add", %65, %75) : node
+%77 = weight("language_model.model.layers.3.pre_feedforward_layernorm.weight") : node
+%78 = builtin("rms_norm", %76, %77) : node
+%79 = weight("language_model.model.layers.3.mlp.gate_proj.weight") : node
+%80 = weight("language_model.model.layers.3.mlp.up_proj.weight") : node
+%81 = weight("language_model.model.layers.3.mlp.down_proj.weight") : node
+%82 = builtin("gated_mlp", %78, %79, %80, %81, act="gelu") : node
+%83 = weight("language_model.model.layers.3.post_feedforward_layernorm.weight") : node
+%84 = builtin("rms_norm", %82, %83) : node
+%85 = builtin("add", %76, %84) : node
+%86 = weight("language_model.model.layers.4.input_layernorm.weight") : node
+%87 = builtin("rms_norm", %85, %86) : node
+%88 = weight("language_model.model.layers.4.self_attn.q_proj.weight") : node
+%89 = weight("language_model.model.layers.4.self_attn.k_proj.weight") : node
+%90 = weight("language_model.model.layers.4.self_attn.v_proj.weight") : node
+%91 = weight("language_model.model.layers.4.self_attn.o_proj.weight") : node
+%92, %93 = builtin("kv_attention", %87, %88, %89, %90, %91, heads=8, kv_heads=1, head_dim=512, window=0, rope_theta=1e+06) : node, node
+%94 = weight("language_model.model.layers.4.post_attention_layernorm.weight") : node
+%95 = builtin("rms_norm", %92, %94) : node
+%96 = builtin("add", %85, %95) : node
+%97 = weight("language_model.model.layers.4.pre_feedforward_layernorm.weight") : node
+%98 = builtin("rms_norm", %96, %97) : node
+%99 = weight("language_model.model.layers.4.mlp.gate_proj.weight") : node
+%100 = weight("language_model.model.layers.4.mlp.up_proj.weight") : node
+%101 = weight("language_model.model.layers.4.mlp.down_proj.weight") : node
+%102 = builtin("gated_mlp", %98, %99, %100, %101, act="gelu") : node
+%103 = weight("language_model.model.layers.4.post_feedforward_layernorm.weight") : node
+%104 = builtin("rms_norm", %102, %103) : node
+%105 = builtin("add", %96, %104) : node
+%106 = weight("language_model.model.layers.5.input_layernorm.weight") : node
+%107 = builtin("rms_norm", %105, %106) : node
+%108 = weight("language_model.model.layers.5.self_attn.q_proj.weight") : node
+%109 = weight("language_model.model.layers.5.self_attn.k_proj.weight") : node
+%110 = weight("language_model.model.layers.5.self_attn.v_proj.weight") : node
+%111 = weight("language_model.model.layers.5.self_attn.o_proj.weight") : node
+%112, %113 = builtin("kv_attention", %107, %108, %109, %110, %111, heads=8, kv_heads=1, head_dim=256, window=512, rope_theta=10000) : node, node
+%114 = weight("language_model.model.layers.5.post_attention_layernorm.weight") : node
+%115 = builtin("rms_norm", %112, %114) : node
+%116 = builtin("add", %105, %115) : node
+%117 = weight("language_model.model.layers.5.pre_feedforward_layernorm.weight") : node
+%118 = builtin("rms_norm", %116, %117) : node
+%119 = weight("language_model.model.layers.5.mlp.gate_proj.weight") : node
+%120 = weight("language_model.model.layers.5.mlp.up_proj.weight") : node
+%121 = weight("language_model.model.layers.5.mlp.down_proj.weight") : node
+%122 = builtin("gated_mlp", %118, %119, %120, %121, act="gelu") : node
+%123 = weight("language_model.model.layers.5.post_feedforward_layernorm.weight") : node
+%124 = builtin("rms_norm", %122, %123) : node
+%125 = builtin("add", %116, %124) : node
+%126 = weight("language_model.model.layers.6.input_layernorm.weight") : node
+%127 = builtin("rms_norm", %125, %126) : node
+%128 = weight("language_model.model.layers.6.self_attn.q_proj.weight") : node
+%129 = weight("language_model.model.layers.6.self_attn.k_proj.weight") : node
+%130 = weight("language_model.model.layers.6.self_attn.v_proj.weight") : node
+%131 = weight("language_model.model.layers.6.self_attn.o_proj.weight") : node
+%132, %133 = builtin("kv_attention", %127, %128, %129, %130, %131, heads=8, kv_heads=1, head_dim=256, window=512, rope_theta=10000) : node, node
+%134 = weight("language_model.model.layers.6.post_attention_layernorm.weight") : node
+%135 = builtin("rms_norm", %132, %134) : node
+%136 = builtin("add", %125, %135) : node
+%137 = weight("language_model.model.layers.6.pre_feedforward_layernorm.weight") : node
+%138 = builtin("rms_norm", %136, %137) : node
+%139 = weight("language_model.model.layers.6.mlp.gate_proj.weight") : node
+%140 = weight("language_model.model.layers.6.mlp.up_proj.weight") : node
+%141 = weight("language_model.model.layers.6.mlp.down_proj.weight") : node
+%142 = builtin("gated_mlp", %138, %139, %140, %141, act="gelu") : node
+%143 = weight("language_model.model.layers.6.post_feedforward_layernorm.weight") : node
+%144 = builtin("rms_norm", %142, %143) : node
+%145 = builtin("add", %136, %144) : node
+%146 = weight("language_model.model.layers.7.input_layernorm.weight") : node
+%147 = builtin("rms_norm", %145, %146) : node
+%148 = weight("language_model.model.layers.7.self_attn.q_proj.weight") : node
+%149 = weight("language_model.model.layers.7.self_attn.k_proj.weight") : node
+%150 = weight("language_model.model.layers.7.self_attn.v_proj.weight") : node
+%151 = weight("language_model.model.layers.7.self_attn.o_proj.weight") : node
+%152, %153 = builtin("kv_attention", %147, %148, %149, %150, %151, heads=8, kv_heads=1, head_dim=256, window=512, rope_theta=10000) : node, node
+%154 = weight("language_model.model.layers.7.post_attention_layernorm.weight") : node
+%155 = builtin("rms_norm", %152, %154) : node
+%156 = builtin("add", %145, %155) : node
+%157 = weight("language_model.model.layers.7.pre_feedforward_layernorm.weight") : node
+%158 = builtin("rms_norm", %156, %157) : node
+%159 = weight("language_model.model.layers.7.mlp.gate_proj.weight") : node
+%160 = weight("language_model.model.layers.7.mlp.up_proj.weight") : node
+%161 = weight("language_model.model.layers.7.mlp.down_proj.weight") : node
+%162 = builtin("gated_mlp", %158, %159, %160, %161, act="gelu") : node
+%163 = weight("language_model.model.layers.7.post_feedforward_layernorm.weight") : node
+%164 = builtin("rms_norm", %162, %163) : node
+%165 = builtin("add", %156, %164) : node
+%166 = weight("language_model.model.layers.8.input_layernorm.weight") : node
+%167 = builtin("rms_norm", %165, %166) : node
+%168 = weight("language_model.model.layers.8.self_attn.q_proj.weight") : node
+%169 = weight("language_model.model.layers.8.self_attn.k_proj.weight") : node
+%170 = weight("language_model.model.layers.8.self_attn.v_proj.weight") : node
+%171 = weight("language_model.model.layers.8.self_attn.o_proj.weight") : node
+%172, %173 = builtin("kv_attention", %167, %168, %169, %170, %171, heads=8, kv_heads=1, head_dim=256, window=512, rope_theta=10000) : node, node
+%174 = weight("language_model.model.layers.8.post_attention_layernorm.weight") : node
+%175 = builtin("rms_norm", %172, %174) : node
+%176 = builtin("add", %165, %175) : node
+%177 = weight("language_model.model.layers.8.pre_feedforward_layernorm.weight") : node
+%178 = builtin("rms_norm", %176, %177) : node
+%179 = weight("language_model.model.layers.8.mlp.gate_proj.weight") : node
+%180 = weight("language_model.model.layers.8.mlp.up_proj.weight") : node
+%181 = weight("language_model.model.layers.8.mlp.down_proj.weight") : node
+%182 = builtin("gated_mlp", %178, %179, %180, %181, act="gelu") : node
+%183 = weight("language_model.model.layers.8.post_feedforward_layernorm.weight") : node
+%184 = builtin("rms_norm", %182, %183) : node
+%185 = builtin("add", %176, %184) : node
+%186 = weight("language_model.model.layers.9.input_layernorm.weight") : node
+%187 = builtin("rms_norm", %185, %186) : node
+%188 = weight("language_model.model.layers.9.self_attn.q_proj.weight") : node
+%189 = weight("language_model.model.layers.9.self_attn.k_proj.weight") : node
+%190 = weight("language_model.model.layers.9.self_attn.v_proj.weight") : node
+%191 = weight("language_model.model.layers.9.self_attn.o_proj.weight") : node
+%192, %193 = builtin("kv_attention", %187, %188, %189, %190, %191, heads=8, kv_heads=1, head_dim=512, window=0, rope_theta=1e+06) : node, node
+%194 = weight("language_model.model.layers.9.post_attention_layernorm.weight") : node
+%195 = builtin("rms_norm", %192, %194) : node
+%196 = builtin("add", %185, %195) : node
+%197 = weight("language_model.model.layers.9.pre_feedforward_layernorm.weight") : node
+%198 = builtin("rms_norm", %196, %197) : node
+%199 = weight("language_model.model.layers.9.mlp.gate_proj.weight") : node
+%200 = weight("language_model.model.layers.9.mlp.up_proj.weight") : node
+%201 = weight("language_model.model.layers.9.mlp.down_proj.weight") : node
+%202 = builtin("gated_mlp", %198, %199, %200, %201, act="gelu") : node
+%203 = weight("language_model.model.layers.9.post_feedforward_layernorm.weight") : node
+%204 = builtin("rms_norm", %202, %203) : node
+%205 = builtin("add", %196, %204) : node
+%206 = weight("language_model.model.layers.10.input_layernorm.weight") : node
+%207 = builtin("rms_norm", %205, %206) : node
+%208 = weight("language_model.model.layers.10.self_attn.q_proj.weight") : node
+%209 = weight("language_model.model.layers.10.self_attn.k_proj.weight") : node
+%210 = weight("language_model.model.layers.10.self_attn.v_proj.weight") : node
+%211 = weight("language_model.model.layers.10.self_attn.o_proj.weight") : node
+%212, %213 = builtin("kv_attention", %207, %208, %209, %210, %211, heads=8, kv_heads=1, head_dim=256, window=512, rope_theta=10000) : node, node
+%214 = weight("language_model.model.layers.10.post_attention_layernorm.weight") : node
+%215 = builtin("rms_norm", %212, %214) : node
+%216 = builtin("add", %205, %215) : node
+%217 = weight("language_model.model.layers.10.pre_feedforward_layernorm.weight") : node
+%218 = builtin("rms_norm", %216, %217) : node
+%219 = weight("language_model.model.layers.10.mlp.gate_proj.weight") : node
+%220 = weight("language_model.model.layers.10.mlp.up_proj.weight") : node
+%221 = weight("language_model.model.layers.10.mlp.down_proj.weight") : node
+%222 = builtin("gated_mlp", %218, %219, %220, %221, act="gelu") : node
+%223 = weight("language_model.model.layers.10.post_feedforward_layernorm.weight") : node
+%224 = builtin("rms_norm", %222, %223) : node
+%225 = builtin("add", %216, %224) : node
+%226 = weight("language_model.model.layers.11.input_layernorm.weight") : node
+%227 = builtin("rms_norm", %225, %226) : node
+%228 = weight("language_model.model.layers.11.self_attn.q_proj.weight") : node
+%229 = weight("language_model.model.layers.11.self_attn.k_proj.weight") : node
+%230 = weight("language_model.model.layers.11.self_attn.v_proj.weight") : node
+%231 = weight("language_model.model.layers.11.self_attn.o_proj.weight") : node
+%232, %233 = builtin("kv_attention", %227, %228, %229, %230, %231, heads=8, kv_heads=1, head_dim=256, window=512, rope_theta=10000) : node, node
+%234 = weight("language_model.model.layers.11.post_attention_layernorm.weight") : node
+%235 = builtin("rms_norm", %232, %234) : node
+%236 = builtin("add", %225, %235) : node
+%237 = weight("language_model.model.layers.11.pre_feedforward_layernorm.weight") : node
+%238 = builtin("rms_norm", %236, %237) : node
+%239 = weight("language_model.model.layers.11.mlp.gate_proj.weight") : node
+%240 = weight("language_model.model.layers.11.mlp.up_proj.weight") : node
+%241 = weight("language_model.model.layers.11.mlp.down_proj.weight") : node
+%242 = builtin("gated_mlp", %238, %239, %240, %241, act="gelu") : node
+%243 = weight("language_model.model.layers.11.post_feedforward_layernorm.weight") : node
+%244 = builtin("rms_norm", %242, %243) : node
+%245 = builtin("add", %236, %244) : node
+%246 = weight("language_model.model.layers.12.input_layernorm.weight") : node
+%247 = builtin("rms_norm", %245, %246) : node
+%248 = weight("language_model.model.layers.12.self_attn.q_proj.weight") : node
+%249 = weight("language_model.model.layers.12.self_attn.k_proj.weight") : node
+%250 = weight("language_model.model.layers.12.self_attn.v_proj.weight") : node
+%251 = weight("language_model.model.layers.12.self_attn.o_proj.weight") : node
+%252, %253 = builtin("kv_attention", %247, %248, %249, %250, %251, heads=8, kv_heads=1, head_dim=256, window=512, rope_theta=10000) : node, node
+%254 = weight("language_model.model.layers.12.post_attention_layernorm.weight") : node
+%255 = builtin("rms_norm", %252, %254) : node
+%256 = builtin("add", %245, %255) : node
+%257 = weight("language_model.model.layers.12.pre_feedforward_layernorm.weight") : node
+%258 = builtin("rms_norm", %256, %257) : node
+%259 = weight("language_model.model.layers.12.mlp.gate_proj.weight") : node
+%260 = weight("language_model.model.layers.12.mlp.up_proj.weight") : node
+%261 = weight("language_model.model.layers.12.mlp.down_proj.weight") : node
+%262 = builtin("gated_mlp", %258, %259, %260, %261, act="gelu") : node
+%263 = weight("language_model.model.layers.12.post_feedforward_layernorm.weight") : node
+%264 = builtin("rms_norm", %262, %263) : node
+%265 = builtin("add", %256, %264) : node
+%266 = weight("language_model.model.layers.13.input_layernorm.weight") : node
+%267 = builtin("rms_norm", %265, %266) : node
+%268 = weight("language_model.model.layers.13.self_attn.q_proj.weight") : node
+%269 = weight("language_model.model.layers.13.self_attn.k_proj.weight") : node
+%270 = weight("language_model.model.layers.13.self_attn.v_proj.weight") : node
+%271 = weight("language_model.model.layers.13.self_attn.o_proj.weight") : node
+%272, %273 = builtin("kv_attention", %267, %268, %269, %270, %271, heads=8, kv_heads=1, head_dim=256, window=512, rope_theta=10000) : node, node
+%274 = weight("language_model.model.layers.13.post_attention_layernorm.weight") : node
+%275 = builtin("rms_norm", %272, %274) : node
+%276 = builtin("add", %265, %275) : node
+%277 = weight("language_model.model.layers.13.pre_feedforward_layernorm.weight") : node
+%278 = builtin("rms_norm", %276, %277) : node
+%279 = weight("language_model.model.layers.13.mlp.gate_proj.weight") : node
+%280 = weight("language_model.model.layers.13.mlp.up_proj.weight") : node
+%281 = weight("language_model.model.layers.13.mlp.down_proj.weight") : node
+%282 = builtin("gated_mlp", %278, %279, %280, %281, act="gelu") : node
+%283 = weight("language_model.model.layers.13.post_feedforward_layernorm.weight") : node
+%284 = builtin("rms_norm", %282, %283) : node
+%285 = builtin("add", %276, %284) : node
+%286 = weight("language_model.model.layers.14.input_layernorm.weight") : node
+%287 = builtin("rms_norm", %285, %286) : node
+%288 = weight("language_model.model.layers.14.self_attn.q_proj.weight") : node
+%289 = weight("language_model.model.layers.14.self_attn.k_proj.weight") : node
+%290 = weight("language_model.model.layers.14.self_attn.v_proj.weight") : node
+%291 = weight("language_model.model.layers.14.self_attn.o_proj.weight") : node
+%292, %293 = builtin("kv_attention", %287, %288, %289, %290, %291, heads=8, kv_heads=1, head_dim=512, window=0, rope_theta=1e+06) : node, node
+%294 = weight("language_model.model.layers.14.post_attention_layernorm.weight") : node
+%295 = builtin("rms_norm", %292, %294) : node
+%296 = builtin("add", %285, %295) : node
+%297 = weight("language_model.model.layers.14.pre_feedforward_layernorm.weight") : node
+%298 = builtin("rms_norm", %296, %297) : node
+%299 = weight("language_model.model.layers.14.mlp.gate_proj.weight") : node
+%300 = weight("language_model.model.layers.14.mlp.up_proj.weight") : node
+%301 = weight("language_model.model.layers.14.mlp.down_proj.weight") : node
+%302 = builtin("gated_mlp", %298, %299, %300, %301, act="gelu") : node
+%303 = weight("language_model.model.layers.14.post_feedforward_layernorm.weight") : node
+%304 = builtin("rms_norm", %302, %303) : node
+%305 = builtin("add", %296, %304) : node
+%306 = weight("language_model.model.layers.15.input_layernorm.weight") : node
+%307 = builtin("rms_norm", %305, %306) : node
+%308 = weight("language_model.model.layers.15.self_attn.q_proj.weight") : node
+%309 = weight("language_model.model.layers.15.self_attn.o_proj.weight") : node
+%310 = builtin("attention", %307, %273, %308, %309, heads=8, kv_heads=1, head_dim=256, window=512, rope_theta=10000) : node
+%311 = weight("language_model.model.layers.15.post_attention_layernorm.weight") : node
+%312 = builtin("rms_norm", %310, %311) : node
+%313 = builtin("add", %305, %312) : node
+%314 = weight("language_model.model.layers.15.pre_feedforward_layernorm.weight") : node
+%315 = builtin("rms_norm", %313, %314) : node
+%316 = weight("language_model.model.layers.15.mlp.gate_proj.weight") : node
+%317 = weight("language_model.model.layers.15.mlp.up_proj.weight") : node
+%318 = weight("language_model.model.layers.15.mlp.down_proj.weight") : node
+%319 = builtin("gated_mlp", %315, %316, %317, %318, act="gelu") : node
+%320 = weight("language_model.model.layers.15.post_feedforward_layernorm.weight") : node
+%321 = builtin("rms_norm", %319, %320) : node
+%322 = builtin("add", %313, %321) : node
+%323 = weight("language_model.model.layers.16.input_layernorm.weight") : node
+%324 = builtin("rms_norm", %322, %323) : node
+%325 = weight("language_model.model.layers.16.self_attn.q_proj.weight") : node
+%326 = weight("language_model.model.layers.16.self_attn.o_proj.weight") : node
+%327 = builtin("attention", %324, %273, %325, %326, heads=8, kv_heads=1, head_dim=256, window=512, rope_theta=10000) : node
+%328 = weight("language_model.model.layers.16.post_attention_layernorm.weight") : node
+%329 = builtin("rms_norm", %327, %328) : node
+%330 = builtin("add", %322, %329) : node
+%331 = weight("language_model.model.layers.16.pre_feedforward_layernorm.weight") : node
+%332 = builtin("rms_norm", %330, %331) : node
+%333 = weight("language_model.model.layers.16.mlp.gate_proj.weight") : node
+%334 = weight("language_model.model.layers.16.mlp.up_proj.weight") : node
+%335 = weight("language_model.model.layers.16.mlp.down_proj.weight") : node
+%336 = builtin("gated_mlp", %332, %333, %334, %335, act="gelu") : node
+%337 = weight("language_model.model.layers.16.post_feedforward_layernorm.weight") : node
+%338 = builtin("rms_norm", %336, %337) : node
+%339 = builtin("add", %330, %338) : node
+%340 = weight("language_model.model.layers.17.input_layernorm.weight") : node
+%341 = builtin("rms_norm", %339, %340) : node
+%342 = weight("language_model.model.layers.17.self_attn.q_proj.weight") : node
+%343 = weight("language_model.model.layers.17.self_attn.o_proj.weight") : node
+%344 = builtin("attention", %341, %273, %342, %343, heads=8, kv_heads=1, head_dim=256, window=512, rope_theta=10000) : node
+%345 = weight("language_model.model.layers.17.post_attention_layernorm.weight") : node
+%346 = builtin("rms_norm", %344, %345) : node
+%347 = builtin("add", %339, %346) : node
+%348 = weight("language_model.model.layers.17.pre_feedforward_layernorm.weight") : node
+%349 = builtin("rms_norm", %347, %348) : node
+%350 = weight("language_model.model.layers.17.mlp.gate_proj.weight") : node
+%351 = weight("language_model.model.layers.17.mlp.up_proj.weight") : node
+%352 = weight("language_model.model.layers.17.mlp.down_proj.weight") : node
+%353 = builtin("gated_mlp", %349, %350, %351, %352, act="gelu") : node
+%354 = weight("language_model.model.layers.17.post_feedforward_layernorm.weight") : node
+%355 = builtin("rms_norm", %353, %354) : node
+%356 = builtin("add", %347, %355) : node
+%357 = weight("language_model.model.layers.18.input_layernorm.weight") : node
+%358 = builtin("rms_norm", %356, %357) : node
+%359 = weight("language_model.model.layers.18.self_attn.q_proj.weight") : node
+%360 = weight("language_model.model.layers.18.self_attn.o_proj.weight") : node
+%361 = builtin("attention", %358, %273, %359, %360, heads=8, kv_heads=1, head_dim=256, window=512, rope_theta=10000) : node
+%362 = weight("language_model.model.layers.18.post_attention_layernorm.weight") : node
+%363 = builtin("rms_norm", %361, %362) : node
+%364 = builtin("add", %356, %363) : node
+%365 = weight("language_model.model.layers.18.pre_feedforward_layernorm.weight") : node
+%366 = builtin("rms_norm", %364, %365) : node
+%367 = weight("language_model.model.layers.18.mlp.gate_proj.weight") : node
+%368 = weight("language_model.model.layers.18.mlp.up_proj.weight") : node
+%369 = weight("language_model.model.layers.18.mlp.down_proj.weight") : node
+%370 = builtin("gated_mlp", %366, %367, %368, %369, act="gelu") : node
+%371 = weight("language_model.model.layers.18.post_feedforward_layernorm.weight") : node
+%372 = builtin("rms_norm", %370, %371) : node
+%373 = builtin("add", %364, %372) : node
+%374 = weight("language_model.model.layers.19.input_layernorm.weight") : node
+%375 = builtin("rms_norm", %373, %374) : node
+%376 = weight("language_model.model.layers.19.self_attn.q_proj.weight") : node
+%377 = weight("language_model.model.layers.19.self_attn.o_proj.weight") : node
+%378 = builtin("attention", %375, %293, %376, %377, heads=8, kv_heads=1, head_dim=512, window=0, rope_theta=1e+06) : node
+%379 = weight("language_model.model.layers.19.post_attention_layernorm.weight") : node
+%380 = builtin("rms_norm", %378, %379) : node
+%381 = builtin("add", %373, %380) : node
+%382 = weight("language_model.model.layers.19.pre_feedforward_layernorm.weight") : node
+%383 = builtin("rms_norm", %381, %382) : node
+%384 = weight("language_model.model.layers.19.mlp.gate_proj.weight") : node
+%385 = weight("language_model.model.layers.19.mlp.up_proj.weight") : node
+%386 = weight("language_model.model.layers.19.mlp.down_proj.weight") : node
+%387 = builtin("gated_mlp", %383, %384, %385, %386, act="gelu") : node
+%388 = weight("language_model.model.layers.19.post_feedforward_layernorm.weight") : node
+%389 = builtin("rms_norm", %387, %388) : node
+%390 = builtin("add", %381, %389) : node
+%391 = weight("language_model.model.layers.20.input_layernorm.weight") : node
+%392 = builtin("rms_norm", %390, %391) : node
+%393 = weight("language_model.model.layers.20.self_attn.q_proj.weight") : node
+%394 = weight("language_model.model.layers.20.self_attn.o_proj.weight") : node
+%395 = builtin("attention", %392, %273, %393, %394, heads=8, kv_heads=1, head_dim=256, window=512, rope_theta=10000) : node
+%396 = weight("language_model.model.layers.20.post_attention_layernorm.weight") : node
+%397 = builtin("rms_norm", %395, %396) : node
+%398 = builtin("add", %390, %397) : node
+%399 = weight("language_model.model.layers.20.pre_feedforward_layernorm.weight") : node
+%400 = builtin("rms_norm", %398, %399) : node
+%401 = weight("language_model.model.layers.20.mlp.gate_proj.weight") : node
+%402 = weight("language_model.model.layers.20.mlp.up_proj.weight") : node
+%403 = weight("language_model.model.layers.20.mlp.down_proj.weight") : node
+%404 = builtin("gated_mlp", %400, %401, %402, %403, act="gelu") : node
+%405 = weight("language_model.model.layers.20.post_feedforward_layernorm.weight") : node
+%406 = builtin("rms_norm", %404, %405) : node
+%407 = builtin("add", %398, %406) : node
+%408 = weight("language_model.model.layers.21.input_layernorm.weight") : node
+%409 = builtin("rms_norm", %407, %408) : node
+%410 = weight("language_model.model.layers.21.self_attn.q_proj.weight") : node
+%411 = weight("language_model.model.layers.21.self_attn.o_proj.weight") : node
+%412 = builtin("attention", %409, %273, %410, %411, heads=8, kv_heads=1, head_dim=256, window=512, rope_theta=10000) : node
+%413 = weight("language_model.model.layers.21.post_attention_layernorm.weight") : node
+%414 = builtin("rms_norm", %412, %413) : node
+%415 = builtin("add", %407, %414) : node
+%416 = weight("language_model.model.layers.21.pre_feedforward_layernorm.weight") : node
+%417 = builtin("rms_norm", %415, %416) : node
+%418 = weight("language_model.model.layers.21.mlp.gate_proj.weight") : node
+%419 = weight("language_model.model.layers.21.mlp.up_proj.weight") : node
+%420 = weight("language_model.model.layers.21.mlp.down_proj.weight") : node
+%421 = builtin("gated_mlp", %417, %418, %419, %420, act="gelu") : node
+%422 = weight("language_model.model.layers.21.post_feedforward_layernorm.weight") : node
+%423 = builtin("rms_norm", %421, %422) : node
+%424 = builtin("add", %415, %423) : node
+%425 = weight("language_model.model.layers.22.input_layernorm.weight") : node
+%426 = builtin("rms_norm", %424, %425) : node
+%427 = weight("language_model.model.layers.22.self_attn.q_proj.weight") : node
+%428 = weight("language_model.model.layers.22.self_attn.o_proj.weight") : node
+%429 = builtin("attention", %426, %273, %427, %428, heads=8, kv_heads=1, head_dim=256, window=512, rope_theta=10000) : node
+%430 = weight("language_model.model.layers.22.post_attention_layernorm.weight") : node
+%431 = builtin("rms_norm", %429, %430) : node
+%432 = builtin("add", %424, %431) : node
+%433 = weight("language_model.model.layers.22.pre_feedforward_layernorm.weight") : node
+%434 = builtin("rms_norm", %432, %433) : node
+%435 = weight("language_model.model.layers.22.mlp.gate_proj.weight") : node
+%436 = weight("language_model.model.layers.22.mlp.up_proj.weight") : node
+%437 = weight("language_model.model.layers.22.mlp.down_proj.weight") : node
+%438 = builtin("gated_mlp", %434, %435, %436, %437, act="gelu") : node
+%439 = weight("language_model.model.layers.22.post_feedforward_layernorm.weight") : node
+%440 = builtin("rms_norm", %438, %439) : node
+%441 = builtin("add", %432, %440) : node
+%442 = weight("language_model.model.layers.23.input_layernorm.weight") : node
+%443 = builtin("rms_norm", %441, %442) : node
+%444 = weight("language_model.model.layers.23.self_attn.q_proj.weight") : node
+%445 = weight("language_model.model.layers.23.self_attn.o_proj.weight") : node
+%446 = builtin("attention", %443, %273, %444, %445, heads=8, kv_heads=1, head_dim=256, window=512, rope_theta=10000) : node
+%447 = weight("language_model.model.layers.23.post_attention_layernorm.weight") : node
+%448 = builtin("rms_norm", %446, %447) : node
+%449 = builtin("add", %441, %448) : node
+%450 = weight("language_model.model.layers.23.pre_feedforward_layernorm.weight") : node
+%451 = builtin("rms_norm", %449, %450) : node
+%452 = weight("language_model.model.layers.23.mlp.gate_proj.weight") : node
+%453 = weight("language_model.model.layers.23.mlp.up_proj.weight") : node
+%454 = weight("language_model.model.layers.23.mlp.down_proj.weight") : node
+%455 = builtin("gated_mlp", %451, %452, %453, %454, act="gelu") : node
+%456 = weight("language_model.model.layers.23.post_feedforward_layernorm.weight") : node
+%457 = builtin("rms_norm", %455, %456) : node
+%458 = builtin("add", %449, %457) : node
+%459 = weight("language_model.model.layers.24.input_layernorm.weight") : node
+%460 = builtin("rms_norm", %458, %459) : node
+%461 = weight("language_model.model.layers.24.self_attn.q_proj.weight") : node
+%462 = weight("language_model.model.layers.24.self_attn.o_proj.weight") : node
+%463 = builtin("attention", %460, %293, %461, %462, heads=8, kv_heads=1, head_dim=512, window=0, rope_theta=1e+06) : node
+%464 = weight("language_model.model.layers.24.post_attention_layernorm.weight") : node
+%465 = builtin("rms_norm", %463, %464) : node
+%466 = builtin("add", %458, %465) : node
+%467 = weight("language_model.model.layers.24.pre_feedforward_layernorm.weight") : node
+%468 = builtin("rms_norm", %466, %467) : node
+%469 = weight("language_model.model.layers.24.mlp.gate_proj.weight") : node
+%470 = weight("language_model.model.layers.24.mlp.up_proj.weight") : node
+%471 = weight("language_model.model.layers.24.mlp.down_proj.weight") : node
+%472 = builtin("gated_mlp", %468, %469, %470, %471, act="gelu") : node
+%473 = weight("language_model.model.layers.24.post_feedforward_layernorm.weight") : node
+%474 = builtin("rms_norm", %472, %473) : node
+%475 = builtin("add", %466, %474) : node
+%476 = weight("language_model.model.layers.25.input_layernorm.weight") : node
+%477 = builtin("rms_norm", %475, %476) : node
+%478 = weight("language_model.model.layers.25.self_attn.q_proj.weight") : node
+%479 = weight("language_model.model.layers.25.self_attn.o_proj.weight") : node
+%480 = builtin("attention", %477, %273, %478, %479, heads=8, kv_heads=1, head_dim=256, window=512, rope_theta=10000) : node
+%481 = weight("language_model.model.layers.25.post_attention_layernorm.weight") : node
+%482 = builtin("rms_norm", %480, %481) : node
+%483 = builtin("add", %475, %482) : node
+%484 = weight("language_model.model.layers.25.pre_feedforward_layernorm.weight") : node
+%485 = builtin("rms_norm", %483, %484) : node
+%486 = weight("language_model.model.layers.25.mlp.gate_proj.weight") : node
+%487 = weight("language_model.model.layers.25.mlp.up_proj.weight") : node
+%488 = weight("language_model.model.layers.25.mlp.down_proj.weight") : node
+%489 = builtin("gated_mlp", %485, %486, %487, %488, act="gelu") : node
+%490 = weight("language_model.model.layers.25.post_feedforward_layernorm.weight") : node
+%491 = builtin("rms_norm", %489, %490) : node
+%492 = builtin("add", %483, %491) : node
+%493 = weight("language_model.model.layers.26.input_layernorm.weight") : node
+%494 = builtin("rms_norm", %492, %493) : node
+%495 = weight("language_model.model.layers.26.self_attn.q_proj.weight") : node
+%496 = weight("language_model.model.layers.26.self_attn.o_proj.weight") : node
+%497 = builtin("attention", %494, %273, %495, %496, heads=8, kv_heads=1, head_dim=256, window=512, rope_theta=10000) : node
+%498 = weight("language_model.model.layers.26.post_attention_layernorm.weight") : node
+%499 = builtin("rms_norm", %497, %498) : node
+%500 = builtin("add", %492, %499) : node
+%501 = weight("language_model.model.layers.26.pre_feedforward_layernorm.weight") : node
+%502 = builtin("rms_norm", %500, %501) : node
+%503 = weight("language_model.model.layers.26.mlp.gate_proj.weight") : node
+%504 = weight("language_model.model.layers.26.mlp.up_proj.weight") : node
+%505 = weight("language_model.model.layers.26.mlp.down_proj.weight") : node
+%506 = builtin("gated_mlp", %502, %503, %504, %505, act="gelu") : node
+%507 = weight("language_model.model.layers.26.post_feedforward_layernorm.weight") : node
+%508 = builtin("rms_norm", %506, %507) : node
+%509 = builtin("add", %500, %508) : node
+%510 = weight("language_model.model.layers.27.input_layernorm.weight") : node
+%511 = builtin("rms_norm", %509, %510) : node
+%512 = weight("language_model.model.layers.27.self_attn.q_proj.weight") : node
+%513 = weight("language_model.model.layers.27.self_attn.o_proj.weight") : node
+%514 = builtin("attention", %511, %273, %512, %513, heads=8, kv_heads=1, head_dim=256, window=512, rope_theta=10000) : node
+%515 = weight("language_model.model.layers.27.post_attention_layernorm.weight") : node
+%516 = builtin("rms_norm", %514, %515) : node
+%517 = builtin("add", %509, %516) : node
+%518 = weight("language_model.model.layers.27.pre_feedforward_layernorm.weight") : node
+%519 = builtin("rms_norm", %517, %518) : node
+%520 = weight("language_model.model.layers.27.mlp.gate_proj.weight") : node
+%521 = weight("language_model.model.layers.27.mlp.up_proj.weight") : node
+%522 = weight("language_model.model.layers.27.mlp.down_proj.weight") : node
+%523 = builtin("gated_mlp", %519, %520, %521, %522, act="gelu") : node
+%524 = weight("language_model.model.layers.27.post_feedforward_layernorm.weight") : node
+%525 = builtin("rms_norm", %523, %524) : node
+%526 = builtin("add", %517, %525) : node
+%527 = weight("language_model.model.layers.28.input_layernorm.weight") : node
+%528 = builtin("rms_norm", %526, %527) : node
+%529 = weight("language_model.model.layers.28.self_attn.q_proj.weight") : node
+%530 = weight("language_model.model.layers.28.self_attn.o_proj.weight") : node
+%531 = builtin("attention", %528, %273, %529, %530, heads=8, kv_heads=1, head_dim=256, window=512, rope_theta=10000) : node
+%532 = weight("language_model.model.layers.28.post_attention_layernorm.weight") : node
+%533 = builtin("rms_norm", %531, %532) : node
+%534 = builtin("add", %526, %533) : node
+%535 = weight("language_model.model.layers.28.pre_feedforward_layernorm.weight") : node
+%536 = builtin("rms_norm", %534, %535) : node
+%537 = weight("language_model.model.layers.28.mlp.gate_proj.weight") : node
+%538 = weight("language_model.model.layers.28.mlp.up_proj.weight") : node
+%539 = weight("language_model.model.layers.28.mlp.down_proj.weight") : node
+%540 = builtin("gated_mlp", %536, %537, %538, %539, act="gelu") : node
+%541 = weight("language_model.model.layers.28.post_feedforward_layernorm.weight") : node
+%542 = builtin("rms_norm", %540, %541) : node
+%543 = builtin("add", %534, %542) : node
+%544 = weight("language_model.model.layers.29.input_layernorm.weight") : node
+%545 = builtin("rms_norm", %543, %544) : node
+%546 = weight("language_model.model.layers.29.self_attn.q_proj.weight") : node
+%547 = weight("language_model.model.layers.29.self_attn.o_proj.weight") : node
+%548 = builtin("attention", %545, %293, %546, %547, heads=8, kv_heads=1, head_dim=512, window=0, rope_theta=1e+06) : node
+%549 = weight("language_model.model.layers.29.post_attention_layernorm.weight") : node
+%550 = builtin("rms_norm", %548, %549) : node
+%551 = builtin("add", %543, %550) : node
+%552 = weight("language_model.model.layers.29.pre_feedforward_layernorm.weight") : node
+%553 = builtin("rms_norm", %551, %552) : node
+%554 = weight("language_model.model.layers.29.mlp.gate_proj.weight") : node
+%555 = weight("language_model.model.layers.29.mlp.up_proj.weight") : node
+%556 = weight("language_model.model.layers.29.mlp.down_proj.weight") : node
+%557 = builtin("gated_mlp", %553, %554, %555, %556, act="gelu") : node
+%558 = weight("language_model.model.layers.29.post_feedforward_layernorm.weight") : node
+%559 = builtin("rms_norm", %557, %558) : node
+%560 = builtin("add", %551, %559) : node
+%561 = weight("language_model.model.layers.30.input_layernorm.weight") : node
+%562 = builtin("rms_norm", %560, %561) : node
+%563 = weight("language_model.model.layers.30.self_attn.q_proj.weight") : node
+%564 = weight("language_model.model.layers.30.self_attn.o_proj.weight") : node
+%565 = builtin("attention", %562, %273, %563, %564, heads=8, kv_heads=1, head_dim=256, window=512, rope_theta=10000) : node
+%566 = weight("language_model.model.layers.30.post_attention_layernorm.weight") : node
+%567 = builtin("rms_norm", %565, %566) : node
+%568 = builtin("add", %560, %567) : node
+%569 = weight("language_model.model.layers.30.pre_feedforward_layernorm.weight") : node
+%570 = builtin("rms_norm", %568, %569) : node
+%571 = weight("language_model.model.layers.30.mlp.gate_proj.weight") : node
+%572 = weight("language_model.model.layers.30.mlp.up_proj.weight") : node
+%573 = weight("language_model.model.layers.30.mlp.down_proj.weight") : node
+%574 = builtin("gated_mlp", %570, %571, %572, %573, act="gelu") : node
+%575 = weight("language_model.model.layers.30.post_feedforward_layernorm.weight") : node
+%576 = builtin("rms_norm", %574, %575) : node
+%577 = builtin("add", %568, %576) : node
+%578 = weight("language_model.model.layers.31.input_layernorm.weight") : node
+%579 = builtin("rms_norm", %577, %578) : node
+%580 = weight("language_model.model.layers.31.self_attn.q_proj.weight") : node
+%581 = weight("language_model.model.layers.31.self_attn.o_proj.weight") : node
+%582 = builtin("attention", %579, %273, %580, %581, heads=8, kv_heads=1, head_dim=256, window=512, rope_theta=10000) : node
+%583 = weight("language_model.model.layers.31.post_attention_layernorm.weight") : node
+%584 = builtin("rms_norm", %582, %583) : node
+%585 = builtin("add", %577, %584) : node
+%586 = weight("language_model.model.layers.31.pre_feedforward_layernorm.weight") : node
+%587 = builtin("rms_norm", %585, %586) : node
+%588 = weight("language_model.model.layers.31.mlp.gate_proj.weight") : node
+%589 = weight("language_model.model.layers.31.mlp.up_proj.weight") : node
+%590 = weight("language_model.model.layers.31.mlp.down_proj.weight") : node
+%591 = builtin("gated_mlp", %587, %588, %589, %590, act="gelu") : node
+%592 = weight("language_model.model.layers.31.post_feedforward_layernorm.weight") : node
+%593 = builtin("rms_norm", %591, %592) : node
+%594 = builtin("add", %585, %593) : node
+%595 = weight("language_model.model.layers.32.input_layernorm.weight") : node
+%596 = builtin("rms_norm", %594, %595) : node
+%597 = weight("language_model.model.layers.32.self_attn.q_proj.weight") : node
+%598 = weight("language_model.model.layers.32.self_attn.o_proj.weight") : node
+%599 = builtin("attention", %596, %273, %597, %598, heads=8, kv_heads=1, head_dim=256, window=512, rope_theta=10000) : node
+%600 = weight("language_model.model.layers.32.post_attention_layernorm.weight") : node
+%601 = builtin("rms_norm", %599, %600) : node
+%602 = builtin("add", %594, %601) : node
+%603 = weight("language_model.model.layers.32.pre_feedforward_layernorm.weight") : node
+%604 = builtin("rms_norm", %602, %603) : node
+%605 = weight("language_model.model.layers.32.mlp.gate_proj.weight") : node
+%606 = weight("language_model.model.layers.32.mlp.up_proj.weight") : node
+%607 = weight("language_model.model.layers.32.mlp.down_proj.weight") : node
+%608 = builtin("gated_mlp", %604, %605, %606, %607, act="gelu") : node
+%609 = weight("language_model.model.layers.32.post_feedforward_layernorm.weight") : node
+%610 = builtin("rms_norm", %608, %609) : node
+%611 = builtin("add", %602, %610) : node
+%612 = weight("language_model.model.layers.33.input_layernorm.weight") : node
+%613 = builtin("rms_norm", %611, %612) : node
+%614 = weight("language_model.model.layers.33.self_attn.q_proj.weight") : node
+%615 = weight("language_model.model.layers.33.self_attn.o_proj.weight") : node
+%616 = builtin("attention", %613, %273, %614, %615, heads=8, kv_heads=1, head_dim=256, window=512, rope_theta=10000) : node
+%617 = weight("language_model.model.layers.33.post_attention_layernorm.weight") : node
+%618 = builtin("rms_norm", %616, %617) : node
+%619 = builtin("add", %611, %618) : node
+%620 = weight("language_model.model.layers.33.pre_feedforward_layernorm.weight") : node
+%621 = builtin("rms_norm", %619, %620) : node
+%622 = weight("language_model.model.layers.33.mlp.gate_proj.weight") : node
+%623 = weight("language_model.model.layers.33.mlp.up_proj.weight") : node
+%624 = weight("language_model.model.layers.33.mlp.down_proj.weight") : node
+%625 = builtin("gated_mlp", %621, %622, %623, %624, act="gelu") : node
+%626 = weight("language_model.model.layers.33.post_feedforward_layernorm.weight") : node
+%627 = builtin("rms_norm", %625, %626) : node
+%628 = builtin("add", %619, %627) : node
+%629 = weight("language_model.model.layers.34.input_layernorm.weight") : node
+%630 = builtin("rms_norm", %628, %629) : node
+%631 = weight("language_model.model.layers.34.self_attn.q_proj.weight") : node
+%632 = weight("language_model.model.layers.34.self_attn.o_proj.weight") : node
+%633 = builtin("attention", %630, %293, %631, %632, heads=8, kv_heads=1, head_dim=512, window=0, rope_theta=1e+06) : node
+%634 = weight("language_model.model.layers.34.post_attention_layernorm.weight") : node
+%635 = builtin("rms_norm", %633, %634) : node
+%636 = builtin("add", %628, %635) : node
+%637 = weight("language_model.model.layers.34.pre_feedforward_layernorm.weight") : node
+%638 = builtin("rms_norm", %636, %637) : node
+%639 = weight("language_model.model.layers.34.mlp.gate_proj.weight") : node
+%640 = weight("language_model.model.layers.34.mlp.up_proj.weight") : node
+%641 = weight("language_model.model.layers.34.mlp.down_proj.weight") : node
+%642 = builtin("gated_mlp", %638, %639, %640, %641, act="gelu") : node
+%643 = weight("language_model.model.layers.34.post_feedforward_layernorm.weight") : node
+%644 = builtin("rms_norm", %642, %643) : node
+%645 = builtin("add", %636, %644) : node
+%646 = weight("language_model.model.norm.weight") : node
+%647 = builtin("rms_norm", %645, %646) : node
+%648 = weight("language_model.model.embed_tokens.weight") : node
+%649 = builtin("matmul", %647, %648) : node
+%650 = float(30)
+%651 = builtin("softcap", %649, %650) : node
+return %651

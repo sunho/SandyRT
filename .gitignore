@@ -1,1 +1,4 @@
 build/
+experiments/mnist/data/
+experiments/mnist/.venv/
+experiments/mnist/*.safetensors
