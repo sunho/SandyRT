@@ -8,12 +8,35 @@ import struct
 import subprocess
 import sys
 import tempfile
-import tkinter as tk
-from tkinter import messagebox
+
+try:
+    from PySide6.QtCore import QPointF, Qt
+    from PySide6.QtGui import QColor, QImage, QPainter, QPen
+    from PySide6.QtWidgets import (
+        QApplication,
+        QHBoxLayout,
+        QMessageBox,
+        QPushButton,
+        QVBoxLayout,
+        QWidget,
+    )
+except ModuleNotFoundError:
+    QPointF = None
+    Qt = None
+    QColor = None
+    QImage = None
+    QPainter = None
+    QPen = None
+    QApplication = None
+    QHBoxLayout = None
+    QMessageBox = None
+    QPushButton = None
+    QVBoxLayout = None
+    QWidget = object
 
 
 GRID = 28
-CELL = 10
+CELL = 20
 CANVAS = GRID * CELL
 
 
@@ -41,100 +64,20 @@ class MnistDrawApp:
     def __init__(self, args: argparse.Namespace):
         self.args = args
         self.grid = [0.0] * (GRID * GRID)
-        self.last_point: tuple[float, float] | None = None
-
-        self.root = tk.Tk()
-        self.root.title("Sandy MNIST CPU Runner")
-        self.canvas = tk.Canvas(self.root, width=CANVAS, height=CANVAS, bg="black")
-        self.canvas.pack()
-
-        buttons = tk.Frame(self.root)
-        buttons.pack(fill=tk.X)
-        tk.Button(buttons, text="Run", command=self.run).pack(side=tk.LEFT, fill=tk.X, expand=True)
-        tk.Button(buttons, text="Clear", command=self.clear).pack(side=tk.LEFT, fill=tk.X, expand=True)
-
-        self.canvas.bind("<Button-1>", self.paint_start)
-        self.canvas.bind("<B1-Motion>", self.paint_drag)
-        self.canvas.bind("<ButtonRelease-1>", self.paint_end)
-        self.cells = []
-        for y in range(GRID):
-            row = []
-            for x in range(GRID):
-                row.append(self.canvas.create_rectangle(
-                    x * CELL, y * CELL, (x + 1) * CELL, (y + 1) * CELL,
-                    outline="", fill="#000000"))
-            self.cells.append(row)
+        self.window = MnistWindow(self)
 
     def clear(self) -> None:
         self.grid = [0.0] * (GRID * GRID)
-        self.last_point = None
-        self.canvas.delete("stroke")
-        self.redraw()
-
-    def paint_start(self, event) -> None:
-        self.last_point = (float(event.x), float(event.y))
-        self.paint_at(float(event.x), float(event.y))
-
-    def paint_drag(self, event) -> None:
-        x = float(event.x)
-        y = float(event.y)
-        if self.last_point is not None:
-            last_x, last_y = self.last_point
-            self.canvas.create_line(
-                last_x,
-                last_y,
-                x,
-                y,
-                fill="white",
-                width=CELL * 3,
-                capstyle=tk.ROUND,
-                smooth=True,
-                tags="stroke",
-            )
-        self.last_point = (x, y)
-        self.paint_at(x, y)
-
-    def paint_end(self, _event) -> None:
-        self.last_point = None
-
-    def paint_at(self, px: float, py: float) -> None:
-        gx = px / CELL
-        gy = py / CELL
-        radius = 2.0
-        brush = radius * CELL
-        self.canvas.create_oval(
-            px - brush,
-            py - brush,
-            px + brush,
-            py + brush,
-            outline="",
-            fill="white",
-            tags="stroke",
-        )
-        for y in range(GRID):
-            for x in range(GRID):
-                dist = math.hypot(x + 0.5 - gx, y + 0.5 - gy)
-                if dist <= radius:
-                    value = max(0.0, 1.0 - dist / radius) ** 0.65
-                    idx = y * GRID + x
-                    self.grid[idx] = min(1.0, max(self.grid[idx], value))
-        self.redraw()
-
-    def redraw(self) -> None:
-        for y in range(GRID):
-            for x in range(GRID):
-                v = int(max(0.0, min(1.0, self.grid[y * GRID + x])) * 255)
-                color = f"#{v:02x}{v:02x}{v:02x}"
-                self.canvas.itemconfig(self.cells[y][x], fill=color)
-        self.canvas.tag_raise("stroke")
-        self.root.update_idletasks()
+        self.window.canvas.clear()
 
     def run(self) -> None:
         runner = pathlib.Path(self.args.runner)
         if not runner.exists():
-            messagebox.showerror(
+            QMessageBox.critical(
+                self.window,
                 "Missing cpu_runner",
-                f"{runner} does not exist.\nBuild it with: cmake --build build --target cpu_runner")
+                f"{runner} does not exist.\nBuild it with: cmake --build build --target cpu_runner",
+            )
             return
 
         with tempfile.NamedTemporaryFile(prefix="sandy_mnist_input_", suffix=".safetensors", delete=False) as f:
@@ -154,16 +97,129 @@ class MnistDrawApp:
         if result.stderr:
             print(result.stderr, end="", file=sys.stderr)
         if result.returncode != 0:
-            messagebox.showerror("Runner failed", f"cpu_runner exited with {result.returncode}")
+            QMessageBox.critical(self.window, "Runner failed", f"cpu_runner exited with {result.returncode}")
             return
 
-        self.root.destroy()
+        QApplication.instance().quit()
 
-    def mainloop(self) -> None:
-        self.root.mainloop()
+
+class DrawCanvas(QWidget):
+    def __init__(self, app: MnistDrawApp):
+        super().__init__()
+        self.app = app
+        self.last_point: tuple[float, float] | None = None
+        self.image = QImage(CANVAS, CANVAS, QImage.Format.Format_RGB32)
+        self.image.fill(QColor("black"))
+        self.setFixedSize(CANVAS, CANVAS)
+        self.setMouseTracking(True)
+
+    def clear(self) -> None:
+        self.last_point = None
+        self.image.fill(QColor("black"))
+        self.update()
+
+    def paintEvent(self, _event) -> None:
+        painter = QPainter(self)
+        painter.drawImage(0, 0, self.image)
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        point = self.clamp_point(event.position())
+        self.last_point = point
+        self.paint_at(*point)
+
+    def mouseMoveEvent(self, event) -> None:
+        if not (event.buttons() & Qt.MouseButton.LeftButton):
+            return
+        point = self.clamp_point(event.position())
+        if self.last_point is not None:
+            self.paint_segment(*self.last_point, *point)
+        else:
+            self.paint_at(*point)
+        self.last_point = point
+
+    def mouseReleaseEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.last_point = None
+
+    def clamp_point(self, point: QPointF) -> tuple[float, float]:
+        return (
+            max(0.0, min(float(CANVAS - 1), point.x())),
+            max(0.0, min(float(CANVAS - 1), point.y())),
+        )
+
+    def paint_segment(self, x0: float, y0: float, x1: float, y1: float) -> None:
+        painter = QPainter(self.image)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        pen = QPen(QColor("white"), CELL * 3)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        painter.drawLine(int(x0), int(y0), int(x1), int(y1))
+        painter.end()
+
+        distance = math.hypot(x1 - x0, y1 - y0)
+        steps = max(1, int(distance / (CELL / 2)))
+        for i in range(steps + 1):
+            t = i / steps
+            self.mark_grid_at(x0 + (x1 - x0) * t, y0 + (y1 - y0) * t)
+        self.update()
+
+    def paint_at(self, px: float, py: float) -> None:
+        painter = QPainter(self.image)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setBrush(QColor("white"))
+        painter.setPen(Qt.PenStyle.NoPen)
+        brush = CELL * 1.5
+        painter.drawEllipse(int(px - brush), int(py - brush), int(brush * 2), int(brush * 2))
+        painter.end()
+
+        self.mark_grid_at(px, py)
+        self.update()
+
+    def mark_grid_at(self, px: float, py: float) -> None:
+        gx = px / CELL
+        gy = py / CELL
+        radius = 1.7
+        for y in range(GRID):
+            for x in range(GRID):
+                dist = math.hypot(x + 0.5 - gx, y + 0.5 - gy)
+                if dist <= radius:
+                    self.app.grid[y * GRID + x] = 1.0
+
+
+class MnistWindow(QWidget):
+    def __init__(self, app: MnistDrawApp):
+        super().__init__()
+        self.app = app
+        self.setWindowTitle("Sandy MNIST CPU Runner")
+        self.canvas = DrawCanvas(app)
+
+        run_button = QPushButton("Run")
+        run_button.clicked.connect(app.run)
+        clear_button = QPushButton("Clear")
+        clear_button.clicked.connect(app.clear)
+
+        buttons = QHBoxLayout()
+        buttons.addWidget(run_button)
+        buttons.addWidget(clear_button)
+
+        layout = QVBoxLayout()
+        layout.addWidget(self.canvas)
+        layout.addLayout(buttons)
+        self.setLayout(layout)
 
 
 def main() -> int:
+    if QApplication is None:
+        print(
+            "PySide6 is required for the Qt MNIST drawing app.\n"
+            "Install it with: python3 -m pip install PySide6",
+            file=sys.stderr,
+        )
+        return 1
+
     root = repo_root()
     parser = argparse.ArgumentParser()
     parser.add_argument("--runner", default=root / "build/test/cpu_runner")
@@ -171,9 +227,10 @@ def main() -> int:
     parser.add_argument("--weights", default=root / "experiments/mnist/mnist.safetensors")
     args = parser.parse_args()
 
+    qt_app = QApplication(sys.argv)
     app = MnistDrawApp(args)
-    app.mainloop()
-    return 0
+    app.window.show()
+    return qt_app.exec()
 
 
 if __name__ == "__main__":

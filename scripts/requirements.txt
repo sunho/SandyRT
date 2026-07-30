@@ -1,3 +1,4 @@
 gemma
 jax
 jaxlib
+PySide6
