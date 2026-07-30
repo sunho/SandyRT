@@ -1,5 +1,13 @@
-add_library(CoreLib INTERFACE)
+add_library(CoreLib
+  Tensor.cpp
+  TensorBuffer.cpp
+)
 
 target_include_directories(CoreLib
-  INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}
+  PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+set_target_properties(CoreLib PROPERTIES
+  CXX_STANDARD 20
+  CXX_STANDARD_REQUIRED ON
 )

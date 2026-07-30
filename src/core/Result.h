@@ -2,7 +2,9 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <optional>
 #include <string>
+#include <utility>
 #include <variant>
 
 struct Error {
@@ -40,4 +42,27 @@ public:
 
 private:
     std::variant<T, Error> data_;
+};
+
+template<>
+class Result<void> {
+public:
+    Result() = default;
+    Result(Error err) : error_(std::move(err)) {}
+
+    bool ok() const { return !error_.has_value(); }
+    explicit operator bool() const { return ok(); }
+
+    const std::string& error() const { return error_->message; }
+
+    void take() {
+        if (!ok()) {
+            fprintf(stderr, "Result::take() called on error: %s\n",
+                    error_->message.c_str());
+            abort();
+        }
+    }
+
+private:
+    std::optional<Error> error_;
 };

@@ -1,7 +1,6 @@
 #pragma once
 
-#include "Shape.h"
-
+#include "Tensor.h"
 #include <array>
 #include <cstdint>
 #include <deque>
@@ -46,8 +45,8 @@ using AttrMap = std::unordered_map<std::string, AttrValue>;
 struct Value;
 
 struct ValueType {
-    ir::Shape shape;
-    ir::DType dtype;
+    core::Shape shape;
+    core::DType dtype;
 };
 
 class OpDef {
@@ -89,8 +88,8 @@ struct Use {
 
 struct Value {
     int id;
-    ir::Shape shape;
-    ir::DType dtype;
+    core::Shape shape;
+    core::DType dtype;
     Op* def = nullptr;
     std::vector<Use> uses;
 };
@@ -112,6 +111,10 @@ struct Block {
 class Graph {
 public:
     Graph();
+    Graph(const Graph&) = delete;
+    Graph& operator=(const Graph&) = delete;
+    Graph(Graph&&) = delete;
+    Graph& operator=(Graph&&) = delete;
 
     Block* entry();
     const Block* entry() const;
@@ -129,7 +132,7 @@ private:
     std::vector<Value*> outputs_;
     int nextId_ = 0;
 
-    Value* newValue(ir::Shape shape, ir::DType dtype);
+    Value* newValue(core::Shape shape, core::DType dtype);
 };
 
 // === Builder ===
@@ -144,8 +147,8 @@ public:
                                  const AttrMap& attrs = {},
                                  int numResults = 1);
 
-    Value* createInput(const std::string& name, ir::Shape shape, ir::DType dtype);
-    Value* createWeight(const std::string& name, ir::Shape shape, ir::DType dtype);
+    Value* createInput(const std::string& name, core::Shape shape, core::DType dtype);
+    Value* createWeight(const std::string& name, core::Shape shape, core::DType dtype);
 
     Value* createLinear(Value* x, Value* weight, Value* bias);
     Value* createReLU(Value* x);

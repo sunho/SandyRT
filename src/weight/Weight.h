@@ -1,9 +1,9 @@
 #pragma once
 
-#include "Shape.h"
+#include "Tensor.h"
+#include "TensorBuffer.h"
 
-#include <cstdint>
-#include <span>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -12,10 +12,9 @@ namespace sandy::weight {
 class Weights {
 public:
     virtual ~Weights() = default;
-    virtual std::vector<ir::TensorDesc> get_descriptors() const = 0;
-    virtual ir::TensorDesc get_descriptor(const std::string& name) const = 0;
-    virtual bool has(const std::string& name) const = 0;
-    virtual std::span<const uint8_t> get_buffer(const std::string& name) const = 0;
+    virtual std::vector<core::TensorDesc> descriptors() const = 0;
+    virtual std::shared_ptr<core::TensorBuffer> get_tensor(
+        const std::string& name) const = 0;
 };
 
 } // namespace sandy::weight

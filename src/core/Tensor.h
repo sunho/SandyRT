@@ -2,10 +2,12 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <initializer_list>
 #include <string>
+#include <utility>
 #include <vector>
 
-namespace sandy::ir {
+namespace sandy::core {
 
 enum class DType { F32, F16, BF16, I32, I64, U8 };
 
@@ -46,4 +48,4 @@ struct TensorDesc {
     DType dtype;
 };
 
-} // namespace sandy::ir
+} // namespace sandy::core

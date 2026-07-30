@@ -83,3 +83,20 @@ set_target_properties(materialize_tests PROPERTIES
 )
 
 gtest_discover_tests(materialize_tests)
+
+add_executable(engine_tests
+  engine/EngineTest.cpp
+)
+
+target_link_libraries(engine_tests
+  PRIVATE
+  EngineLib
+  GTest::gtest_main
+)
+
+set_target_properties(engine_tests PROPERTIES
+  CXX_STANDARD 20
+  CXX_STANDARD_REQUIRED ON
+)
+
+gtest_discover_tests(engine_tests)

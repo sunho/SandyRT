@@ -1,6 +1,6 @@
-#include "Shape.h"
+#include "Tensor.h"
 
-namespace sandy::ir {
+namespace sandy::core {
 
 size_t dtype_size(DType dtype) {
     switch (dtype) {
@@ -55,4 +55,4 @@ std::string Shape::str() const {
     return s;
 }
 
-} // namespace sandy::ir
+} // namespace sandy::core

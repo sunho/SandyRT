@@ -1,27 +1,42 @@
 #pragma once
 
+#include "TensorBuffer.h"
 #include "Weight.h"
 
 #include <cstdint>
+#include <memory>
+#include <span>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
 namespace sandy::weight {
 
+class EagerSafeTensorsBuffer : public core::TensorBuffer {
+public:
+    EagerSafeTensorsBuffer(core::TensorDesc desc, const uint8_t* data, size_t size);
+
+private:
+    Result<void> load() override;
+    void unload() override;
+    std::span<const uint8_t> data() const override;
+
+    const uint8_t* data_ = nullptr;
+    size_t size_ = 0;
+};
+
 class EagerSafeTensorWeights : public Weights {
 public:
-    static EagerSafeTensorWeights load(const std::string& path);
+    static std::unique_ptr<EagerSafeTensorWeights> load(const std::string& path);
 
-    std::vector<ir::TensorDesc> get_descriptors() const override;
-    ir::TensorDesc get_descriptor(const std::string& name) const override;
-    bool has(const std::string& name) const override;
-    std::span<const uint8_t> get_buffer(const std::string& name) const override;
+    std::vector<core::TensorDesc> descriptors() const override;
+    std::shared_ptr<core::TensorBuffer> get_tensor(
+        const std::string& name) const override;
 
 private:
     struct TensorInfo {
-        ir::Shape shape;
-        ir::DType dtype;
+        core::Shape shape;
+        core::DType dtype;
         size_t offset;
         size_t size;
     };

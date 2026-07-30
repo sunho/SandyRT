@@ -63,6 +63,7 @@ add_subdirectory(src/ir)
 add_subdirectory(src/sandygo)
 add_subdirectory(src/weight)
 add_subdirectory(src/compiler)
+add_subdirectory(src/engine)
 add_subdirectory(src/cli)
 
 # GoogleTest

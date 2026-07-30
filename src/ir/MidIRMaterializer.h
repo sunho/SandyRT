@@ -6,20 +6,22 @@
 #include "Result.h"
 #include "Weight.h"
 
+#include <memory>
 #include <unordered_map>
 
 namespace sandy::ir::mid_ir {
 
 struct MaterializeOptions {
-    std::unordered_map<std::string, ir::TensorDesc> input_tensor_descs;
+    std::unordered_map<std::string, core::TensorDesc> input_tensor_descs;
 };
 
 class MidIRMaterializer {
 public:
     MidIRMaterializer();
-    Result<Graph> materialize(const high_ir::Graph& graph,
-                              const weight::Weights& weights,
-                              const MaterializeOptions& options = {});
+    Result<std::unique_ptr<Graph>> materialize(
+        const high_ir::Graph& graph,
+        const weight::Weights& weights,
+        const MaterializeOptions& options = {});
 
 private:
     BuiltinLowering lowering_;

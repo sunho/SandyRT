@@ -7,7 +7,7 @@ target_include_directories(WeightLib
 )
 
 target_link_libraries(WeightLib
-  PUBLIC IRLib
+  PUBLIC CoreLib
   PRIVATE nlohmann_json
 )
 

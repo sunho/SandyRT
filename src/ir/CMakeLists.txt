@@ -3,7 +3,6 @@ add_library(IRLib
   HighIR.cpp
   MidIR.cpp
   MidIRMaterializer.cpp
-  Shape.cpp
 )
 
 target_include_directories(IRLib

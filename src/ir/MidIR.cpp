@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <iostream>
+#include <utility>
 
 namespace sandy::ir::mid_ir {
 
@@ -87,7 +88,7 @@ public:
         // result: [..., out_features]
         auto dims = operands[0]->shape.dims();
         dims.back() = operands[1]->shape.dim(0);
-        return {{ir::Shape(dims), operands[0]->dtype}};
+        return {{core::Shape(dims), operands[0]->dtype}};
     }
     void verify(
         std::span<Value* const> operands,
@@ -123,7 +124,7 @@ Block* Graph::entry() { return &blocks_.front(); }
 const Block* Graph::entry() const { return &blocks_.front(); }
 const std::vector<Value*>& Graph::outputs() const { return outputs_; }
 
-Value* Graph::newValue(ir::Shape shape, ir::DType dtype) {
+Value* Graph::newValue(core::Shape shape, core::DType dtype) {
     auto& v = values_.emplace_back();
     v.id = nextId_++;
     v.shape = std::move(shape);
@@ -163,7 +164,7 @@ void Graph::dump() const {
 
         for (size_t i = 0; i < op->results.size(); i++) {
             if (i > 0) std::cout << ", ";
-            std::cout << ir::dtype_name(op->results[i]->dtype)
+            std::cout << core::dtype_name(op->results[i]->dtype)
                       << op->results[i]->shape.str();
         }
         std::cout << "\n";
@@ -222,7 +223,7 @@ std::vector<Value*> Builder::createOp(OpKind kind,
     return results;
 }
 
-Value* Builder::createInput(const std::string& name, ir::Shape shape, ir::DType dtype) {
+Value* Builder::createInput(const std::string& name, core::Shape shape, core::DType dtype) {
     auto& op = graph_.ops_.emplace_back();
     op.kind = OpKind::Input;
     op.attrs["name"] = AttrValue::make_string(name);
@@ -236,7 +237,7 @@ Value* Builder::createInput(const std::string& name, ir::Shape shape, ir::DType 
     return v;
 }
 
-Value* Builder::createWeight(const std::string& name, ir::Shape shape, ir::DType dtype) {
+Value* Builder::createWeight(const std::string& name, core::Shape shape, core::DType dtype) {
     auto& op = graph_.ops_.emplace_back();
     op.kind = OpKind::Weight;
     op.attrs["name"] = AttrValue::make_string(name);

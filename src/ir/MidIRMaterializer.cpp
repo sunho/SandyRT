@@ -1,5 +1,7 @@
 #include "MidIRMaterializer.h"
 
+#include <memory>
+
 namespace sandy::ir::mid_ir {
 
 MidIRMaterializer::MidIRMaterializer()
@@ -7,11 +9,12 @@ MidIRMaterializer::MidIRMaterializer()
     register_all_ops();
 }
 
-Result<Graph> MidIRMaterializer::materialize(const high_ir::Graph& graph,
-                                             const weight::Weights& weights,
-                                             const MaterializeOptions& options) {
-    Graph mid_graph;
-    Builder builder(mid_graph);
+Result<std::unique_ptr<Graph>> MidIRMaterializer::materialize(
+        const high_ir::Graph& graph,
+        const weight::Weights& weights,
+        const MaterializeOptions& options) {
+    auto mid_graph = std::make_unique<Graph>();
+    Builder builder(*mid_graph);
 
     std::unordered_map<int, Value*> value_map;
 
@@ -26,9 +29,10 @@ Result<Graph> MidIRMaterializer::materialize(const high_ir::Graph& graph,
                 break;
             }
             case high_ir::Op::Weight: {
-                if (!weights.has(op.weightName))
+                auto tensor = weights.get_tensor(op.weightName);
+                if (!tensor)
                     return make_error("weight not found: " + op.weightName);
-                auto desc = weights.get_descriptor(op.weightName);
+                const auto& desc = tensor->desc();
                 auto* v = builder.createWeight(op.weightName, desc.shape, desc.dtype);
                 value_map[op.results[0]->id] = v;
                 break;

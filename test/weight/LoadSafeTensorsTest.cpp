@@ -9,14 +9,14 @@ int main(int argc, char* argv[]) {
     }
 
     auto weights = sandy::weight::EagerSafeTensorWeights::load(argv[1]);
-    auto descs = weights.get_descriptors();
+    auto descs = weights->descriptors();
 
     printf("%zu tensors:\n", descs.size());
     for (auto& d : descs) {
         printf("  %-30s %s  %s\n",
                d.name.c_str(),
                d.shape.str().c_str(),
-               sandy::ir::dtype_name(d.dtype));
+               sandy::core::dtype_name(d.dtype));
     }
 
     return 0;

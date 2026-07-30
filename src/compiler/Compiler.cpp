@@ -6,6 +6,7 @@
 
 #include <cstdio>
 #include <fstream>
+#include <memory>
 #include <sstream>
 
 namespace sandy {
@@ -39,7 +40,7 @@ ir::high_ir::Graph Compiler::load_sandygo(const std::string& path) {
     return graph;
 }
 
-Result<ir::mid_ir::Graph> Compiler::materialize_mid_ir(
+Result<std::unique_ptr<ir::mid_ir::Graph>> Compiler::materialize_mid_ir(
         const ir::high_ir::Graph& graph,
         const weight::Weights& weights,
         const ir::mid_ir::MaterializeOptions& options) {
