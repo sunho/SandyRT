@@ -23,6 +23,7 @@ enum class OpKind {
     Sqrt,
     MatMul,
     Transpose,
+    Embedding,
     RMSNorm,
 
     NUM_KINDS
@@ -163,6 +164,7 @@ public:
     Value* createSqrt(Value* x);
     Value* createMatMul(Value* lhs, Value* rhs);
     Value* createTranspose(Value* x);
+    Value* createEmbedding(Value* ids, Value* weight);
     Value* createRMSNorm(Value* x, Value* weight, float epsilon = 1.0e-6f);
 
     void setOutputs(std::span<Value* const> outputs);

@@ -198,6 +198,22 @@ Result<core::OwnedTensor> eval_transpose(
     return core::transpose_f32((*x)->data(), (*x)->desc());
 }
 
+Result<core::OwnedTensor> eval_embedding(
+        const ir::mid_ir::Op& op,
+        const std::unordered_map<const ir::mid_ir::Value*, const BackendBuffer*>& values) {
+    if (op.operands.size() != 2)
+        return make_error("embedding expects two operands");
+
+    auto ids = lookup_value(values, op.operands[0]);
+    if (!ids) return make_error(ids.error());
+    auto weight = lookup_value(values, op.operands[1]);
+    if (!weight) return make_error(weight.error());
+
+    return core::embedding_f32(
+        (*ids)->data(), (*ids)->desc(),
+        (*weight)->data(), (*weight)->desc());
+}
+
 Result<core::OwnedTensor> eval_rms_norm(
         const ir::mid_ir::Op& op,
         const std::unordered_map<const ir::mid_ir::Value*, const BackendBuffer*>& values) {
@@ -302,6 +318,14 @@ Result<BackendRunResult> interpret_graph(
             }
             case ir::mid_ir::OpKind::Transpose: {
                 auto tensor = eval_transpose(*op, values);
+                if (!tensor) return make_error(tensor.error());
+                temporaries.push_back(make_cpu_buffer(tensor.take()));
+                auto bind = bind_single_result(*op, temporaries.back().get(), values);
+                if (!bind) return make_error(bind.error());
+                break;
+            }
+            case ir::mid_ir::OpKind::Embedding: {
+                auto tensor = eval_embedding(*op, values);
                 if (!tensor) return make_error(tensor.error());
                 temporaries.push_back(make_cpu_buffer(tensor.take()));
                 auto bind = bind_single_result(*op, temporaries.back().get(), values);

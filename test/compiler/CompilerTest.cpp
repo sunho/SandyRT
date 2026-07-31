@@ -208,3 +208,36 @@ func main(x Node) Node {
     std::error_code ec;
     fs::remove_all(dir, ec);
 }
+
+TEST(CompilerTest, EmbeddingBuiltinMaterializesToMidIROp) {
+    fs::path dir = makeTempDir();
+    writeFile(dir / "main.sandy.go", R"(
+func main(input_ids Node) Node {
+    return __embedding(input_ids, @embed_tokens.weight)
+}
+)");
+
+    sandy::Compiler compiler;
+    auto highGraph = compiler.load_sandygo((dir / "main.sandy.go").string());
+
+    TestWeights weights;
+    weights.add(sandy::core::TensorDesc(
+        "embed_tokens.weight", sandy::core::Shape({5, 3}), sandy::core::DType::F32));
+
+    sandy::ir::mid_ir::MaterializeOptions options;
+    options.input_tensor_descs["input_ids"] = sandy::core::TensorDesc(
+        sandy::core::Shape({2}), sandy::core::DType::I32);
+
+    auto result = compiler.materialize_mid_ir(highGraph, weights, options);
+    ASSERT_TRUE(result) << result.error();
+    auto midGraph = result.take();
+
+    ASSERT_EQ(midGraph->outputs().size(), 1u);
+    ASSERT_NE(midGraph->outputs()[0], nullptr);
+    ASSERT_NE(midGraph->outputs()[0]->def, nullptr);
+    EXPECT_EQ(midGraph->outputs()[0]->def->kind, sandy::ir::mid_ir::OpKind::Embedding);
+    EXPECT_EQ(midGraph->outputs()[0]->shape, sandy::core::Shape({2, 3}));
+
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}

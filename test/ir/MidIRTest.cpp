@@ -124,6 +124,19 @@ TEST_F(MidIRTest, Transpose2DTypeInference) {
     EXPECT_EQ(out->def->kind, sandy::ir::mid_ir::OpKind::Transpose);
 }
 
+TEST_F(MidIRTest, EmbeddingTypeInference) {
+    sandy::ir::mid_ir::Graph graph;
+    sandy::ir::mid_ir::Builder builder(graph);
+
+    auto* ids = builder.createInput("input_ids", sandy::core::Shape({2, 4}), sandy::core::DType::I32);
+    auto* weight = builder.createWeight("embed_tokens.weight", sandy::core::Shape({10, 3}), sandy::core::DType::F32);
+    auto* out = builder.createEmbedding(ids, weight);
+
+    EXPECT_EQ(out->shape, sandy::core::Shape({2, 4, 3}));
+    EXPECT_EQ(out->dtype, sandy::core::DType::F32);
+    EXPECT_EQ(out->def->kind, sandy::ir::mid_ir::OpKind::Embedding);
+}
+
 TEST_F(MidIRTest, UseDefChains) {
     sandy::ir::mid_ir::Graph graph;
     sandy::ir::mid_ir::Builder builder(graph);

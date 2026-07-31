@@ -52,6 +52,12 @@ Result<OwnedTensor> transpose_f32(
     std::span<const uint8_t> x,
     const TensorDesc& xDesc);
 
+Result<OwnedTensor> embedding_f32(
+    std::span<const uint8_t> ids,
+    const TensorDesc& idsDesc,
+    std::span<const uint8_t> weight,
+    const TensorDesc& weightDesc);
+
 Result<OwnedTensor> rms_norm_f32(
     std::span<const uint8_t> x,
     const TensorDesc& xDesc,

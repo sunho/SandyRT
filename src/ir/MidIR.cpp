@@ -22,6 +22,7 @@ const char* op_kind_name(OpKind kind) {
         case OpKind::Sqrt:      return "sqrt";
         case OpKind::MatMul:    return "matmul";
         case OpKind::Transpose: return "transpose";
+        case OpKind::Embedding: return "embedding";
         case OpKind::RMSNorm:   return "rms_norm";
         case OpKind::NUM_KINDS: return "?";
     }
@@ -259,6 +260,43 @@ public:
     }
 };
 
+class EmbeddingOpDef : public OpDef {
+public:
+    OpKind kind() const override { return OpKind::Embedding; }
+    const char* name() const override { return "embedding"; }
+    std::vector<ValueType> infer_types(
+        std::span<Value* const> operands,
+        const AttrMap&) const override
+    {
+        auto dims = operands[0]->shape.dims();
+        dims.push_back(operands[1]->shape.dim(1));
+        return {{core::Shape(dims), operands[1]->dtype}};
+    }
+    void verify(
+        std::span<Value* const> operands,
+        const AttrMap&) const override
+    {
+        if (operands.size() != 2) {
+            fprintf(stderr, "embedding expects 2 operands (ids, weight), got %zu\n",
+                    operands.size());
+            abort();
+        }
+        if (operands[0]->dtype != core::DType::I32 &&
+            operands[0]->dtype != core::DType::I64) {
+            fprintf(stderr, "embedding ids must be i32 or i64\n");
+            abort();
+        }
+        if (operands[1]->dtype != core::DType::F32) {
+            fprintf(stderr, "embedding weight must be f32\n");
+            abort();
+        }
+        if (operands[1]->shape.rank() != 2) {
+            fprintf(stderr, "embedding weight must have rank 2\n");
+            abort();
+        }
+    }
+};
+
 class RMSNormOpDef : public OpDef {
 public:
     OpKind kind() const override { return OpKind::RMSNorm; }
@@ -310,6 +348,7 @@ void register_all_ops() {
     static SqrtOpDef sqrt_def;
     static MatMulOpDef matmul_def;
     static TransposeOpDef transpose_def;
+    static EmbeddingOpDef embedding_def;
     static RMSNormOpDef rms_norm_def;
 
     auto& reg = OpRegistry::global();
@@ -320,6 +359,7 @@ void register_all_ops() {
     reg.add(&sqrt_def);
     reg.add(&matmul_def);
     reg.add(&transpose_def);
+    reg.add(&embedding_def);
     reg.add(&rms_norm_def);
 }
 
@@ -494,6 +534,11 @@ Value* Builder::createMatMul(Value* lhs, Value* rhs) {
 Value* Builder::createTranspose(Value* x) {
     Value* operands[] = {x};
     return createOp(OpKind::Transpose, operands)[0];
+}
+
+Value* Builder::createEmbedding(Value* ids, Value* weight) {
+    Value* operands[] = {ids, weight};
+    return createOp(OpKind::Embedding, operands)[0];
 }
 
 Value* Builder::createRMSNorm(Value* x, Value* weight, float epsilon) {

@@ -57,6 +57,12 @@ BuiltinLowering BuiltinLowering::createDefault() {
         return {builder.createTranspose(operands[0])};
     });
 
+    bl.add("embedding", [](Builder& builder,
+                            const std::vector<Value*>& operands,
+                            const AttrMap&) -> std::vector<Value*> {
+        return {builder.createEmbedding(operands[0], operands[1])};
+    });
+
     bl.add("rms_norm", [](Builder& builder,
                            const std::vector<Value*>& operands,
                            const AttrMap& attrs) -> std::vector<Value*> {

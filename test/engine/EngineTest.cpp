@@ -64,6 +64,26 @@ std::vector<uint8_t> f32_bytes(std::initializer_list<float> values) {
     return bytes;
 }
 
+std::vector<uint8_t> i32_bytes(std::initializer_list<int32_t> values) {
+    std::vector<uint8_t> bytes(values.size() * sizeof(int32_t));
+    size_t index = 0;
+    for (int32_t value : values) {
+        std::memcpy(bytes.data() + index * sizeof(int32_t), &value, sizeof(int32_t));
+        index++;
+    }
+    return bytes;
+}
+
+std::vector<uint8_t> i64_bytes(std::initializer_list<int64_t> values) {
+    std::vector<uint8_t> bytes(values.size() * sizeof(int64_t));
+    size_t index = 0;
+    for (int64_t value : values) {
+        std::memcpy(bytes.data() + index * sizeof(int64_t), &value, sizeof(int64_t));
+        index++;
+    }
+    return bytes;
+}
+
 float read_f32(std::span<const uint8_t> bytes, size_t index) {
     float value = 0.0f;
     std::memcpy(&value, bytes.data() + index * sizeof(float), sizeof(float));
@@ -77,6 +97,15 @@ std::shared_ptr<TestTensorBuffer> make_f32_buffer(
     return std::make_shared<TestTensorBuffer>(
         sandy::core::TensorDesc(name, std::move(shape), sandy::core::DType::F32),
         f32_bytes(values));
+}
+
+std::shared_ptr<TestTensorBuffer> make_i32_buffer(
+        const std::string& name,
+        sandy::core::Shape shape,
+        std::initializer_list<int32_t> values) {
+    return std::make_shared<TestTensorBuffer>(
+        sandy::core::TensorDesc(name, std::move(shape), sandy::core::DType::I32),
+        i32_bytes(values));
 }
 
 } // namespace
@@ -325,6 +354,56 @@ TEST(TensorCalcTest, TransposeF32Requires2D) {
     EXPECT_NE(rank3.error().find("rank 2"), std::string::npos);
 }
 
+TEST(TensorCalcTest, EmbeddingF32WithI32Ids) {
+    auto ids = i32_bytes({2, 0, 3});
+    auto weight = f32_bytes({
+        1.0f, 2.0f,
+        3.0f, 4.0f,
+        5.0f, 6.0f,
+        7.0f, 8.0f,
+    });
+
+    auto result = sandy::core::embedding_f32(
+        ids, sandy::core::TensorDesc(sandy::core::Shape({3}), sandy::core::DType::I32),
+        weight, sandy::core::TensorDesc(sandy::core::Shape({4, 2}), sandy::core::DType::F32));
+
+    ASSERT_TRUE(result) << result.error();
+    auto out = result.take();
+    EXPECT_EQ(out.desc.shape, sandy::core::Shape({3, 2}));
+    EXPECT_FLOAT_EQ(read_f32(out.data, 0), 5.0f);
+    EXPECT_FLOAT_EQ(read_f32(out.data, 1), 6.0f);
+    EXPECT_FLOAT_EQ(read_f32(out.data, 2), 1.0f);
+    EXPECT_FLOAT_EQ(read_f32(out.data, 3), 2.0f);
+    EXPECT_FLOAT_EQ(read_f32(out.data, 4), 7.0f);
+    EXPECT_FLOAT_EQ(read_f32(out.data, 5), 8.0f);
+}
+
+TEST(TensorCalcTest, EmbeddingF32WithI64IdsKeepsLeadingDims) {
+    auto ids = i64_bytes({1, 3, 0, 2});
+    auto weight = f32_bytes({
+        1.0f, 2.0f,
+        3.0f, 4.0f,
+        5.0f, 6.0f,
+        7.0f, 8.0f,
+    });
+
+    auto result = sandy::core::embedding_f32(
+        ids, sandy::core::TensorDesc(sandy::core::Shape({2, 2}), sandy::core::DType::I64),
+        weight, sandy::core::TensorDesc(sandy::core::Shape({4, 2}), sandy::core::DType::F32));
+
+    ASSERT_TRUE(result) << result.error();
+    auto out = result.take();
+    EXPECT_EQ(out.desc.shape, sandy::core::Shape({2, 2, 2}));
+    EXPECT_FLOAT_EQ(read_f32(out.data, 0), 3.0f);
+    EXPECT_FLOAT_EQ(read_f32(out.data, 1), 4.0f);
+    EXPECT_FLOAT_EQ(read_f32(out.data, 2), 7.0f);
+    EXPECT_FLOAT_EQ(read_f32(out.data, 3), 8.0f);
+    EXPECT_FLOAT_EQ(read_f32(out.data, 4), 1.0f);
+    EXPECT_FLOAT_EQ(read_f32(out.data, 5), 2.0f);
+    EXPECT_FLOAT_EQ(read_f32(out.data, 6), 5.0f);
+    EXPECT_FLOAT_EQ(read_f32(out.data, 7), 6.0f);
+}
+
 TEST(TensorCalcTest, RMSNormF32) {
     auto x = f32_bytes({1.0f, 2.0f, 2.0f, 0.0f, 3.0f, 4.0f});
     auto weight = f32_bytes({1.0f, 10.0f, -1.0f});
@@ -554,4 +633,53 @@ TEST(CpuInterpretTest, GemmaStyleMatMulWithTransposedWeight) {
     EXPECT_FLOAT_EQ(read_f32(it->second->data(), 5), 5.0f);
     EXPECT_FLOAT_EQ(read_f32(it->second->data(), 6), 6.0f);
     EXPECT_FLOAT_EQ(read_f32(it->second->data(), 7), 15.0f);
+}
+
+TEST(CpuInterpretTest, EmbeddingLoadsRowsFromFullWeightBuffer) {
+    sandy::ir::mid_ir::register_all_ops();
+
+    sandy::ir::mid_ir::Graph graph;
+    sandy::ir::mid_ir::Builder builder(graph);
+    auto* ids = builder.createInput("input_ids", sandy::core::Shape({2, 2}), sandy::core::DType::I32);
+    auto* weight = builder.createWeight("embed_tokens.weight", sandy::core::Shape({4, 2}), sandy::core::DType::F32);
+    auto* out = builder.createEmbedding(ids, weight);
+    sandy::ir::mid_ir::Value* outputs[] = {out};
+    builder.setOutputs(outputs);
+
+    sandy::engine::Engine engine(
+        std::make_unique<sandy::engine::backend::CpuInterpreterBackend>());
+
+    auto planResult = engine.create_plan(graph);
+    ASSERT_TRUE(planResult) << planResult.error();
+    auto plan = planResult.take();
+
+    sandy::engine::TensorMap inputs;
+    inputs["input_ids"] = make_i32_buffer(
+        "input_ids", sandy::core::Shape({2, 2}), {3, 1, 0, 2});
+
+    sandy::engine::TensorMap weights;
+    weights["embed_tokens.weight"] = make_f32_buffer(
+        "embed_tokens.weight", sandy::core::Shape({4, 2}), {
+            1.0f, 2.0f,
+            3.0f, 4.0f,
+            5.0f, 6.0f,
+            7.0f, 8.0f,
+        });
+
+    auto runResult = engine.run(*plan, inputs, weights);
+    ASSERT_TRUE(runResult) << runResult.error();
+    auto outputsMap = runResult.take();
+
+    auto it = outputsMap.find("output0");
+    ASSERT_NE(it, outputsMap.end());
+    ASSERT_NE(it->second, nullptr);
+    EXPECT_EQ(it->second->desc().shape, sandy::core::Shape({2, 2, 2}));
+    EXPECT_FLOAT_EQ(read_f32(it->second->data(), 0), 7.0f);
+    EXPECT_FLOAT_EQ(read_f32(it->second->data(), 1), 8.0f);
+    EXPECT_FLOAT_EQ(read_f32(it->second->data(), 2), 3.0f);
+    EXPECT_FLOAT_EQ(read_f32(it->second->data(), 3), 4.0f);
+    EXPECT_FLOAT_EQ(read_f32(it->second->data(), 4), 1.0f);
+    EXPECT_FLOAT_EQ(read_f32(it->second->data(), 5), 2.0f);
+    EXPECT_FLOAT_EQ(read_f32(it->second->data(), 6), 5.0f);
+    EXPECT_FLOAT_EQ(read_f32(it->second->data(), 7), 6.0f);
 }

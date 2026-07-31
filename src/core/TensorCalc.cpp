@@ -36,6 +36,18 @@ float read_f32(std::span<const uint8_t> data, size_t index) {
     return value;
 }
 
+int64_t read_index(std::span<const uint8_t> data, DType dtype, size_t index) {
+    if (dtype == DType::I32) {
+        int32_t value = 0;
+        std::memcpy(&value, data.data() + index * sizeof(int32_t), sizeof(int32_t));
+        return value;
+    }
+
+    int64_t value = 0;
+    std::memcpy(&value, data.data() + index * sizeof(int64_t), sizeof(int64_t));
+    return value;
+}
+
 void write_f32(std::vector<uint8_t>& data, size_t index, float value) {
     std::memcpy(data.data() + index * sizeof(float), &value, sizeof(float));
 }
@@ -386,6 +398,57 @@ Result<OwnedTensor> transpose_f32(
         size_t col = outIndex % static_cast<size_t>(outputStrides[0]);
         size_t inputIndex = col * static_cast<size_t>(inputStrides[0]) + row;
         write_f32(out.data, outIndex, read_f32(x, inputIndex));
+    }
+
+    return out;
+}
+
+Result<OwnedTensor> embedding_f32(
+        std::span<const uint8_t> ids,
+        const TensorDesc& idsDesc,
+        std::span<const uint8_t> weight,
+        const TensorDesc& weightDesc) {
+    if (idsDesc.dtype != DType::I32 && idsDesc.dtype != DType::I64)
+        return make_error("embedding ids must be i32 or i64");
+
+    auto weightDtype = require_f32(weightDesc, "embedding weight");
+    if (!weightDtype) return make_error(weightDtype.error());
+
+    if (weightDesc.shape.rank() != 2)
+        return make_error("embedding weight must have rank 2");
+
+    int64_t vocab = weightDesc.shape.dim(0);
+    int64_t hidden = weightDesc.shape.dim(1);
+    if (vocab < 0 || hidden < 0)
+        return make_error("embedding weight must have static shape");
+
+    auto idsBytes = require_bytes(ids, idsDesc, "embedding ids");
+    if (!idsBytes) return make_error(idsBytes.error());
+
+    auto weightBytes = require_bytes(weight, weightDesc, "embedding weight");
+    if (!weightBytes) return make_error(weightBytes.error());
+
+    int64_t idsNumel = idsDesc.shape.numel();
+    if (idsNumel < 0)
+        return make_error("embedding ids must have static shape");
+
+    auto outDims = idsDesc.shape.dims();
+    outDims.push_back(hidden);
+
+    OwnedTensor out;
+    out.desc = TensorDesc(Shape(outDims), DType::F32);
+    out.data.resize(static_cast<size_t>(idsNumel * hidden) * sizeof(float));
+
+    for (int64_t i = 0; i < idsNumel; i++) {
+        int64_t tokenId = read_index(ids, idsDesc.dtype, static_cast<size_t>(i));
+        if (tokenId < 0 || tokenId >= vocab)
+            return make_error("embedding id out of range");
+
+        for (int64_t h = 0; h < hidden; h++) {
+            float value = read_f32(
+                weight, static_cast<size_t>(tokenId * hidden + h));
+            write_f32(out.data, static_cast<size_t>(i * hidden + h), value);
+        }
     }
 
     return out;
