@@ -75,7 +75,7 @@ func main(input_ids Node) Node {
         }
 
         x = __rms_norm(x, @norm.weight)
-        logits := __matmul(x, @embed_tokens.weight)
+        logits := __matmul(x, __transpose(@embed_tokens.weight))
         logits = __softcap(logits, 30.0)
     }
     return logits

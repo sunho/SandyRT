@@ -70,6 +70,60 @@ TEST_F(MidIRTest, RMSNormTypeInference) {
     EXPECT_EQ(out->def->kind, sandy::ir::mid_ir::OpKind::RMSNorm);
 }
 
+TEST_F(MidIRTest, BinaryElementwiseBroadcastTypeInference) {
+    sandy::ir::mid_ir::Graph graph;
+    sandy::ir::mid_ir::Builder builder(graph);
+
+    auto* lhs = builder.createInput("lhs", sandy::core::Shape({2, 3, 4}), sandy::core::DType::F32);
+    auto* rhs = builder.createInput("rhs", sandy::core::Shape({3, 1}), sandy::core::DType::F32);
+    auto* add = builder.createAdd(lhs, rhs);
+    auto* mul = builder.createMul(lhs, rhs);
+
+    EXPECT_EQ(add->shape, sandy::core::Shape({2, 3, 4}));
+    EXPECT_EQ(add->dtype, sandy::core::DType::F32);
+    EXPECT_EQ(add->def->kind, sandy::ir::mid_ir::OpKind::Add);
+    EXPECT_EQ(mul->shape, sandy::core::Shape({2, 3, 4}));
+    EXPECT_EQ(mul->dtype, sandy::core::DType::F32);
+    EXPECT_EQ(mul->def->kind, sandy::ir::mid_ir::OpKind::Mul);
+}
+
+TEST_F(MidIRTest, SqrtTypeInference) {
+    sandy::ir::mid_ir::Graph graph;
+    sandy::ir::mid_ir::Builder builder(graph);
+
+    auto* x = builder.createInput("x", sandy::core::Shape({2, 3}), sandy::core::DType::F32);
+    auto* out = builder.createSqrt(x);
+
+    EXPECT_EQ(out->shape, x->shape);
+    EXPECT_EQ(out->dtype, x->dtype);
+    EXPECT_EQ(out->def->kind, sandy::ir::mid_ir::OpKind::Sqrt);
+}
+
+TEST_F(MidIRTest, MatMulTypeInference) {
+    sandy::ir::mid_ir::Graph graph;
+    sandy::ir::mid_ir::Builder builder(graph);
+
+    auto* lhs = builder.createInput("lhs", sandy::core::Shape({2, 4, 3}), sandy::core::DType::F32);
+    auto* rhs = builder.createInput("rhs", sandy::core::Shape({1, 3, 5}), sandy::core::DType::F32);
+    auto* out = builder.createMatMul(lhs, rhs);
+
+    EXPECT_EQ(out->shape, sandy::core::Shape({2, 4, 5}));
+    EXPECT_EQ(out->dtype, sandy::core::DType::F32);
+    EXPECT_EQ(out->def->kind, sandy::ir::mid_ir::OpKind::MatMul);
+}
+
+TEST_F(MidIRTest, Transpose2DTypeInference) {
+    sandy::ir::mid_ir::Graph graph;
+    sandy::ir::mid_ir::Builder builder(graph);
+
+    auto* x = builder.createInput("x", sandy::core::Shape({3, 5}), sandy::core::DType::F32);
+    auto* out = builder.createTranspose(x);
+
+    EXPECT_EQ(out->shape, sandy::core::Shape({5, 3}));
+    EXPECT_EQ(out->dtype, sandy::core::DType::F32);
+    EXPECT_EQ(out->def->kind, sandy::ir::mid_ir::OpKind::Transpose);
+}
+
 TEST_F(MidIRTest, UseDefChains) {
     sandy::ir::mid_ir::Graph graph;
     sandy::ir::mid_ir::Builder builder(graph);

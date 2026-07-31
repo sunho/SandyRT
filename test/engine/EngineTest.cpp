@@ -1,6 +1,7 @@
 #include "CpuInterpreterBackend.h"
 #include "Engine.h"
 #include "MidIR.h"
+#include "ShapeUtil.h"
 #include "TensorCalc.h"
 #include "TensorBuffer.h"
 
@@ -174,6 +175,156 @@ TEST(TensorCalcTest, ReLUF32) {
     EXPECT_FLOAT_EQ(read_f32(out.data, 2), 3.0f);
 }
 
+TEST(ShapeUtilTest, BroadcastShapeRightAligned) {
+    auto result = sandy::core::broadcast_shape(
+        sandy::core::Shape({2, 3, 4}),
+        sandy::core::Shape({3, 1}));
+
+    ASSERT_TRUE(result) << result.error();
+    EXPECT_EQ(result.take(), sandy::core::Shape({2, 3, 4}));
+}
+
+TEST(TensorCalcTest, AddF32BroadcastsRightAligned) {
+    auto lhs = f32_bytes({
+        1.0f, 2.0f, 3.0f,
+        4.0f, 5.0f, 6.0f,
+    });
+    auto rhs = f32_bytes({10.0f, 20.0f, 30.0f});
+
+    auto result = sandy::core::add_f32(
+        lhs, sandy::core::TensorDesc(sandy::core::Shape({2, 3}), sandy::core::DType::F32),
+        rhs, sandy::core::TensorDesc(sandy::core::Shape({3}), sandy::core::DType::F32));
+
+    ASSERT_TRUE(result) << result.error();
+    auto out = result.take();
+    EXPECT_EQ(out.desc.shape, sandy::core::Shape({2, 3}));
+    EXPECT_FLOAT_EQ(read_f32(out.data, 0), 11.0f);
+    EXPECT_FLOAT_EQ(read_f32(out.data, 1), 22.0f);
+    EXPECT_FLOAT_EQ(read_f32(out.data, 2), 33.0f);
+    EXPECT_FLOAT_EQ(read_f32(out.data, 3), 14.0f);
+    EXPECT_FLOAT_EQ(read_f32(out.data, 4), 25.0f);
+    EXPECT_FLOAT_EQ(read_f32(out.data, 5), 36.0f);
+}
+
+TEST(TensorCalcTest, MulF32BroadcastsMiddleDim) {
+    auto lhs = f32_bytes({
+        1.0f, 2.0f, 3.0f,
+        4.0f, 5.0f, 6.0f,
+    });
+    auto rhs = f32_bytes({10.0f, 20.0f});
+
+    auto result = sandy::core::mul_f32(
+        lhs, sandy::core::TensorDesc(sandy::core::Shape({2, 1, 3}), sandy::core::DType::F32),
+        rhs, sandy::core::TensorDesc(sandy::core::Shape({2, 1, 1}), sandy::core::DType::F32));
+
+    ASSERT_TRUE(result) << result.error();
+    auto out = result.take();
+    EXPECT_EQ(out.desc.shape, sandy::core::Shape({2, 1, 3}));
+    EXPECT_FLOAT_EQ(read_f32(out.data, 0), 10.0f);
+    EXPECT_FLOAT_EQ(read_f32(out.data, 1), 20.0f);
+    EXPECT_FLOAT_EQ(read_f32(out.data, 2), 30.0f);
+    EXPECT_FLOAT_EQ(read_f32(out.data, 3), 80.0f);
+    EXPECT_FLOAT_EQ(read_f32(out.data, 4), 100.0f);
+    EXPECT_FLOAT_EQ(read_f32(out.data, 5), 120.0f);
+}
+
+TEST(TensorCalcTest, SqrtF32) {
+    auto x = f32_bytes({1.0f, 4.0f, 9.0f, 16.0f});
+
+    auto result = sandy::core::sqrt_f32(
+        x, sandy::core::TensorDesc(sandy::core::Shape({2, 2}), sandy::core::DType::F32));
+
+    ASSERT_TRUE(result) << result.error();
+    auto out = result.take();
+    EXPECT_EQ(out.desc.shape, sandy::core::Shape({2, 2}));
+    EXPECT_FLOAT_EQ(read_f32(out.data, 0), 1.0f);
+    EXPECT_FLOAT_EQ(read_f32(out.data, 1), 2.0f);
+    EXPECT_FLOAT_EQ(read_f32(out.data, 2), 3.0f);
+    EXPECT_FLOAT_EQ(read_f32(out.data, 3), 4.0f);
+}
+
+TEST(TensorCalcTest, MatMulF32UsesTorchLayout) {
+    auto lhs = f32_bytes({
+        1.0f, 2.0f, 3.0f,
+        4.0f, 5.0f, 6.0f,
+    });
+    auto rhs = f32_bytes({
+        7.0f, 8.0f,
+        9.0f, 10.0f,
+        11.0f, 12.0f,
+    });
+
+    auto result = sandy::core::matmul_f32(
+        lhs, sandy::core::TensorDesc(sandy::core::Shape({2, 3}), sandy::core::DType::F32),
+        rhs, sandy::core::TensorDesc(sandy::core::Shape({3, 2}), sandy::core::DType::F32));
+
+    ASSERT_TRUE(result) << result.error();
+    auto out = result.take();
+    EXPECT_EQ(out.desc.shape, sandy::core::Shape({2, 2}));
+    EXPECT_FLOAT_EQ(read_f32(out.data, 0), 58.0f);
+    EXPECT_FLOAT_EQ(read_f32(out.data, 1), 64.0f);
+    EXPECT_FLOAT_EQ(read_f32(out.data, 2), 139.0f);
+    EXPECT_FLOAT_EQ(read_f32(out.data, 3), 154.0f);
+}
+
+TEST(TensorCalcTest, MatMulF32BroadcastsBatchDims) {
+    auto lhs = f32_bytes({
+        1.0f, 2.0f,
+        3.0f, 4.0f,
+        5.0f, 6.0f,
+        7.0f, 8.0f,
+    });
+    auto rhs = f32_bytes({
+        10.0f, 20.0f, 30.0f,
+        40.0f, 50.0f, 60.0f,
+    });
+
+    auto result = sandy::core::matmul_f32(
+        lhs, sandy::core::TensorDesc(sandy::core::Shape({2, 2, 2}), sandy::core::DType::F32),
+        rhs, sandy::core::TensorDesc(sandy::core::Shape({1, 2, 3}), sandy::core::DType::F32));
+
+    ASSERT_TRUE(result) << result.error();
+    auto out = result.take();
+    EXPECT_EQ(out.desc.shape, sandy::core::Shape({2, 2, 3}));
+    EXPECT_FLOAT_EQ(read_f32(out.data, 0), 90.0f);
+    EXPECT_FLOAT_EQ(read_f32(out.data, 1), 120.0f);
+    EXPECT_FLOAT_EQ(read_f32(out.data, 2), 150.0f);
+    EXPECT_FLOAT_EQ(read_f32(out.data, 3), 190.0f);
+    EXPECT_FLOAT_EQ(read_f32(out.data, 4), 260.0f);
+    EXPECT_FLOAT_EQ(read_f32(out.data, 5), 330.0f);
+    EXPECT_FLOAT_EQ(read_f32(out.data, 6), 290.0f);
+    EXPECT_FLOAT_EQ(read_f32(out.data, 7), 400.0f);
+    EXPECT_FLOAT_EQ(read_f32(out.data, 8), 510.0f);
+    EXPECT_FLOAT_EQ(read_f32(out.data, 9), 390.0f);
+    EXPECT_FLOAT_EQ(read_f32(out.data, 10), 540.0f);
+    EXPECT_FLOAT_EQ(read_f32(out.data, 11), 690.0f);
+}
+
+TEST(TensorCalcTest, TransposeF32Requires2D) {
+    auto x = f32_bytes({
+        1.0f, 2.0f, 3.0f,
+        4.0f, 5.0f, 6.0f,
+    });
+
+    auto result = sandy::core::transpose_f32(
+        x, sandy::core::TensorDesc(sandy::core::Shape({2, 3}), sandy::core::DType::F32));
+
+    ASSERT_TRUE(result) << result.error();
+    auto out = result.take();
+    EXPECT_EQ(out.desc.shape, sandy::core::Shape({3, 2}));
+    EXPECT_FLOAT_EQ(read_f32(out.data, 0), 1.0f);
+    EXPECT_FLOAT_EQ(read_f32(out.data, 1), 4.0f);
+    EXPECT_FLOAT_EQ(read_f32(out.data, 2), 2.0f);
+    EXPECT_FLOAT_EQ(read_f32(out.data, 3), 5.0f);
+    EXPECT_FLOAT_EQ(read_f32(out.data, 4), 3.0f);
+    EXPECT_FLOAT_EQ(read_f32(out.data, 5), 6.0f);
+
+    auto rank3 = sandy::core::transpose_f32(
+        x, sandy::core::TensorDesc(sandy::core::Shape({1, 2, 3}), sandy::core::DType::F32));
+    EXPECT_FALSE(rank3);
+    EXPECT_NE(rank3.error().find("rank 2"), std::string::npos);
+}
+
 TEST(TensorCalcTest, RMSNormF32) {
     auto x = f32_bytes({1.0f, 2.0f, 2.0f, 0.0f, 3.0f, 4.0f});
     auto weight = f32_bytes({1.0f, 10.0f, -1.0f});
@@ -308,4 +459,99 @@ TEST(CpuInterpretTest, RMSNorm) {
     EXPECT_NEAR(read_f32(it->second->data(), 3), 0.0f, 1.0e-5f);
     EXPECT_NEAR(read_f32(it->second->data(), 4), 30.0f * row1Scale, 1.0e-5f);
     EXPECT_NEAR(read_f32(it->second->data(), 5), -4.0f * row1Scale, 1.0e-5f);
+}
+
+TEST(CpuInterpretTest, AddMulSqrt) {
+    sandy::ir::mid_ir::register_all_ops();
+
+    sandy::ir::mid_ir::Graph graph;
+    sandy::ir::mid_ir::Builder builder(graph);
+    auto* x = builder.createInput("x", sandy::core::Shape({2, 3}), sandy::core::DType::F32);
+    auto* bias = builder.createWeight("bias", sandy::core::Shape({3}), sandy::core::DType::F32);
+    auto* scale = builder.createWeight("scale", sandy::core::Shape({2, 1}), sandy::core::DType::F32);
+    auto* y = builder.createAdd(x, bias);
+    auto* z = builder.createMul(y, scale);
+    auto* out = builder.createSqrt(z);
+    sandy::ir::mid_ir::Value* outputs[] = {out};
+    builder.setOutputs(outputs);
+
+    sandy::engine::Engine engine(
+        std::make_unique<sandy::engine::backend::CpuInterpreterBackend>());
+
+    auto planResult = engine.create_plan(graph);
+    ASSERT_TRUE(planResult) << planResult.error();
+    auto plan = planResult.take();
+
+    sandy::engine::TensorMap inputs;
+    inputs["x"] = make_f32_buffer(
+        "x", sandy::core::Shape({2, 3}), {1.0f, 4.0f, 9.0f, 16.0f, 25.0f, 36.0f});
+
+    sandy::engine::TensorMap weights;
+    weights["bias"] = make_f32_buffer("bias", sandy::core::Shape({3}), {0.0f, 5.0f, 7.0f});
+    weights["scale"] = make_f32_buffer("scale", sandy::core::Shape({2, 1}), {1.0f, 4.0f});
+
+    auto runResult = engine.run(*plan, inputs, weights);
+    ASSERT_TRUE(runResult) << runResult.error();
+    auto outputsMap = runResult.take();
+
+    auto it = outputsMap.find("output0");
+    ASSERT_NE(it, outputsMap.end());
+    ASSERT_NE(it->second, nullptr);
+    EXPECT_EQ(it->second->desc().shape, sandy::core::Shape({2, 3}));
+    EXPECT_FLOAT_EQ(read_f32(it->second->data(), 0), 1.0f);
+    EXPECT_FLOAT_EQ(read_f32(it->second->data(), 1), 3.0f);
+    EXPECT_FLOAT_EQ(read_f32(it->second->data(), 2), 4.0f);
+    EXPECT_FLOAT_EQ(read_f32(it->second->data(), 3), 8.0f);
+    EXPECT_FLOAT_EQ(read_f32(it->second->data(), 4), std::sqrt(120.0f));
+    EXPECT_FLOAT_EQ(read_f32(it->second->data(), 5), std::sqrt(172.0f));
+}
+
+TEST(CpuInterpretTest, GemmaStyleMatMulWithTransposedWeight) {
+    sandy::ir::mid_ir::register_all_ops();
+
+    sandy::ir::mid_ir::Graph graph;
+    sandy::ir::mid_ir::Builder builder(graph);
+    auto* x = builder.createInput("x", sandy::core::Shape({2, 3}), sandy::core::DType::F32);
+    auto* weight = builder.createWeight("embed_tokens.weight", sandy::core::Shape({4, 3}), sandy::core::DType::F32);
+    auto* weightT = builder.createTranspose(weight);
+    auto* logits = builder.createMatMul(x, weightT);
+    sandy::ir::mid_ir::Value* outputs[] = {logits};
+    builder.setOutputs(outputs);
+
+    sandy::engine::Engine engine(
+        std::make_unique<sandy::engine::backend::CpuInterpreterBackend>());
+
+    auto planResult = engine.create_plan(graph);
+    ASSERT_TRUE(planResult) << planResult.error();
+    auto plan = planResult.take();
+
+    sandy::engine::TensorMap inputs;
+    inputs["x"] = make_f32_buffer(
+        "x", sandy::core::Shape({2, 3}), {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f});
+
+    sandy::engine::TensorMap weights;
+    weights["embed_tokens.weight"] = make_f32_buffer(
+        "embed_tokens.weight", sandy::core::Shape({4, 3}), {
+            1.0f, 0.0f, 0.0f,
+            0.0f, 1.0f, 0.0f,
+            0.0f, 0.0f, 1.0f,
+            1.0f, 1.0f, 1.0f,
+        });
+
+    auto runResult = engine.run(*plan, inputs, weights);
+    ASSERT_TRUE(runResult) << runResult.error();
+    auto outputsMap = runResult.take();
+
+    auto it = outputsMap.find("output0");
+    ASSERT_NE(it, outputsMap.end());
+    ASSERT_NE(it->second, nullptr);
+    EXPECT_EQ(it->second->desc().shape, sandy::core::Shape({2, 4}));
+    EXPECT_FLOAT_EQ(read_f32(it->second->data(), 0), 1.0f);
+    EXPECT_FLOAT_EQ(read_f32(it->second->data(), 1), 2.0f);
+    EXPECT_FLOAT_EQ(read_f32(it->second->data(), 2), 3.0f);
+    EXPECT_FLOAT_EQ(read_f32(it->second->data(), 3), 6.0f);
+    EXPECT_FLOAT_EQ(read_f32(it->second->data(), 4), 4.0f);
+    EXPECT_FLOAT_EQ(read_f32(it->second->data(), 5), 5.0f);
+    EXPECT_FLOAT_EQ(read_f32(it->second->data(), 6), 6.0f);
+    EXPECT_FLOAT_EQ(read_f32(it->second->data(), 7), 15.0f);
 }

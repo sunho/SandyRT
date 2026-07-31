@@ -141,3 +141,70 @@ func main(x Node) Node {
     std::error_code ec;
     fs::remove_all(dir, ec);
 }
+
+TEST(CompilerTest, AddMulSqrtBuiltinsMaterializeToMidIROps) {
+    fs::path dir = makeTempDir();
+    writeFile(dir / "main.sandy.go", R"(
+func main(x Node, y Node, z Node) Node {
+    return __sqrt(__mul(__add(x, y), z))
+}
+)");
+
+    sandy::Compiler compiler;
+    auto highGraph = compiler.load_sandygo((dir / "main.sandy.go").string());
+
+    TestWeights weights;
+    sandy::ir::mid_ir::MaterializeOptions options;
+    options.input_tensor_descs["x"] = sandy::core::TensorDesc(
+        sandy::core::Shape({2, 3}), sandy::core::DType::F32);
+    options.input_tensor_descs["y"] = sandy::core::TensorDesc(
+        sandy::core::Shape({3}), sandy::core::DType::F32);
+    options.input_tensor_descs["z"] = sandy::core::TensorDesc(
+        sandy::core::Shape({2, 1}), sandy::core::DType::F32);
+
+    auto result = compiler.materialize_mid_ir(highGraph, weights, options);
+    ASSERT_TRUE(result) << result.error();
+    auto midGraph = result.take();
+
+    ASSERT_EQ(midGraph->outputs().size(), 1u);
+    ASSERT_NE(midGraph->outputs()[0], nullptr);
+    ASSERT_NE(midGraph->outputs()[0]->def, nullptr);
+    EXPECT_EQ(midGraph->outputs()[0]->def->kind, sandy::ir::mid_ir::OpKind::Sqrt);
+    EXPECT_EQ(midGraph->outputs()[0]->shape, sandy::core::Shape({2, 3}));
+
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
+TEST(CompilerTest, GemmaStyleMatMulWithTransposeMaterializesToMidIROps) {
+    fs::path dir = makeTempDir();
+    writeFile(dir / "main.sandy.go", R"(
+func main(x Node) Node {
+    return __matmul(x, __transpose(@embed_tokens.weight))
+}
+)");
+
+    sandy::Compiler compiler;
+    auto highGraph = compiler.load_sandygo((dir / "main.sandy.go").string());
+
+    TestWeights weights;
+    weights.add(sandy::core::TensorDesc(
+        "embed_tokens.weight", sandy::core::Shape({5, 3}), sandy::core::DType::F32));
+
+    sandy::ir::mid_ir::MaterializeOptions options;
+    options.input_tensor_descs["x"] = sandy::core::TensorDesc(
+        sandy::core::Shape({2, 3}), sandy::core::DType::F32);
+
+    auto result = compiler.materialize_mid_ir(highGraph, weights, options);
+    ASSERT_TRUE(result) << result.error();
+    auto midGraph = result.take();
+
+    ASSERT_EQ(midGraph->outputs().size(), 1u);
+    ASSERT_NE(midGraph->outputs()[0], nullptr);
+    ASSERT_NE(midGraph->outputs()[0]->def, nullptr);
+    EXPECT_EQ(midGraph->outputs()[0]->def->kind, sandy::ir::mid_ir::OpKind::MatMul);
+    EXPECT_EQ(midGraph->outputs()[0]->shape, sandy::core::Shape({2, 5}));
+
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}

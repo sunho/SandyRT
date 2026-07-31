@@ -33,7 +33,7 @@ bool Shape::has_dynamic() const {
 }
 
 int64_t Shape::numel() const {
-    if (dims_.empty()) return 0;
+    if (dims_.empty()) return 1;
     int64_t n = 1;
     for (auto d : dims_) {
         if (d == kDynamic) return kDynamic;

@@ -1,4 +1,5 @@
 #include "TensorCalc.h"
+#include "ShapeUtil.h"
 
 #include <algorithm>
 #include <cmath>
@@ -37,6 +38,112 @@ float read_f32(std::span<const uint8_t> data, size_t index) {
 
 void write_f32(std::vector<uint8_t>& data, size_t index, float value) {
     std::memcpy(data.data() + index * sizeof(float), &value, sizeof(float));
+}
+
+std::vector<int64_t> strides_for(const Shape& shape) {
+    std::vector<int64_t> strides(static_cast<size_t>(shape.rank()), 1);
+    int64_t stride = 1;
+    for (int i = shape.rank() - 1; i >= 0; i--) {
+        strides[static_cast<size_t>(i)] = stride;
+        stride *= shape.dim(i);
+    }
+    return strides;
+}
+
+size_t broadcast_source_index(
+        size_t outIndex,
+        const Shape& outShape,
+        const Shape& sourceShape,
+        const std::vector<int64_t>& sourceStrides) {
+    if (sourceShape.rank() == 0) return 0;
+
+    size_t sourceIndex = 0;
+    size_t remaining = outIndex;
+    int rankOffset = outShape.rank() - sourceShape.rank();
+    for (int outDimIndex = outShape.rank() - 1; outDimIndex >= 0; outDimIndex--) {
+        int64_t outDim = outShape.dim(outDimIndex);
+        size_t coord = remaining % static_cast<size_t>(outDim);
+        remaining /= static_cast<size_t>(outDim);
+
+        int sourceDimIndex = outDimIndex - rankOffset;
+        if (sourceDimIndex < 0) continue;
+        if (sourceShape.dim(sourceDimIndex) != 1) {
+            sourceIndex += coord *
+                static_cast<size_t>(sourceStrides[static_cast<size_t>(sourceDimIndex)]);
+        }
+    }
+    return sourceIndex;
+}
+
+size_t broadcast_batch_offset(
+        size_t batchIndex,
+        const Shape& batchShape,
+        const Shape& sourceShape,
+        const std::vector<int64_t>& sourceStrides) {
+    int sourceBatchRank = sourceShape.rank() - 2;
+    if (sourceBatchRank <= 0) return 0;
+
+    size_t sourceOffset = 0;
+    size_t remaining = batchIndex;
+    int rankOffset = batchShape.rank() - sourceBatchRank;
+    for (int batchDimIndex = batchShape.rank() - 1; batchDimIndex >= 0; batchDimIndex--) {
+        int64_t batchDim = batchShape.dim(batchDimIndex);
+        size_t coord = remaining % static_cast<size_t>(batchDim);
+        remaining /= static_cast<size_t>(batchDim);
+
+        int sourceDimIndex = batchDimIndex - rankOffset;
+        if (sourceDimIndex < 0) continue;
+        if (sourceShape.dim(sourceDimIndex) != 1) {
+            sourceOffset += coord *
+                static_cast<size_t>(sourceStrides[static_cast<size_t>(sourceDimIndex)]);
+        }
+    }
+    return sourceOffset;
+}
+
+using BinaryOp = float (*)(float, float);
+
+Result<OwnedTensor> binary_elementwise_f32(
+        std::span<const uint8_t> lhs,
+        const TensorDesc& lhsDesc,
+        std::span<const uint8_t> rhs,
+        const TensorDesc& rhsDesc,
+        const std::string& opName,
+        BinaryOp op) {
+    auto lhsDtype = require_f32(lhsDesc, opName + " lhs");
+    if (!lhsDtype) return make_error(lhsDtype.error());
+
+    auto rhsDtype = require_f32(rhsDesc, opName + " rhs");
+    if (!rhsDtype) return make_error(rhsDtype.error());
+
+    auto lhsBytes = require_bytes(lhs, lhsDesc, opName + " lhs");
+    if (!lhsBytes) return make_error(lhsBytes.error());
+
+    auto rhsBytes = require_bytes(rhs, rhsDesc, opName + " rhs");
+    if (!rhsBytes) return make_error(rhsBytes.error());
+
+    auto shapeResult = broadcast_shape(lhsDesc.shape, rhsDesc.shape);
+    if (!shapeResult) return make_error(shapeResult.error());
+    auto outShape = shapeResult.take();
+
+    int64_t outNumel = outShape.numel();
+    if (outNumel < 0)
+        return make_error(opName + " output must have static shape");
+
+    auto lhsStrides = strides_for(lhsDesc.shape);
+    auto rhsStrides = strides_for(rhsDesc.shape);
+
+    OwnedTensor out;
+    out.desc = TensorDesc(outShape, DType::F32);
+    out.data.resize(static_cast<size_t>(outNumel) * sizeof(float));
+
+    for (size_t i = 0; i < static_cast<size_t>(outNumel); i++) {
+        size_t lhsIndex = broadcast_source_index(i, out.desc.shape, lhsDesc.shape, lhsStrides);
+        size_t rhsIndex = broadcast_source_index(i, out.desc.shape, rhsDesc.shape, rhsStrides);
+        write_f32(out.data, i, op(read_f32(lhs, lhsIndex), read_f32(rhs, rhsIndex)));
+    }
+
+    return out;
 }
 
 } // namespace
@@ -118,6 +225,168 @@ Result<OwnedTensor> relu_f32(
     size_t count = x.size() / sizeof(float);
     for (size_t i = 0; i < count; i++)
         write_f32(out.data, i, std::max(0.0f, read_f32(x, i)));
+
+    return out;
+}
+
+Result<OwnedTensor> add_f32(
+        std::span<const uint8_t> lhs,
+        const TensorDesc& lhsDesc,
+        std::span<const uint8_t> rhs,
+        const TensorDesc& rhsDesc) {
+    return binary_elementwise_f32(
+        lhs, lhsDesc, rhs, rhsDesc, "add",
+        [](float a, float b) { return a + b; });
+}
+
+Result<OwnedTensor> mul_f32(
+        std::span<const uint8_t> lhs,
+        const TensorDesc& lhsDesc,
+        std::span<const uint8_t> rhs,
+        const TensorDesc& rhsDesc) {
+    return binary_elementwise_f32(
+        lhs, lhsDesc, rhs, rhsDesc, "mul",
+        [](float a, float b) { return a * b; });
+}
+
+Result<OwnedTensor> sqrt_f32(
+        std::span<const uint8_t> x,
+        const TensorDesc& xDesc) {
+    auto xDtype = require_f32(xDesc, "sqrt input");
+    if (!xDtype) return make_error(xDtype.error());
+
+    auto xBytes = require_bytes(x, xDesc, "sqrt input");
+    if (!xBytes) return make_error(xBytes.error());
+
+    OwnedTensor out;
+    out.desc = xDesc;
+    out.data.resize(x.size());
+
+    size_t count = x.size() / sizeof(float);
+    for (size_t i = 0; i < count; i++)
+        write_f32(out.data, i, std::sqrt(read_f32(x, i)));
+
+    return out;
+}
+
+Result<OwnedTensor> matmul_f32(
+        std::span<const uint8_t> lhs,
+        const TensorDesc& lhsDesc,
+        std::span<const uint8_t> rhs,
+        const TensorDesc& rhsDesc) {
+    auto lhsDtype = require_f32(lhsDesc, "matmul lhs");
+    if (!lhsDtype) return make_error(lhsDtype.error());
+
+    auto rhsDtype = require_f32(rhsDesc, "matmul rhs");
+    if (!rhsDtype) return make_error(rhsDtype.error());
+
+    if (lhsDesc.shape.rank() < 2)
+        return make_error("matmul lhs must have rank >= 2");
+    if (rhsDesc.shape.rank() < 2)
+        return make_error("matmul rhs must have rank >= 2");
+
+    int lhsRank = lhsDesc.shape.rank();
+    int rhsRank = rhsDesc.shape.rank();
+    int64_t m = lhsDesc.shape.dim(lhsRank - 2);
+    int64_t lhsK = lhsDesc.shape.dim(lhsRank - 1);
+    int64_t rhsK = rhsDesc.shape.dim(rhsRank - 2);
+    int64_t n = rhsDesc.shape.dim(rhsRank - 1);
+    if (m < 0 || n < 0 || lhsK < 0 || rhsK < 0)
+        return make_error("matmul matrix dimensions must be static");
+    if (lhsK != rhsK)
+        return make_error("matmul contracting dimension mismatch");
+
+    auto lhsBytes = require_bytes(lhs, lhsDesc, "matmul lhs");
+    if (!lhsBytes) return make_error(lhsBytes.error());
+
+    auto rhsBytes = require_bytes(rhs, rhsDesc, "matmul rhs");
+    if (!rhsBytes) return make_error(rhsBytes.error());
+
+    auto lhsDims = lhsDesc.shape.dims();
+    auto rhsDims = rhsDesc.shape.dims();
+    Shape lhsBatch(std::vector<int64_t>(lhsDims.begin(), lhsDims.end() - 2));
+    Shape rhsBatch(std::vector<int64_t>(rhsDims.begin(), rhsDims.end() - 2));
+    auto batchShapeResult = broadcast_shape(lhsBatch, rhsBatch);
+    if (!batchShapeResult) return make_error(batchShapeResult.error());
+    auto batchShape = batchShapeResult.take();
+
+    auto outDims = batchShape.dims();
+    outDims.push_back(m);
+    outDims.push_back(n);
+    Shape outShape(outDims);
+    int64_t outNumel = outShape.numel();
+    int64_t batchNumel = batchShape.numel();
+    if (outNumel < 0 || batchNumel < 0)
+        return make_error("matmul output must have static shape");
+
+    auto lhsStrides = strides_for(lhsDesc.shape);
+    auto rhsStrides = strides_for(rhsDesc.shape);
+    OwnedTensor out;
+    out.desc = TensorDesc(outShape, DType::F32);
+    out.data.resize(static_cast<size_t>(outNumel) * sizeof(float));
+
+    for (size_t batch = 0; batch < static_cast<size_t>(batchNumel); batch++) {
+        size_t lhsBatchOffset = broadcast_batch_offset(
+            batch, batchShape, lhsDesc.shape, lhsStrides);
+        size_t rhsBatchOffset = broadcast_batch_offset(
+            batch, batchShape, rhsDesc.shape, rhsStrides);
+        size_t outBatchOffset = batch * static_cast<size_t>(m * n);
+
+        for (int64_t row = 0; row < m; row++) {
+            for (int64_t col = 0; col < n; col++) {
+                float acc = 0.0f;
+                for (int64_t k = 0; k < lhsK; k++) {
+                    size_t lhsIndex = lhsBatchOffset +
+                        static_cast<size_t>(row * lhsStrides[lhsRank - 2] +
+                                            k * lhsStrides[lhsRank - 1]);
+                    size_t rhsIndex = rhsBatchOffset +
+                        static_cast<size_t>(k * rhsStrides[rhsRank - 2] +
+                                            col * rhsStrides[rhsRank - 1]);
+                    acc += read_f32(lhs, lhsIndex) * read_f32(rhs, rhsIndex);
+                }
+                write_f32(
+                    out.data,
+                    outBatchOffset + static_cast<size_t>(row * n + col),
+                    acc);
+            }
+        }
+    }
+
+    return out;
+}
+
+Result<OwnedTensor> transpose_f32(
+        std::span<const uint8_t> x,
+        const TensorDesc& xDesc) {
+    auto xDtype = require_f32(xDesc, "transpose input");
+    if (!xDtype) return make_error(xDtype.error());
+
+    if (xDesc.shape.rank() != 2)
+        return make_error("transpose input must have rank 2");
+
+    auto xBytes = require_bytes(x, xDesc, "transpose input");
+    if (!xBytes) return make_error(xBytes.error());
+
+    auto outDims = xDesc.shape.dims();
+    std::swap(outDims[outDims.size() - 1], outDims[outDims.size() - 2]);
+    Shape outShape(outDims);
+    int64_t outNumel = outShape.numel();
+    if (outNumel < 0)
+        return make_error("transpose output must have static shape");
+
+    auto inputStrides = strides_for(xDesc.shape);
+    auto outputStrides = strides_for(outShape);
+
+    OwnedTensor out;
+    out.desc = TensorDesc(outShape, DType::F32);
+    out.data.resize(static_cast<size_t>(outNumel) * sizeof(float));
+
+    for (size_t outIndex = 0; outIndex < static_cast<size_t>(outNumel); outIndex++) {
+        size_t row = outIndex / static_cast<size_t>(outputStrides[0]);
+        size_t col = outIndex % static_cast<size_t>(outputStrides[0]);
+        size_t inputIndex = col * static_cast<size_t>(inputStrides[0]) + row;
+        write_f32(out.data, outIndex, read_f32(x, inputIndex));
+    }
 
     return out;
 }

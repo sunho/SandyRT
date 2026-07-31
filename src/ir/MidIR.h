@@ -18,6 +18,11 @@ enum class OpKind {
     Weight,
     Linear,
     ReLU,
+    Add,
+    Mul,
+    Sqrt,
+    MatMul,
+    Transpose,
     RMSNorm,
 
     NUM_KINDS
@@ -153,6 +158,11 @@ public:
 
     Value* createLinear(Value* x, Value* weight, Value* bias);
     Value* createReLU(Value* x);
+    Value* createAdd(Value* lhs, Value* rhs);
+    Value* createMul(Value* lhs, Value* rhs);
+    Value* createSqrt(Value* x);
+    Value* createMatMul(Value* lhs, Value* rhs);
+    Value* createTranspose(Value* x);
     Value* createRMSNorm(Value* x, Value* weight, float epsilon = 1.0e-6f);
 
     void setOutputs(std::span<Value* const> outputs);

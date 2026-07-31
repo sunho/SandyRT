@@ -27,6 +27,36 @@ BuiltinLowering BuiltinLowering::createDefault() {
         return {builder.createReLU(operands[0])};
     });
 
+    bl.add("add", [](Builder& builder,
+                      const std::vector<Value*>& operands,
+                      const AttrMap&) -> std::vector<Value*> {
+        return {builder.createAdd(operands[0], operands[1])};
+    });
+
+    bl.add("mul", [](Builder& builder,
+                      const std::vector<Value*>& operands,
+                      const AttrMap&) -> std::vector<Value*> {
+        return {builder.createMul(operands[0], operands[1])};
+    });
+
+    bl.add("sqrt", [](Builder& builder,
+                       const std::vector<Value*>& operands,
+                       const AttrMap&) -> std::vector<Value*> {
+        return {builder.createSqrt(operands[0])};
+    });
+
+    bl.add("matmul", [](Builder& builder,
+                         const std::vector<Value*>& operands,
+                         const AttrMap&) -> std::vector<Value*> {
+        return {builder.createMatMul(operands[0], operands[1])};
+    });
+
+    bl.add("transpose", [](Builder& builder,
+                            const std::vector<Value*>& operands,
+                            const AttrMap&) -> std::vector<Value*> {
+        return {builder.createTranspose(operands[0])};
+    });
+
     bl.add("rms_norm", [](Builder& builder,
                            const std::vector<Value*>& operands,
                            const AttrMap& attrs) -> std::vector<Value*> {

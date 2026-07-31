@@ -126,6 +126,78 @@ Result<core::OwnedTensor> eval_relu(
     return core::relu_f32((*x)->data(), (*x)->desc());
 }
 
+Result<core::OwnedTensor> eval_add(
+        const ir::mid_ir::Op& op,
+        const std::unordered_map<const ir::mid_ir::Value*, const BackendBuffer*>& values) {
+    if (op.operands.size() != 2)
+        return make_error("add expects two operands");
+
+    auto lhs = lookup_value(values, op.operands[0]);
+    if (!lhs) return make_error(lhs.error());
+    auto rhs = lookup_value(values, op.operands[1]);
+    if (!rhs) return make_error(rhs.error());
+
+    return core::add_f32(
+        (*lhs)->data(), (*lhs)->desc(),
+        (*rhs)->data(), (*rhs)->desc());
+}
+
+Result<core::OwnedTensor> eval_mul(
+        const ir::mid_ir::Op& op,
+        const std::unordered_map<const ir::mid_ir::Value*, const BackendBuffer*>& values) {
+    if (op.operands.size() != 2)
+        return make_error("mul expects two operands");
+
+    auto lhs = lookup_value(values, op.operands[0]);
+    if (!lhs) return make_error(lhs.error());
+    auto rhs = lookup_value(values, op.operands[1]);
+    if (!rhs) return make_error(rhs.error());
+
+    return core::mul_f32(
+        (*lhs)->data(), (*lhs)->desc(),
+        (*rhs)->data(), (*rhs)->desc());
+}
+
+Result<core::OwnedTensor> eval_sqrt(
+        const ir::mid_ir::Op& op,
+        const std::unordered_map<const ir::mid_ir::Value*, const BackendBuffer*>& values) {
+    if (op.operands.size() != 1)
+        return make_error("sqrt expects one operand");
+
+    auto x = lookup_value(values, op.operands[0]);
+    if (!x) return make_error(x.error());
+
+    return core::sqrt_f32((*x)->data(), (*x)->desc());
+}
+
+Result<core::OwnedTensor> eval_matmul(
+        const ir::mid_ir::Op& op,
+        const std::unordered_map<const ir::mid_ir::Value*, const BackendBuffer*>& values) {
+    if (op.operands.size() != 2)
+        return make_error("matmul expects two operands");
+
+    auto lhs = lookup_value(values, op.operands[0]);
+    if (!lhs) return make_error(lhs.error());
+    auto rhs = lookup_value(values, op.operands[1]);
+    if (!rhs) return make_error(rhs.error());
+
+    return core::matmul_f32(
+        (*lhs)->data(), (*lhs)->desc(),
+        (*rhs)->data(), (*rhs)->desc());
+}
+
+Result<core::OwnedTensor> eval_transpose(
+        const ir::mid_ir::Op& op,
+        const std::unordered_map<const ir::mid_ir::Value*, const BackendBuffer*>& values) {
+    if (op.operands.size() != 1)
+        return make_error("transpose expects one operand");
+
+    auto x = lookup_value(values, op.operands[0]);
+    if (!x) return make_error(x.error());
+
+    return core::transpose_f32((*x)->data(), (*x)->desc());
+}
+
 Result<core::OwnedTensor> eval_rms_norm(
         const ir::mid_ir::Op& op,
         const std::unordered_map<const ir::mid_ir::Value*, const BackendBuffer*>& values) {
@@ -190,6 +262,46 @@ Result<BackendRunResult> interpret_graph(
             }
             case ir::mid_ir::OpKind::ReLU: {
                 auto tensor = eval_relu(*op, values);
+                if (!tensor) return make_error(tensor.error());
+                temporaries.push_back(make_cpu_buffer(tensor.take()));
+                auto bind = bind_single_result(*op, temporaries.back().get(), values);
+                if (!bind) return make_error(bind.error());
+                break;
+            }
+            case ir::mid_ir::OpKind::Add: {
+                auto tensor = eval_add(*op, values);
+                if (!tensor) return make_error(tensor.error());
+                temporaries.push_back(make_cpu_buffer(tensor.take()));
+                auto bind = bind_single_result(*op, temporaries.back().get(), values);
+                if (!bind) return make_error(bind.error());
+                break;
+            }
+            case ir::mid_ir::OpKind::Mul: {
+                auto tensor = eval_mul(*op, values);
+                if (!tensor) return make_error(tensor.error());
+                temporaries.push_back(make_cpu_buffer(tensor.take()));
+                auto bind = bind_single_result(*op, temporaries.back().get(), values);
+                if (!bind) return make_error(bind.error());
+                break;
+            }
+            case ir::mid_ir::OpKind::Sqrt: {
+                auto tensor = eval_sqrt(*op, values);
+                if (!tensor) return make_error(tensor.error());
+                temporaries.push_back(make_cpu_buffer(tensor.take()));
+                auto bind = bind_single_result(*op, temporaries.back().get(), values);
+                if (!bind) return make_error(bind.error());
+                break;
+            }
+            case ir::mid_ir::OpKind::MatMul: {
+                auto tensor = eval_matmul(*op, values);
+                if (!tensor) return make_error(tensor.error());
+                temporaries.push_back(make_cpu_buffer(tensor.take()));
+                auto bind = bind_single_result(*op, temporaries.back().get(), values);
+                if (!bind) return make_error(bind.error());
+                break;
+            }
+            case ir::mid_ir::OpKind::Transpose: {
+                auto tensor = eval_transpose(*op, values);
                 if (!tensor) return make_error(tensor.error());
                 temporaries.push_back(make_cpu_buffer(tensor.take()));
                 auto bind = bind_single_result(*op, temporaries.back().get(), values);

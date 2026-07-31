@@ -1,4 +1,5 @@
 #include "MidIR.h"
+#include "ShapeUtil.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -16,6 +17,11 @@ const char* op_kind_name(OpKind kind) {
         case OpKind::Weight:    return "weight";
         case OpKind::Linear:    return "linear";
         case OpKind::ReLU:      return "relu";
+        case OpKind::Add:       return "add";
+        case OpKind::Mul:       return "mul";
+        case OpKind::Sqrt:      return "sqrt";
+        case OpKind::MatMul:    return "matmul";
+        case OpKind::Transpose: return "transpose";
         case OpKind::RMSNorm:   return "rms_norm";
         case OpKind::NUM_KINDS: return "?";
     }
@@ -103,6 +109,156 @@ public:
     }
 };
 
+class BinaryElementwiseOpDef : public OpDef {
+public:
+    BinaryElementwiseOpDef(OpKind kind, const char* name)
+        : kind_(kind), name_(name) {}
+
+    OpKind kind() const override { return kind_; }
+    const char* name() const override { return name_; }
+    std::vector<ValueType> infer_types(
+        std::span<Value* const> operands,
+        const AttrMap&) const override
+    {
+        auto shape = core::broadcast_shape(operands[0]->shape, operands[1]->shape);
+        if (!shape) {
+            fprintf(stderr, "%s: %s\n", name_, shape.error().c_str());
+            abort();
+        }
+        return {{shape.take(), operands[0]->dtype}};
+    }
+    void verify(
+        std::span<Value* const> operands,
+        const AttrMap&) const override
+    {
+        if (operands.size() != 2) {
+            fprintf(stderr, "%s expects 2 operands, got %zu\n",
+                    name_, operands.size());
+            abort();
+        }
+        if (operands[0]->dtype != operands[1]->dtype) {
+            fprintf(stderr, "%s operands must have the same dtype\n", name_);
+            abort();
+        }
+        auto shape = core::broadcast_shape(operands[0]->shape, operands[1]->shape);
+        if (!shape) {
+            fprintf(stderr, "%s: %s\n", name_, shape.error().c_str());
+            abort();
+        }
+    }
+
+private:
+    OpKind kind_;
+    const char* name_;
+};
+
+class SqrtOpDef : public OpDef {
+public:
+    OpKind kind() const override { return OpKind::Sqrt; }
+    const char* name() const override { return "sqrt"; }
+    std::vector<ValueType> infer_types(
+        std::span<Value* const> operands,
+        const AttrMap&) const override
+    {
+        return {{operands[0]->shape, operands[0]->dtype}};
+    }
+    void verify(
+        std::span<Value* const> operands,
+        const AttrMap&) const override
+    {
+        if (operands.size() != 1) {
+            fprintf(stderr, "sqrt expects 1 operand, got %zu\n", operands.size());
+            abort();
+        }
+    }
+};
+
+class MatMulOpDef : public OpDef {
+public:
+    OpKind kind() const override { return OpKind::MatMul; }
+    const char* name() const override { return "matmul"; }
+    std::vector<ValueType> infer_types(
+        std::span<Value* const> operands,
+        const AttrMap&) const override
+    {
+        const auto& lhsShape = operands[0]->shape;
+        const auto& rhsShape = operands[1]->shape;
+        auto lhsDims = lhsShape.dims();
+        auto rhsDims = rhsShape.dims();
+        core::Shape lhsBatch(std::vector<int64_t>(lhsDims.begin(), lhsDims.end() - 2));
+        core::Shape rhsBatch(std::vector<int64_t>(rhsDims.begin(), rhsDims.end() - 2));
+        auto batchShape = core::broadcast_shape(lhsBatch, rhsBatch);
+        if (!batchShape) {
+            fprintf(stderr, "matmul: %s\n", batchShape.error().c_str());
+            abort();
+        }
+        auto outDims = batchShape.take().dims();
+        outDims.push_back(lhsShape.dim(lhsShape.rank() - 2));
+        outDims.push_back(rhsShape.dim(rhsShape.rank() - 1));
+        return {{core::Shape(outDims), operands[0]->dtype}};
+    }
+    void verify(
+        std::span<Value* const> operands,
+        const AttrMap&) const override
+    {
+        if (operands.size() != 2) {
+            fprintf(stderr, "matmul expects 2 operands, got %zu\n", operands.size());
+            abort();
+        }
+        if (operands[0]->dtype != operands[1]->dtype) {
+            fprintf(stderr, "matmul operands must have the same dtype\n");
+            abort();
+        }
+        if (operands[0]->shape.rank() < 2 || operands[1]->shape.rank() < 2) {
+            fprintf(stderr, "matmul operands must have rank >= 2\n");
+            abort();
+        }
+
+        int64_t lhsK = operands[0]->shape.dim(operands[0]->shape.rank() - 1);
+        int64_t rhsK = operands[1]->shape.dim(operands[1]->shape.rank() - 2);
+        if (lhsK >= 0 && rhsK >= 0 && lhsK != rhsK) {
+            fprintf(stderr, "matmul contracting dimension mismatch\n");
+            abort();
+        }
+        auto lhsDims = operands[0]->shape.dims();
+        auto rhsDims = operands[1]->shape.dims();
+        core::Shape lhsBatch(std::vector<int64_t>(lhsDims.begin(), lhsDims.end() - 2));
+        core::Shape rhsBatch(std::vector<int64_t>(rhsDims.begin(), rhsDims.end() - 2));
+        auto batchShape = core::broadcast_shape(lhsBatch, rhsBatch);
+        if (!batchShape) {
+            fprintf(stderr, "matmul: %s\n", batchShape.error().c_str());
+            abort();
+        }
+    }
+};
+
+class TransposeOpDef : public OpDef {
+public:
+    OpKind kind() const override { return OpKind::Transpose; }
+    const char* name() const override { return "transpose"; }
+    std::vector<ValueType> infer_types(
+        std::span<Value* const> operands,
+        const AttrMap&) const override
+    {
+        auto dims = operands[0]->shape.dims();
+        std::swap(dims[dims.size() - 1], dims[dims.size() - 2]);
+        return {{core::Shape(dims), operands[0]->dtype}};
+    }
+    void verify(
+        std::span<Value* const> operands,
+        const AttrMap&) const override
+    {
+        if (operands.size() != 1) {
+            fprintf(stderr, "transpose expects 1 operand, got %zu\n", operands.size());
+            abort();
+        }
+        if (operands[0]->shape.rank() != 2) {
+            fprintf(stderr, "transpose input must have rank 2\n");
+            abort();
+        }
+    }
+};
+
 class RMSNormOpDef : public OpDef {
 public:
     OpKind kind() const override { return OpKind::RMSNorm; }
@@ -149,11 +305,21 @@ public:
 void register_all_ops() {
     static ReLUOpDef relu_def;
     static LinearOpDef linear_def;
+    static BinaryElementwiseOpDef add_def(OpKind::Add, "add");
+    static BinaryElementwiseOpDef mul_def(OpKind::Mul, "mul");
+    static SqrtOpDef sqrt_def;
+    static MatMulOpDef matmul_def;
+    static TransposeOpDef transpose_def;
     static RMSNormOpDef rms_norm_def;
 
     auto& reg = OpRegistry::global();
     reg.add(&relu_def);
     reg.add(&linear_def);
+    reg.add(&add_def);
+    reg.add(&mul_def);
+    reg.add(&sqrt_def);
+    reg.add(&matmul_def);
+    reg.add(&transpose_def);
     reg.add(&rms_norm_def);
 }
 
@@ -303,6 +469,31 @@ Value* Builder::createLinear(Value* x, Value* weight, Value* bias) {
 Value* Builder::createReLU(Value* x) {
     Value* operands[] = {x};
     return createOp(OpKind::ReLU, operands)[0];
+}
+
+Value* Builder::createAdd(Value* lhs, Value* rhs) {
+    Value* operands[] = {lhs, rhs};
+    return createOp(OpKind::Add, operands)[0];
+}
+
+Value* Builder::createMul(Value* lhs, Value* rhs) {
+    Value* operands[] = {lhs, rhs};
+    return createOp(OpKind::Mul, operands)[0];
+}
+
+Value* Builder::createSqrt(Value* x) {
+    Value* operands[] = {x};
+    return createOp(OpKind::Sqrt, operands)[0];
+}
+
+Value* Builder::createMatMul(Value* lhs, Value* rhs) {
+    Value* operands[] = {lhs, rhs};
+    return createOp(OpKind::MatMul, operands)[0];
+}
+
+Value* Builder::createTranspose(Value* x) {
+    Value* operands[] = {x};
+    return createOp(OpKind::Transpose, operands)[0];
 }
 
 Value* Builder::createRMSNorm(Value* x, Value* weight, float epsilon) {
