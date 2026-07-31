@@ -160,6 +160,10 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    for (auto& import : prog.imports) {
+        std::cout << "Import \"" << import.path << "\"\n";
+    }
+
     for (auto& fn : prog.funcs) {
         std::cout << "Func " << fn.name << "(";
         for (size_t i = 0; i < fn.params.size(); i++) {

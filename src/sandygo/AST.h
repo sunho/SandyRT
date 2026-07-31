@@ -88,7 +88,13 @@ struct FuncDecl {
     int line = 0;
 };
 
+struct ImportDecl {
+    std::string path;
+    int line = 0;
+};
+
 struct Program {
+    std::vector<ImportDecl> imports;
     std::vector<FuncDecl> funcs;
 };
 

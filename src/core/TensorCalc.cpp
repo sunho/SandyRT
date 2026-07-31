@@ -1,6 +1,7 @@
 #include "TensorCalc.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <string>
 
@@ -117,6 +118,65 @@ Result<OwnedTensor> relu_f32(
     size_t count = x.size() / sizeof(float);
     for (size_t i = 0; i < count; i++)
         write_f32(out.data, i, std::max(0.0f, read_f32(x, i)));
+
+    return out;
+}
+
+Result<OwnedTensor> rms_norm_f32(
+        std::span<const uint8_t> x,
+        const TensorDesc& xDesc,
+        std::span<const uint8_t> weight,
+        const TensorDesc& weightDesc,
+        float epsilon) {
+    auto xDtype = require_f32(xDesc, "rms_norm input");
+    if (!xDtype) return make_error(xDtype.error());
+
+    auto weightDtype = require_f32(weightDesc, "rms_norm weight");
+    if (!weightDtype) return make_error(weightDtype.error());
+
+    if (xDesc.shape.rank() < 1)
+        return make_error("rms_norm input must have rank >= 1");
+    if (weightDesc.shape.rank() != 1)
+        return make_error("rms_norm weight must have rank 1");
+
+    int64_t hidden = xDesc.shape.dim(xDesc.shape.rank() - 1);
+    if (hidden < 0)
+        return make_error("rms_norm hidden dimension must be static");
+    if (weightDesc.shape.dim(0) != hidden)
+        return make_error("rms_norm weight dimension mismatch");
+
+    auto xBytes = require_bytes(x, xDesc, "rms_norm input");
+    if (!xBytes) return make_error(xBytes.error());
+
+    auto weightBytes = require_bytes(weight, weightDesc, "rms_norm weight");
+    if (!weightBytes) return make_error(weightBytes.error());
+
+    int64_t total = xDesc.shape.numel();
+    if (total < 0)
+        return make_error("rms_norm input must have static shape");
+
+    OwnedTensor out;
+    out.desc = xDesc;
+    out.data.resize(x.size());
+
+    size_t rows = static_cast<size_t>(total / hidden);
+    size_t cols = static_cast<size_t>(hidden);
+    for (size_t row = 0; row < rows; row++) {
+        double squareSum = 0.0;
+        size_t rowOffset = row * cols;
+        for (size_t col = 0; col < cols; col++) {
+            float xv = read_f32(x, rowOffset + col);
+            squareSum += static_cast<double>(xv) * static_cast<double>(xv);
+        }
+
+        float invRms = 1.0f / std::sqrt(
+            static_cast<float>(squareSum / static_cast<double>(cols)) + epsilon);
+        for (size_t col = 0; col < cols; col++) {
+            float xv = read_f32(x, rowOffset + col);
+            float wv = read_f32(weight, col);
+            write_f32(out.data, rowOffset + col, xv * invRms * wv);
+        }
+    }
 
     return out;
 }

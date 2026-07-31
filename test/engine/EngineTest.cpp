@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstdint>
+#include <cmath>
 #include <cstring>
 #include <memory>
 #include <span>
@@ -173,6 +174,58 @@ TEST(TensorCalcTest, ReLUF32) {
     EXPECT_FLOAT_EQ(read_f32(out.data, 2), 3.0f);
 }
 
+TEST(TensorCalcTest, RMSNormF32) {
+    auto x = f32_bytes({1.0f, 2.0f, 2.0f, 0.0f, 3.0f, 4.0f});
+    auto weight = f32_bytes({1.0f, 10.0f, -1.0f});
+    constexpr float eps = 1.0e-6f;
+
+    auto result = sandy::core::rms_norm_f32(
+        x, sandy::core::TensorDesc(sandy::core::Shape({2, 3}), sandy::core::DType::F32),
+        weight, sandy::core::TensorDesc(sandy::core::Shape({3}), sandy::core::DType::F32),
+        eps);
+
+    ASSERT_TRUE(result) << result.error();
+    auto out = result.take();
+    EXPECT_EQ(out.desc.shape, sandy::core::Shape({2, 3}));
+
+    float row0Scale = 1.0f / std::sqrt(3.0f + eps);
+    float row1Scale = 1.0f / std::sqrt((25.0f / 3.0f) + eps);
+    EXPECT_NEAR(read_f32(out.data, 0), 1.0f * row0Scale, 1.0e-5f);
+    EXPECT_NEAR(read_f32(out.data, 1), 20.0f * row0Scale, 1.0e-5f);
+    EXPECT_NEAR(read_f32(out.data, 2), -2.0f * row0Scale, 1.0e-5f);
+    EXPECT_NEAR(read_f32(out.data, 3), 0.0f, 1.0e-5f);
+    EXPECT_NEAR(read_f32(out.data, 4), 30.0f * row1Scale, 1.0e-5f);
+    EXPECT_NEAR(read_f32(out.data, 5), -4.0f * row1Scale, 1.0e-5f);
+}
+
+TEST(TensorCalcTest, RMSNormF32Rank3NormalizesLastDim) {
+    auto x = f32_bytes({
+        1.0f, 2.0f,
+        3.0f, 4.0f,
+        5.0f, 6.0f,
+        7.0f, 8.0f,
+    });
+    auto weight = f32_bytes({2.0f, -1.0f});
+    constexpr float eps = 1.0e-6f;
+
+    auto result = sandy::core::rms_norm_f32(
+        x, sandy::core::TensorDesc(sandy::core::Shape({2, 2, 2}), sandy::core::DType::F32),
+        weight, sandy::core::TensorDesc(sandy::core::Shape({2}), sandy::core::DType::F32),
+        eps);
+
+    ASSERT_TRUE(result) << result.error();
+    auto out = result.take();
+    EXPECT_EQ(out.desc.shape, sandy::core::Shape({2, 2, 2}));
+
+    for (size_t row = 0; row < 4; row++) {
+        float a = static_cast<float>(row * 2 + 1);
+        float b = static_cast<float>(row * 2 + 2);
+        float scale = 1.0f / std::sqrt(((a * a) + (b * b)) / 2.0f + eps);
+        EXPECT_NEAR(read_f32(out.data, row * 2), a * scale * 2.0f, 1.0e-5f);
+        EXPECT_NEAR(read_f32(out.data, row * 2 + 1), b * scale * -1.0f, 1.0e-5f);
+    }
+}
+
 TEST(CpuInterpretTest, EngineRunReturnsOutput0) {
     sandy::ir::mid_ir::register_all_ops();
 
@@ -209,4 +262,50 @@ TEST(CpuInterpretTest, EngineRunReturnsOutput0) {
     EXPECT_EQ(it->second->desc().shape, sandy::core::Shape({1, 2}));
     EXPECT_FLOAT_EQ(read_f32(it->second->data(), 0), 18.0f);
     EXPECT_FLOAT_EQ(read_f32(it->second->data(), 1), 25.0f);
+}
+
+TEST(CpuInterpretTest, RMSNorm) {
+    sandy::ir::mid_ir::register_all_ops();
+
+    sandy::ir::mid_ir::Graph graph;
+    sandy::ir::mid_ir::Builder builder(graph);
+    auto* x = builder.createInput("x", sandy::core::Shape({2, 3}), sandy::core::DType::F32);
+    auto* weight = builder.createWeight("norm.weight", sandy::core::Shape({3}), sandy::core::DType::F32);
+    auto* out = builder.createRMSNorm(x, weight);
+    sandy::ir::mid_ir::Value* outputs[] = {out};
+    builder.setOutputs(outputs);
+
+    sandy::engine::Engine engine(
+        std::make_unique<sandy::engine::backend::CpuInterpreterBackend>());
+
+    auto planResult = engine.create_plan(graph);
+    ASSERT_TRUE(planResult) << planResult.error();
+    auto plan = planResult.take();
+
+    sandy::engine::TensorMap inputs;
+    inputs["x"] = make_f32_buffer(
+        "x", sandy::core::Shape({2, 3}), {1.0f, 2.0f, 2.0f, 0.0f, 3.0f, 4.0f});
+
+    sandy::engine::TensorMap weights;
+    weights["norm.weight"] = make_f32_buffer(
+        "norm.weight", sandy::core::Shape({3}), {1.0f, 10.0f, -1.0f});
+
+    auto runResult = engine.run(*plan, inputs, weights);
+    ASSERT_TRUE(runResult) << runResult.error();
+    auto outputsMap = runResult.take();
+
+    auto it = outputsMap.find("output0");
+    ASSERT_NE(it, outputsMap.end());
+    ASSERT_NE(it->second, nullptr);
+    EXPECT_EQ(it->second->desc().shape, sandy::core::Shape({2, 3}));
+
+    constexpr float eps = 1.0e-6f;
+    float row0Scale = 1.0f / std::sqrt(3.0f + eps);
+    float row1Scale = 1.0f / std::sqrt((25.0f / 3.0f) + eps);
+    EXPECT_NEAR(read_f32(it->second->data(), 0), 1.0f * row0Scale, 1.0e-5f);
+    EXPECT_NEAR(read_f32(it->second->data(), 1), 20.0f * row0Scale, 1.0e-5f);
+    EXPECT_NEAR(read_f32(it->second->data(), 2), -2.0f * row0Scale, 1.0e-5f);
+    EXPECT_NEAR(read_f32(it->second->data(), 3), 0.0f, 1.0e-5f);
+    EXPECT_NEAR(read_f32(it->second->data(), 4), 30.0f * row1Scale, 1.0e-5f);
+    EXPECT_NEAR(read_f32(it->second->data(), 5), -4.0f * row1Scale, 1.0e-5f);
 }

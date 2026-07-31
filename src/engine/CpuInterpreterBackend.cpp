@@ -49,6 +49,16 @@ std::string attr_string(const ir::mid_ir::Op& op, const std::string& name) {
     return it->second.strVal;
 }
 
+float attr_float_or(const ir::mid_ir::Op& op, const std::string& name, float fallback) {
+    auto it = op.attrs.find(name);
+    if (it == op.attrs.end()) return fallback;
+    if (it->second.kind != ir::mid_ir::AttrValue::Float) {
+        fprintf(stderr, "attr '%s' must be float\n", name.c_str());
+        abort();
+    }
+    return static_cast<float>(it->second.floatVal);
+}
+
 Result<const BackendBuffer*> lookup_buffer(
         const BackendBufferMap& buffers,
         const std::string& name,
@@ -116,6 +126,23 @@ Result<core::OwnedTensor> eval_relu(
     return core::relu_f32((*x)->data(), (*x)->desc());
 }
 
+Result<core::OwnedTensor> eval_rms_norm(
+        const ir::mid_ir::Op& op,
+        const std::unordered_map<const ir::mid_ir::Value*, const BackendBuffer*>& values) {
+    if (op.operands.size() != 2)
+        return make_error("rms_norm expects two operands");
+
+    auto x = lookup_value(values, op.operands[0]);
+    if (!x) return make_error(x.error());
+    auto weight = lookup_value(values, op.operands[1]);
+    if (!weight) return make_error(weight.error());
+
+    return core::rms_norm_f32(
+        (*x)->data(), (*x)->desc(),
+        (*weight)->data(), (*weight)->desc(),
+        attr_float_or(op, "epsilon", 1.0e-6f));
+}
+
 Result<void> copy_output(BackendBufferMap& outputs,
                          const std::string& name,
                          const BackendBuffer& source) {
@@ -163,6 +190,14 @@ Result<BackendRunResult> interpret_graph(
             }
             case ir::mid_ir::OpKind::ReLU: {
                 auto tensor = eval_relu(*op, values);
+                if (!tensor) return make_error(tensor.error());
+                temporaries.push_back(make_cpu_buffer(tensor.take()));
+                auto bind = bind_single_result(*op, temporaries.back().get(), values);
+                if (!bind) return make_error(bind.error());
+                break;
+            }
+            case ir::mid_ir::OpKind::RMSNorm: {
+                auto tensor = eval_rms_norm(*op, values);
                 if (!tensor) return make_error(tensor.error());
                 temporaries.push_back(make_cpu_buffer(tensor.take()));
                 auto bind = bind_single_result(*op, temporaries.back().get(), values);

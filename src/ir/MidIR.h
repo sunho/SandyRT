@@ -18,6 +18,7 @@ enum class OpKind {
     Weight,
     Linear,
     ReLU,
+    RMSNorm,
 
     NUM_KINDS
 };
@@ -152,6 +153,7 @@ public:
 
     Value* createLinear(Value* x, Value* weight, Value* bias);
     Value* createReLU(Value* x);
+    Value* createRMSNorm(Value* x, Value* weight, float epsilon = 1.0e-6f);
 
     void setOutputs(std::span<Value* const> outputs);
 

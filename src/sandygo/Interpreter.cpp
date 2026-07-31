@@ -7,7 +7,10 @@ namespace sandy::sandygo {
 Interpreter::Interpreter(const Program& program, ir::high_ir::Graph& graph)
     : program_(program), graph_(graph) {
     for (auto& func : program_.funcs) {
-        funcTable_[func.name] = &func;
+        auto [it, inserted] = funcTable_.emplace(func.name, &func);
+        if (!inserted) {
+            error("duplicate function '" + func.name + "'");
+        }
     }
 }
 

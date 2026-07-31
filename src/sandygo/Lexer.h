@@ -6,7 +6,7 @@
 namespace sandy::sandygo {
 
 enum class TokenKind {
-    Func, Return, For, If, Else, Var, WeightScope,
+    Func, Return, For, If, Else, Var, Import, WeightScope,
 
     Ident, IntLit, FloatLit, StringLit, WeightLit,
 

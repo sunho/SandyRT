@@ -16,6 +16,7 @@ const char* op_kind_name(OpKind kind) {
         case OpKind::Weight:    return "weight";
         case OpKind::Linear:    return "linear";
         case OpKind::ReLU:      return "relu";
+        case OpKind::RMSNorm:   return "rms_norm";
         case OpKind::NUM_KINDS: return "?";
     }
     return "?";
@@ -102,15 +103,58 @@ public:
     }
 };
 
+class RMSNormOpDef : public OpDef {
+public:
+    OpKind kind() const override { return OpKind::RMSNorm; }
+    const char* name() const override { return "rms_norm"; }
+    std::vector<ValueType> infer_types(
+        std::span<Value* const> operands,
+        const AttrMap&) const override
+    {
+        return {{operands[0]->shape, operands[0]->dtype}};
+    }
+    void verify(
+        std::span<Value* const> operands,
+        const AttrMap& attrs) const override
+    {
+        if (operands.size() != 2) {
+            fprintf(stderr, "rms_norm expects 2 operands (x, weight), got %zu\n",
+                    operands.size());
+            abort();
+        }
+        auto epsilon = attrs.find("epsilon");
+        if (epsilon != attrs.end() && epsilon->second.kind != AttrValue::Float) {
+            fprintf(stderr, "rms_norm epsilon attr must be float\n");
+            abort();
+        }
+        if (operands[0]->shape.rank() < 1) {
+            fprintf(stderr, "rms_norm input must have rank >= 1\n");
+            abort();
+        }
+        if (operands[1]->shape.rank() != 1) {
+            fprintf(stderr, "rms_norm weight must have rank 1\n");
+            abort();
+        }
+        int64_t hidden = operands[0]->shape.dim(operands[0]->shape.rank() - 1);
+        int64_t weightDim = operands[1]->shape.dim(0);
+        if (hidden >= 0 && weightDim >= 0 && hidden != weightDim) {
+            fprintf(stderr, "rms_norm weight dimension mismatch\n");
+            abort();
+        }
+    }
+};
+
 } // anonymous namespace
 
 void register_all_ops() {
     static ReLUOpDef relu_def;
     static LinearOpDef linear_def;
+    static RMSNormOpDef rms_norm_def;
 
     auto& reg = OpRegistry::global();
     reg.add(&relu_def);
     reg.add(&linear_def);
+    reg.add(&rms_norm_def);
 }
 
 // === Graph ===
@@ -259,6 +303,13 @@ Value* Builder::createLinear(Value* x, Value* weight, Value* bias) {
 Value* Builder::createReLU(Value* x) {
     Value* operands[] = {x};
     return createOp(OpKind::ReLU, operands)[0];
+}
+
+Value* Builder::createRMSNorm(Value* x, Value* weight, float epsilon) {
+    Value* operands[] = {x, weight};
+    AttrMap attrs;
+    attrs["epsilon"] = AttrValue::make_float(epsilon);
+    return createOp(OpKind::RMSNorm, operands, attrs)[0];
 }
 
 void Builder::setOutputs(std::span<Value* const> outputs) {

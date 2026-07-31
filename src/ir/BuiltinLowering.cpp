@@ -27,6 +27,17 @@ BuiltinLowering BuiltinLowering::createDefault() {
         return {builder.createReLU(operands[0])};
     });
 
+    bl.add("rms_norm", [](Builder& builder,
+                           const std::vector<Value*>& operands,
+                           const AttrMap& attrs) -> std::vector<Value*> {
+        float epsilon = 1.0e-6f;
+        auto it = attrs.find("epsilon");
+        if (it != attrs.end() && it->second.kind == AttrValue::Float) {
+            epsilon = static_cast<float>(it->second.floatVal);
+        }
+        return {builder.createRMSNorm(operands[0], operands[1], epsilon)};
+    });
+
     return bl;
 }
 

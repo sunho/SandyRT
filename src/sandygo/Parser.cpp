@@ -55,9 +55,26 @@ Program Parser::parse() {
     while (!check(TokenKind::Eof) && !hasError_) {
         while (match(TokenKind::Semicolon)) {}
         if (check(TokenKind::Eof)) break;
-        prog.funcs.push_back(parseFuncDecl());
+        if (check(TokenKind::Import)) {
+            prog.imports.push_back(parseImportDecl());
+        } else {
+            prog.funcs.push_back(parseFuncDecl());
+        }
     }
     return prog;
+}
+
+ImportDecl Parser::parseImportDecl() {
+    ImportDecl decl;
+    decl.line = peek().line;
+
+    expect(TokenKind::Import, "expected 'import'");
+    if (hasError_) return decl;
+
+    Token path = expect(TokenKind::StringLit, "expected import path string");
+    if (hasError_) return decl;
+    decl.path = path.value;
+    return decl;
 }
 
 FuncDecl Parser::parseFuncDecl() {

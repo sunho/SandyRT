@@ -16,6 +16,7 @@ public:
     const std::string& errorMessage() const { return error_; }
 
 private:
+    ImportDecl parseImportDecl();
     FuncDecl parseFuncDecl();
     std::vector<Param> parseParams();
     TypeExpr parseType();

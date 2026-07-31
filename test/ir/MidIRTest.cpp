@@ -57,6 +57,19 @@ TEST_F(MidIRTest, ReLUTypeInference) {
     EXPECT_EQ(out->dtype, x->dtype);
 }
 
+TEST_F(MidIRTest, RMSNormTypeInference) {
+    sandy::ir::mid_ir::Graph graph;
+    sandy::ir::mid_ir::Builder builder(graph);
+
+    auto* x = builder.createInput("x", sandy::core::Shape({2, 3}), sandy::core::DType::F32);
+    auto* weight = builder.createWeight("norm.weight", sandy::core::Shape({3}), sandy::core::DType::F32);
+    auto* out = builder.createRMSNorm(x, weight);
+
+    EXPECT_EQ(out->shape, x->shape);
+    EXPECT_EQ(out->dtype, x->dtype);
+    EXPECT_EQ(out->def->kind, sandy::ir::mid_ir::OpKind::RMSNorm);
+}
+
 TEST_F(MidIRTest, UseDefChains) {
     sandy::ir::mid_ir::Graph graph;
     sandy::ir::mid_ir::Builder builder(graph);

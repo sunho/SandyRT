@@ -29,6 +29,21 @@ func f() Node {
     EXPECT_EQ(prog.funcs[0].body[0]->kind, Stmt::Return);
 }
 
+TEST(Parser, ImportDecl) {
+    auto prog = parseSource(R"(
+import "layers.sandy.go"
+
+func f() Node {
+    return x
+}
+)");
+    ASSERT_EQ(prog.imports.size(), 1u);
+    EXPECT_EQ(prog.imports[0].path, "layers.sandy.go");
+    EXPECT_EQ(prog.imports[0].line, 2);
+    ASSERT_EQ(prog.funcs.size(), 1u);
+    EXPECT_EQ(prog.funcs[0].name, "f");
+}
+
 TEST(Parser, FunctionWithParams) {
     auto prog = parseSource(R"(
 func f(x Node, i int, s string) Node {

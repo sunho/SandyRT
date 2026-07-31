@@ -84,6 +84,23 @@ set_target_properties(materialize_tests PROPERTIES
 
 gtest_discover_tests(materialize_tests)
 
+add_executable(compiler_tests
+  compiler/CompilerTest.cpp
+)
+
+target_link_libraries(compiler_tests
+  PRIVATE
+  SandyCompilerLib
+  GTest::gtest_main
+)
+
+set_target_properties(compiler_tests PROPERTIES
+  CXX_STANDARD 20
+  CXX_STANDARD_REQUIRED ON
+)
+
+gtest_discover_tests(compiler_tests)
+
 add_executable(engine_tests
   engine/EngineTest.cpp
 )

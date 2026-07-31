@@ -11,6 +11,7 @@ const char* tokenKindName(TokenKind kind) {
         case TokenKind::If: return "if";
         case TokenKind::Else: return "else";
         case TokenKind::Var: return "var";
+        case TokenKind::Import: return "import";
         case TokenKind::WeightScope: return "weight_scope";
         case TokenKind::Ident: return "IDENT";
         case TokenKind::IntLit: return "INT";
@@ -123,6 +124,7 @@ Token Lexer::scanIdent() {
     if (word == "if") return makeToken(TokenKind::If, word);
     if (word == "else") return makeToken(TokenKind::Else, word);
     if (word == "var") return makeToken(TokenKind::Var, word);
+    if (word == "import") return makeToken(TokenKind::Import, word);
     if (word == "weight_scope") return makeToken(TokenKind::WeightScope, word);
 
     return makeToken(TokenKind::Ident, word);
