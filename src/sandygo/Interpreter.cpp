@@ -184,6 +184,7 @@ RuntimeValue Interpreter::evalExpr(const Expr& expr) {
         case Expr::IntLit:    return RuntimeValue::makeInt(expr.ival);
         case Expr::FloatLit:  return RuntimeValue::makeFloat(expr.fval);
         case Expr::StringLit: return RuntimeValue::makeString(expr.sval);
+        case Expr::IntListLit: return RuntimeValue::makeIntList(expr.intListVal);
         case Expr::WeightLit: {
             auto v = graph_.addWeight(resolveWeight(expr.sval));
             return RuntimeValue::makeNode(v);
@@ -226,6 +227,9 @@ RuntimeValue Interpreter::evalCall(const Expr& expr) {
                     break;
                 case RuntimeValue::String:
                     attrs.push_back(ir::high_ir::Attr::fromString(na.name, val.strVal));
+                    break;
+                case RuntimeValue::IntList:
+                    attrs.push_back(ir::high_ir::Attr::fromIntList(na.name, val.intListVal));
                     break;
                 default:
                     error("named arg '" + na.name + "' must be compile-time");

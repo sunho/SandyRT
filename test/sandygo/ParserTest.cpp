@@ -226,6 +226,20 @@ func f() {
     EXPECT_EQ(call->namedArgs[1].value->ival, 1);
 }
 
+TEST(Parser, FunctionCallWithIntListNamedArg) {
+    auto prog = parseSource(R"(
+func f() {
+    x := __reshape(x, shape=[1, 16, 12, 64])
+}
+)");
+    auto& call = prog.funcs[0].body[0]->value;
+    ASSERT_EQ(call->kind, Expr::Call);
+    ASSERT_EQ(call->namedArgs.size(), 1u);
+    EXPECT_EQ(call->namedArgs[0].name, "shape");
+    ASSERT_EQ(call->namedArgs[0].value->kind, Expr::IntListLit);
+    EXPECT_EQ(call->namedArgs[0].value->intListVal, (std::vector<int64_t>{1, 16, 12, 64}));
+}
+
 TEST(Parser, IndexExpr) {
     auto prog = parseSource(R"(
 func f() {

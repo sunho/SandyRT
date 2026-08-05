@@ -5,16 +5,18 @@
 
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace sandy::sandygo {
 
 struct RuntimeValue {
-    enum Kind { Void, Int, Float, String, NodeVal, Tuple };
+    enum Kind { Void, Int, Float, String, IntList, NodeVal, Tuple };
     Kind kind = Void;
     int64_t intVal = 0;
     double floatVal = 0.0;
     std::string strVal;
+    std::vector<int64_t> intListVal;
     ir::high_ir::Value* nodeVal = nullptr;
     std::vector<RuntimeValue> tupleVals;
 
@@ -26,6 +28,9 @@ struct RuntimeValue {
     }
     static RuntimeValue makeString(const std::string& v) {
         RuntimeValue rv; rv.kind = String; rv.strVal = v; return rv;
+    }
+    static RuntimeValue makeIntList(std::vector<int64_t> v) {
+        RuntimeValue rv; rv.kind = IntList; rv.intListVal = std::move(v); return rv;
     }
     static RuntimeValue makeNode(ir::high_ir::Value* v) {
         RuntimeValue rv; rv.kind = NodeVal; rv.nodeVal = v; return rv;

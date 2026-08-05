@@ -64,6 +64,14 @@ void dump_expr(const sandy::sandygo::Expr& e, int depth) {
         case sandy::sandygo::Expr::WeightLit:
             std::cout << "Weight(@" << e.sval << ")\n";
             break;
+        case sandy::sandygo::Expr::IntListLit:
+            std::cout << "IntList[";
+            for (size_t i = 0; i < e.intListVal.size(); i++) {
+                if (i > 0) std::cout << ", ";
+                std::cout << e.intListVal[i];
+            }
+            std::cout << "]\n";
+            break;
         case sandy::sandygo::Expr::Binary:
             std::cout << "Binary(" << e.op << ")\n";
             dump_expr(*e.left, depth + 1);

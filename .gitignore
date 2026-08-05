@@ -2,3 +2,4 @@ build/
 experiments/mnist/data/
 experiments/mnist/.venv/
 experiments/mnist/*.safetensors
+experiments/gpt2_small/model.safetensors

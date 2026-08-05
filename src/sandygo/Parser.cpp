@@ -425,6 +425,22 @@ ExprPtr Parser::parsePrimary() {
         Token tok = advance();
         return makeIdent(tok.value, tok.line, tok.col);
     }
+    if (check(TokenKind::LBracket)) {
+        Token start = advance();
+        std::vector<int64_t> values;
+        if (!check(TokenKind::RBracket)) {
+            while (true) {
+                Token value = expect(TokenKind::IntLit, "expected integer in int list literal");
+                if (hasError_) return std::make_unique<Expr>();
+                values.push_back(std::strtoll(value.value.c_str(), nullptr, 10));
+                if (!match(TokenKind::Comma)) break;
+                if (check(TokenKind::RBracket)) break;
+            }
+        }
+        expect(TokenKind::RBracket, "expected ']'");
+        if (hasError_) return std::make_unique<Expr>();
+        return makeIntListLit(std::move(values), start.line, start.col);
+    }
     if (match(TokenKind::LParen)) {
         ExprPtr expr = parseExpr();
         if (hasError_) return expr;

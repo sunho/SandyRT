@@ -33,7 +33,7 @@ struct NamedArg {
 
 struct Expr {
     enum Kind {
-        Ident, IntLit, FloatLit, StringLit, WeightLit,
+        Ident, IntLit, FloatLit, StringLit, WeightLit, IntListLit,
         Binary, Unary, Call, Index
     };
     Kind kind;
@@ -50,6 +50,7 @@ struct Expr {
 
     std::vector<ExprPtr> args;
     std::vector<NamedArg> namedArgs;
+    std::vector<int64_t> intListVal;
 };
 
 struct Stmt {
@@ -138,6 +139,15 @@ inline ExprPtr makeWeightLit(const std::string& path, int line = 0, int col = 0)
     auto e = std::make_unique<Expr>();
     e->kind = Expr::WeightLit;
     e->sval = path;
+    e->line = line;
+    e->col = col;
+    return e;
+}
+
+inline ExprPtr makeIntListLit(std::vector<int64_t> values, int line = 0, int col = 0) {
+    auto e = std::make_unique<Expr>();
+    e->kind = Expr::IntListLit;
+    e->intListVal = std::move(values);
     e->line = line;
     e->col = col;
     return e;
