@@ -59,6 +59,15 @@ float attr_float_or(const ir::mid_ir::Op& op, const std::string& name, float fal
     return static_cast<float>(it->second.floatVal);
 }
 
+std::vector<int64_t> attr_int_list(const ir::mid_ir::Op& op, const std::string& name) {
+    auto it = op.attrs.find(name);
+    if (it == op.attrs.end() || it->second.kind != ir::mid_ir::AttrValue::IntList) {
+        fprintf(stderr, "missing int list attr '%s'\n", name.c_str());
+        abort();
+    }
+    return it->second.intListVal;
+}
+
 Result<const BackendBuffer*> lookup_buffer(
         const BackendBufferMap& buffers,
         const std::string& name,
@@ -198,6 +207,19 @@ Result<core::OwnedTensor> eval_transpose(
     return core::transpose_f32((*x)->data(), (*x)->desc());
 }
 
+Result<core::OwnedTensor> eval_permute(
+        const ir::mid_ir::Op& op,
+        const std::unordered_map<const ir::mid_ir::Value*, const BackendBuffer*>& values) {
+    if (op.operands.size() != 1)
+        return make_error("permute expects one operand");
+
+    auto x = lookup_value(values, op.operands[0]);
+    if (!x) return make_error(x.error());
+
+    auto dims = attr_int_list(op, "dims");
+    return core::permute_f32((*x)->data(), (*x)->desc(), dims);
+}
+
 Result<core::OwnedTensor> eval_embedding(
         const ir::mid_ir::Op& op,
         const std::unordered_map<const ir::mid_ir::Value*, const BackendBuffer*>& values) {
@@ -318,6 +340,14 @@ Result<BackendRunResult> interpret_graph(
             }
             case ir::mid_ir::OpKind::Transpose: {
                 auto tensor = eval_transpose(*op, values);
+                if (!tensor) return make_error(tensor.error());
+                temporaries.push_back(make_cpu_buffer(tensor.take()));
+                auto bind = bind_single_result(*op, temporaries.back().get(), values);
+                if (!bind) return make_error(bind.error());
+                break;
+            }
+            case ir::mid_ir::OpKind::Permute: {
+                auto tensor = eval_permute(*op, values);
                 if (!tensor) return make_error(tensor.error());
                 temporaries.push_back(make_cpu_buffer(tensor.take()));
                 auto bind = bind_single_result(*op, temporaries.back().get(), values);

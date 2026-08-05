@@ -403,6 +403,65 @@ Result<OwnedTensor> transpose_f32(
     return out;
 }
 
+Result<OwnedTensor> permute_f32(
+        std::span<const uint8_t> x,
+        const TensorDesc& xDesc,
+        std::span<const int64_t> dims) {
+    auto xDtype = require_f32(xDesc, "permute input");
+    if (!xDtype) return make_error(xDtype.error());
+
+    int rank = xDesc.shape.rank();
+    if (static_cast<int>(dims.size()) != rank)
+        return make_error("permute dims size must match input rank");
+
+    std::vector<bool> seen(static_cast<size_t>(rank), false);
+    std::vector<int64_t> outDims;
+    outDims.reserve(dims.size());
+    for (int64_t axis : dims) {
+        if (axis < 0 || axis >= rank)
+            return make_error("permute axis out of range");
+        auto index = static_cast<size_t>(axis);
+        if (seen[index])
+            return make_error("permute dims must not contain duplicates");
+        seen[index] = true;
+        outDims.push_back(xDesc.shape.dim(static_cast<int>(axis)));
+    }
+
+    auto xBytes = require_bytes(x, xDesc, "permute input");
+    if (!xBytes) return make_error(xBytes.error());
+
+    Shape outShape(outDims);
+    int64_t outNumel = outShape.numel();
+    if (outNumel < 0)
+        return make_error("permute output must have static shape");
+
+    auto inputStrides = strides_for(xDesc.shape);
+    auto outputStrides = strides_for(outShape);
+
+    OwnedTensor out;
+    out.desc = TensorDesc(outShape, DType::F32);
+    out.data.resize(static_cast<size_t>(outNumel) * sizeof(float));
+
+    for (size_t outIndex = 0; outIndex < static_cast<size_t>(outNumel); outIndex++) {
+        size_t sourceIndex = 0;
+        size_t remaining = outIndex;
+        for (int axisIndex = 0; axisIndex < rank; axisIndex++) {
+            size_t stride = static_cast<size_t>(outputStrides[static_cast<size_t>(axisIndex)]);
+            size_t coord = 0;
+            if (stride != 0) {
+                coord = remaining / stride;
+                remaining %= stride;
+            }
+            int inputAxis = static_cast<int>(dims[static_cast<size_t>(axisIndex)]);
+            sourceIndex += coord *
+                static_cast<size_t>(inputStrides[static_cast<size_t>(inputAxis)]);
+        }
+        write_f32(out.data, outIndex, read_f32(x, sourceIndex));
+    }
+
+    return out;
+}
+
 Result<OwnedTensor> embedding_f32(
         std::span<const uint8_t> ids,
         const TensorDesc& idsDesc,

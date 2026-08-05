@@ -22,6 +22,7 @@ const char* op_kind_name(OpKind kind) {
         case OpKind::Sqrt:      return "sqrt";
         case OpKind::MatMul:    return "matmul";
         case OpKind::Transpose: return "transpose";
+        case OpKind::Permute:   return "permute";
         case OpKind::Embedding: return "embedding";
         case OpKind::RMSNorm:   return "rms_norm";
         case OpKind::NUM_KINDS: return "?";
@@ -41,6 +42,10 @@ AttrValue AttrValue::make_float(double v) {
 
 AttrValue AttrValue::make_string(const std::string& v) {
     AttrValue a; a.kind = String; a.strVal = v; return a;
+}
+
+AttrValue AttrValue::make_int_list(std::vector<int64_t> v) {
+    AttrValue a; a.kind = IntList; a.intListVal = std::move(v); return a;
 }
 
 // === OpRegistry ===
@@ -260,6 +265,59 @@ public:
     }
 };
 
+class PermuteOpDef : public OpDef {
+public:
+    OpKind kind() const override { return OpKind::Permute; }
+    const char* name() const override { return "permute"; }
+    std::vector<ValueType> infer_types(
+        std::span<Value* const> operands,
+        const AttrMap& attrs) const override
+    {
+        const auto& dims = attrs.at("dims").intListVal;
+        std::vector<int64_t> outDims;
+        outDims.reserve(dims.size());
+        for (int64_t axis : dims)
+            outDims.push_back(operands[0]->shape.dim(static_cast<int>(axis)));
+        return {{core::Shape(outDims), operands[0]->dtype}};
+    }
+    void verify(
+        std::span<Value* const> operands,
+        const AttrMap& attrs) const override
+    {
+        if (operands.size() != 1) {
+            fprintf(stderr, "permute expects 1 operand, got %zu\n", operands.size());
+            abort();
+        }
+
+        auto it = attrs.find("dims");
+        if (it == attrs.end() || it->second.kind != AttrValue::IntList) {
+            fprintf(stderr, "permute dims attr must be int list\n");
+            abort();
+        }
+
+        const auto& dims = it->second.intListVal;
+        int rank = operands[0]->shape.rank();
+        if (static_cast<int>(dims.size()) != rank) {
+            fprintf(stderr, "permute dims size must match input rank\n");
+            abort();
+        }
+
+        std::vector<bool> seen(static_cast<size_t>(rank), false);
+        for (int64_t axis : dims) {
+            if (axis < 0 || axis >= rank) {
+                fprintf(stderr, "permute axis out of range\n");
+                abort();
+            }
+            auto index = static_cast<size_t>(axis);
+            if (seen[index]) {
+                fprintf(stderr, "permute dims must not contain duplicates\n");
+                abort();
+            }
+            seen[index] = true;
+        }
+    }
+};
+
 class EmbeddingOpDef : public OpDef {
 public:
     OpKind kind() const override { return OpKind::Embedding; }
@@ -348,6 +406,7 @@ void register_all_ops() {
     static SqrtOpDef sqrt_def;
     static MatMulOpDef matmul_def;
     static TransposeOpDef transpose_def;
+    static PermuteOpDef permute_def;
     static EmbeddingOpDef embedding_def;
     static RMSNormOpDef rms_norm_def;
 
@@ -359,6 +418,7 @@ void register_all_ops() {
     reg.add(&sqrt_def);
     reg.add(&matmul_def);
     reg.add(&transpose_def);
+    reg.add(&permute_def);
     reg.add(&embedding_def);
     reg.add(&rms_norm_def);
 }
@@ -387,6 +447,14 @@ static void printAttrVal(const AttrValue& a) {
         case AttrValue::Int:    std::cout << a.intVal; break;
         case AttrValue::Float:  std::cout << a.floatVal; break;
         case AttrValue::String: std::cout << "\"" << a.strVal << "\""; break;
+        case AttrValue::IntList:
+            std::cout << "[";
+            for (size_t i = 0; i < a.intListVal.size(); i++) {
+                if (i > 0) std::cout << ", ";
+                std::cout << a.intListVal[i];
+            }
+            std::cout << "]";
+            break;
     }
 }
 
@@ -534,6 +602,13 @@ Value* Builder::createMatMul(Value* lhs, Value* rhs) {
 Value* Builder::createTranspose(Value* x) {
     Value* operands[] = {x};
     return createOp(OpKind::Transpose, operands)[0];
+}
+
+Value* Builder::createPermute(Value* x, std::vector<int64_t> dims) {
+    Value* operands[] = {x};
+    AttrMap attrs;
+    attrs["dims"] = AttrValue::make_int_list(std::move(dims));
+    return createOp(OpKind::Permute, operands, attrs)[0];
 }
 
 Value* Builder::createEmbedding(Value* ids, Value* weight) {

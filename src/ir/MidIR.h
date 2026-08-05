@@ -23,6 +23,7 @@ enum class OpKind {
     Sqrt,
     MatMul,
     Transpose,
+    Permute,
     Embedding,
     RMSNorm,
 
@@ -34,15 +35,17 @@ const char* op_kind_name(OpKind kind);
 // === Attrs ===
 
 struct AttrValue {
-    enum Kind { Int, Float, String };
+    enum Kind { Int, Float, String, IntList };
     Kind kind;
     int64_t intVal = 0;
     double floatVal = 0.0;
     std::string strVal;
+    std::vector<int64_t> intListVal;
 
     static AttrValue make_int(int64_t v);
     static AttrValue make_float(double v);
     static AttrValue make_string(const std::string& v);
+    static AttrValue make_int_list(std::vector<int64_t> v);
 };
 
 using AttrMap = std::unordered_map<std::string, AttrValue>;
@@ -164,6 +167,7 @@ public:
     Value* createSqrt(Value* x);
     Value* createMatMul(Value* lhs, Value* rhs);
     Value* createTranspose(Value* x);
+    Value* createPermute(Value* x, std::vector<int64_t> dims);
     Value* createEmbedding(Value* ids, Value* weight);
     Value* createRMSNorm(Value* x, Value* weight, float epsilon = 1.0e-6f);
 

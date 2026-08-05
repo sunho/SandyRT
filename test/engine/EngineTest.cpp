@@ -354,6 +354,39 @@ TEST(TensorCalcTest, TransposeF32Requires2D) {
     EXPECT_NE(rank3.error().find("rank 2"), std::string::npos);
 }
 
+TEST(TensorCalcTest, PermuteF32ReordersAxes) {
+    auto x = f32_bytes({
+        0.0f, 1.0f, 2.0f, 3.0f,
+        4.0f, 5.0f, 6.0f, 7.0f,
+        8.0f, 9.0f, 10.0f, 11.0f,
+        12.0f, 13.0f, 14.0f, 15.0f,
+        16.0f, 17.0f, 18.0f, 19.0f,
+        20.0f, 21.0f, 22.0f, 23.0f,
+    });
+    std::vector<int64_t> dims = {0, 2, 1};
+
+    auto result = sandy::core::permute_f32(
+        x, sandy::core::TensorDesc(sandy::core::Shape({2, 3, 4}), sandy::core::DType::F32),
+        dims);
+
+    ASSERT_TRUE(result) << result.error();
+    auto out = result.take();
+    EXPECT_EQ(out.desc.shape, sandy::core::Shape({2, 4, 3}));
+
+    std::vector<float> expected = {
+        0.0f, 4.0f, 8.0f,
+        1.0f, 5.0f, 9.0f,
+        2.0f, 6.0f, 10.0f,
+        3.0f, 7.0f, 11.0f,
+        12.0f, 16.0f, 20.0f,
+        13.0f, 17.0f, 21.0f,
+        14.0f, 18.0f, 22.0f,
+        15.0f, 19.0f, 23.0f,
+    };
+    for (size_t i = 0; i < expected.size(); i++)
+        EXPECT_FLOAT_EQ(read_f32(out.data, i), expected[i]);
+}
+
 TEST(TensorCalcTest, EmbeddingF32WithI32Ids) {
     auto ids = i32_bytes({2, 0, 3});
     auto weight = f32_bytes({
@@ -633,6 +666,53 @@ TEST(CpuInterpretTest, GemmaStyleMatMulWithTransposedWeight) {
     EXPECT_FLOAT_EQ(read_f32(it->second->data(), 5), 5.0f);
     EXPECT_FLOAT_EQ(read_f32(it->second->data(), 6), 6.0f);
     EXPECT_FLOAT_EQ(read_f32(it->second->data(), 7), 15.0f);
+}
+
+TEST(CpuInterpretTest, PermuteAttentionLayout) {
+    sandy::ir::mid_ir::register_all_ops();
+
+    sandy::ir::mid_ir::Graph graph;
+    sandy::ir::mid_ir::Builder builder(graph);
+    auto* x = builder.createInput("x", sandy::core::Shape({1, 2, 3, 2}), sandy::core::DType::F32);
+    auto* out = builder.createPermute(x, {0, 2, 1, 3});
+    sandy::ir::mid_ir::Value* outputs[] = {out};
+    builder.setOutputs(outputs);
+
+    sandy::engine::Engine engine(
+        std::make_unique<sandy::engine::backend::CpuInterpreterBackend>());
+
+    auto planResult = engine.create_plan(graph);
+    ASSERT_TRUE(planResult) << planResult.error();
+    auto plan = planResult.take();
+
+    sandy::engine::TensorMap inputs;
+    inputs["x"] = make_f32_buffer(
+        "x", sandy::core::Shape({1, 2, 3, 2}), {
+            0.0f, 1.0f,
+            2.0f, 3.0f,
+            4.0f, 5.0f,
+            6.0f, 7.0f,
+            8.0f, 9.0f,
+            10.0f, 11.0f,
+        });
+
+    sandy::engine::TensorMap weights;
+    auto runResult = engine.run(*plan, inputs, weights);
+    ASSERT_TRUE(runResult) << runResult.error();
+    auto outputsMap = runResult.take();
+
+    auto it = outputsMap.find("output0");
+    ASSERT_NE(it, outputsMap.end());
+    ASSERT_NE(it->second, nullptr);
+    EXPECT_EQ(it->second->desc().shape, sandy::core::Shape({1, 3, 2, 2}));
+
+    std::vector<float> expected = {
+        0.0f, 1.0f, 6.0f, 7.0f,
+        2.0f, 3.0f, 8.0f, 9.0f,
+        4.0f, 5.0f, 10.0f, 11.0f,
+    };
+    for (size_t i = 0; i < expected.size(); i++)
+        EXPECT_FLOAT_EQ(read_f32(it->second->data(), i), expected[i]);
 }
 
 TEST(CpuInterpretTest, EmbeddingLoadsRowsFromFullWeightBuffer) {

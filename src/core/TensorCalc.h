@@ -52,6 +52,11 @@ Result<OwnedTensor> transpose_f32(
     std::span<const uint8_t> x,
     const TensorDesc& xDesc);
 
+Result<OwnedTensor> permute_f32(
+    std::span<const uint8_t> x,
+    const TensorDesc& xDesc,
+    std::span<const int64_t> dims);
+
 Result<OwnedTensor> embedding_f32(
     std::span<const uint8_t> ids,
     const TensorDesc& idsDesc,
