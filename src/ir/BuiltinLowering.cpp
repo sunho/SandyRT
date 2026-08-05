@@ -2,6 +2,30 @@
 
 namespace sandy::ir::mid_ir {
 
+namespace {
+
+Result<int64_t> get_int_attr(const AttrMap& attrs, const std::string& name) {
+    auto it = attrs.find(name);
+    if (it == attrs.end() || it->second.kind != AttrValue::Int)
+        return make_error("missing int attr '" + name + "'");
+    return it->second.intVal;
+}
+
+int64_t get_int_attr_or(const AttrMap& attrs, const std::string& name, int64_t fallback) {
+    auto it = attrs.find(name);
+    if (it == attrs.end() || it->second.kind != AttrValue::Int)
+        return fallback;
+    return it->second.intVal;
+}
+
+Result<void> expect_num_results(const std::string& name, int actual, int expected) {
+    if (actual != expected)
+        return make_error(name + " expects " + std::to_string(expected) + " result(s)");
+    return {};
+}
+
+} // namespace
+
 void BuiltinLowering::add(const std::string& name, LowerFn fn) {
     lowerings_[name] = std::move(fn);
 }
@@ -17,93 +41,232 @@ BuiltinLowering BuiltinLowering::createDefault() {
 
     bl.add("linear", [](Builder& builder,
                          const std::vector<Value*>& operands,
-                         const AttrMap&) -> std::vector<Value*> {
-        return {builder.createLinear(operands[0], operands[1], operands[2])};
+                         const AttrMap&,
+                         int numResults) -> Result<std::vector<Value*>> {
+        auto resultCount = expect_num_results("linear", numResults, 1);
+        if (!resultCount) return make_error(resultCount.error());
+        return std::vector<Value*>{builder.createLinear(operands[0], operands[1], operands[2])};
     });
 
     bl.add("relu", [](Builder& builder,
                        const std::vector<Value*>& operands,
-                       const AttrMap&) -> std::vector<Value*> {
-        return {builder.createReLU(operands[0])};
+                       const AttrMap&,
+                       int numResults) -> Result<std::vector<Value*>> {
+        auto resultCount = expect_num_results("relu", numResults, 1);
+        if (!resultCount) return make_error(resultCount.error());
+        return std::vector<Value*>{builder.createReLU(operands[0])};
     });
 
     bl.add("add", [](Builder& builder,
                       const std::vector<Value*>& operands,
-                      const AttrMap&) -> std::vector<Value*> {
-        return {builder.createAdd(operands[0], operands[1])};
+                      const AttrMap&,
+                      int numResults) -> Result<std::vector<Value*>> {
+        auto resultCount = expect_num_results("add", numResults, 1);
+        if (!resultCount) return make_error(resultCount.error());
+        return std::vector<Value*>{builder.createAdd(operands[0], operands[1])};
     });
 
     bl.add("mul", [](Builder& builder,
                       const std::vector<Value*>& operands,
-                      const AttrMap&) -> std::vector<Value*> {
-        return {builder.createMul(operands[0], operands[1])};
+                      const AttrMap&,
+                      int numResults) -> Result<std::vector<Value*>> {
+        auto resultCount = expect_num_results("mul", numResults, 1);
+        if (!resultCount) return make_error(resultCount.error());
+        return std::vector<Value*>{builder.createMul(operands[0], operands[1])};
     });
 
     bl.add("sqrt", [](Builder& builder,
                        const std::vector<Value*>& operands,
-                       const AttrMap&) -> std::vector<Value*> {
-        return {builder.createSqrt(operands[0])};
+                       const AttrMap&,
+                       int numResults) -> Result<std::vector<Value*>> {
+        auto resultCount = expect_num_results("sqrt", numResults, 1);
+        if (!resultCount) return make_error(resultCount.error());
+        return std::vector<Value*>{builder.createSqrt(operands[0])};
     });
 
     bl.add("matmul", [](Builder& builder,
                          const std::vector<Value*>& operands,
-                         const AttrMap&) -> std::vector<Value*> {
-        return {builder.createMatMul(operands[0], operands[1])};
+                         const AttrMap&,
+                         int numResults) -> Result<std::vector<Value*>> {
+        auto resultCount = expect_num_results("matmul", numResults, 1);
+        if (!resultCount) return make_error(resultCount.error());
+        return std::vector<Value*>{builder.createMatMul(operands[0], operands[1])};
     });
 
     bl.add("transpose", [](Builder& builder,
                             const std::vector<Value*>& operands,
-                            const AttrMap&) -> std::vector<Value*> {
-        return {builder.createTranspose(operands[0])};
+                            const AttrMap&,
+                            int numResults) -> Result<std::vector<Value*>> {
+        auto resultCount = expect_num_results("transpose", numResults, 1);
+        if (!resultCount) return make_error(resultCount.error());
+        return std::vector<Value*>{builder.createTranspose(operands[0])};
     });
 
     bl.add("reshape", [](Builder& builder,
                           const std::vector<Value*>& operands,
-                          const AttrMap& attrs) -> std::vector<Value*> {
-        return {builder.createReshape(operands[0], attrs.at("shape").intListVal)};
+                          const AttrMap& attrs,
+                          int numResults) -> Result<std::vector<Value*>> {
+        auto resultCount = expect_num_results("reshape", numResults, 1);
+        if (!resultCount) return make_error(resultCount.error());
+        return std::vector<Value*>{builder.createReshape(operands[0], attrs.at("shape").intListVal)};
     });
 
     bl.add("permute", [](Builder& builder,
                           const std::vector<Value*>& operands,
-                          const AttrMap& attrs) -> std::vector<Value*> {
-        return {builder.createPermute(operands[0], attrs.at("dims").intListVal)};
+                          const AttrMap& attrs,
+                          int numResults) -> Result<std::vector<Value*>> {
+        auto resultCount = expect_num_results("permute", numResults, 1);
+        if (!resultCount) return make_error(resultCount.error());
+        return std::vector<Value*>{builder.createPermute(operands[0], attrs.at("dims").intListVal)};
     });
 
     bl.add("sliding_query_key_score", [](Builder& builder,
                                           const std::vector<Value*>& operands,
-                                          const AttrMap& attrs) -> std::vector<Value*> {
+                                          const AttrMap& attrs,
+                                          int numResults) -> Result<std::vector<Value*>> {
+        auto resultCount = expect_num_results("sliding_query_key_score", numResults, 1);
+        if (!resultCount) return make_error(resultCount.error());
         int64_t window = 0;
         auto it = attrs.find("window");
         if (it != attrs.end() && it->second.kind == AttrValue::Int)
             window = it->second.intVal;
-        return {builder.createSlidingQueryKeyScore(operands[0], operands[1], window)};
+        return std::vector<Value*>{builder.createSlidingQueryKeyScore(operands[0], operands[1], window)};
     });
 
     bl.add("softmax", [](Builder& builder,
                           const std::vector<Value*>& operands,
-                          const AttrMap& attrs) -> std::vector<Value*> {
+                          const AttrMap& attrs,
+                          int numResults) -> Result<std::vector<Value*>> {
+        auto resultCount = expect_num_results("softmax", numResults, 1);
+        if (!resultCount) return make_error(resultCount.error());
         int64_t dim = -1;
         auto it = attrs.find("dim");
         if (it != attrs.end() && it->second.kind == AttrValue::Int)
             dim = it->second.intVal;
-        return {builder.createSoftmax(operands[0], dim)};
+        return std::vector<Value*>{builder.createSoftmax(operands[0], dim)};
+    });
+
+    bl.add("kv_attention", [](Builder& builder,
+                               const std::vector<Value*>& operands,
+                               const AttrMap& attrs,
+                               int numResults) -> Result<std::vector<Value*>> {
+        if (numResults != 1 && numResults != 3)
+            return make_error("kv_attention expects 1 or 3 result(s)");
+        if (operands.size() != 5)
+            return make_error("kv_attention expects operands (x, q_weight, k_weight, v_weight, o_weight)");
+
+        auto headsResult = get_int_attr(attrs, "heads");
+        if (!headsResult) return make_error(headsResult.error());
+        int64_t heads = headsResult.take();
+
+        auto kvHeadsResult = get_int_attr(attrs, "kv_heads");
+        if (!kvHeadsResult) return make_error(kvHeadsResult.error());
+        int64_t kvHeads = kvHeadsResult.take();
+
+        auto headDimResult = get_int_attr(attrs, "head_dim");
+        if (!headDimResult) return make_error(headDimResult.error());
+        int64_t headDim = headDimResult.take();
+
+        int64_t window = get_int_attr_or(attrs, "window", 0);
+        if (heads <= 0 || kvHeads <= 0 || headDim <= 0)
+            return make_error("kv_attention heads, kv_heads, and head_dim must be positive");
+        if (heads % kvHeads != 0)
+            return make_error("kv_attention heads must be divisible by kv_heads");
+        if (kvHeads != 1 && kvHeads != heads)
+            return make_error("kv_attention context matmul currently requires kv_heads == 1 or kv_heads == heads");
+
+        auto* x = operands[0];
+        int rank = x->shape.rank();
+        if (rank != 2 && rank != 3)
+            return make_error("kv_attention input must have rank 2 or rank 3");
+        int64_t hidden = x->shape.dim(rank - 1);
+        if (hidden < 0)
+            return make_error("kv_attention hidden dimension must be static");
+
+        auto* qWeightT = builder.createTranspose(operands[1]);
+        auto* kWeightT = builder.createTranspose(operands[2]);
+        auto* vWeightT = builder.createTranspose(operands[3]);
+        auto* oWeightT = builder.createTranspose(operands[4]);
+
+        auto* qFlat = builder.createMatMul(x, qWeightT);
+        auto* kFlat = builder.createMatMul(x, kWeightT);
+        auto* vFlat = builder.createMatMul(x, vWeightT);
+
+        Value* q = nullptr;
+        Value* k = nullptr;
+        Value* v = nullptr;
+        Value* contextFlat = nullptr;
+
+        if (rank == 3) {
+            int64_t batch = x->shape.dim(0);
+            int64_t seq = x->shape.dim(1);
+            if (batch < 0 || seq < 0)
+                return make_error("kv_attention batch and sequence dimensions must be static");
+
+            q = builder.createPermute(
+                builder.createReshape(qFlat, {batch, seq, heads, headDim}),
+                {0, 2, 1, 3});
+            k = builder.createPermute(
+                builder.createReshape(kFlat, {batch, seq, kvHeads, headDim}),
+                {0, 2, 1, 3});
+            v = builder.createPermute(
+                builder.createReshape(vFlat, {batch, seq, kvHeads, headDim}),
+                {0, 2, 1, 3});
+
+            auto* scores = builder.createSlidingQueryKeyScore(q, k, window);
+            auto* probs = builder.createSoftmax(scores, -1);
+            auto* context = builder.createMatMul(probs, v);
+            auto* contextSeqMajor = builder.createPermute(context, {0, 2, 1, 3});
+            contextFlat = builder.createReshape(contextSeqMajor, {batch, seq, heads * headDim});
+        } else {
+            int64_t seq = x->shape.dim(0);
+            if (seq < 0)
+                return make_error("kv_attention sequence dimension must be static");
+
+            q = builder.createPermute(
+                builder.createReshape(qFlat, {seq, heads, headDim}),
+                {1, 0, 2});
+            k = builder.createPermute(
+                builder.createReshape(kFlat, {seq, kvHeads, headDim}),
+                {1, 0, 2});
+            v = builder.createPermute(
+                builder.createReshape(vFlat, {seq, kvHeads, headDim}),
+                {1, 0, 2});
+
+            auto* scores = builder.createSlidingQueryKeyScore(q, k, window);
+            auto* probs = builder.createSoftmax(scores, -1);
+            auto* context = builder.createMatMul(probs, v);
+            auto* contextSeqMajor = builder.createPermute(context, {1, 0, 2});
+            contextFlat = builder.createReshape(contextSeqMajor, {seq, heads * headDim});
+        }
+
+        auto* out = builder.createMatMul(contextFlat, oWeightT);
+        if (numResults == 1)
+            return std::vector<Value*>{out};
+        return std::vector<Value*>{out, k, v};
     });
 
     bl.add("embedding", [](Builder& builder,
                             const std::vector<Value*>& operands,
-                            const AttrMap&) -> std::vector<Value*> {
-        return {builder.createEmbedding(operands[0], operands[1])};
+                            const AttrMap&,
+                            int numResults) -> Result<std::vector<Value*>> {
+        auto resultCount = expect_num_results("embedding", numResults, 1);
+        if (!resultCount) return make_error(resultCount.error());
+        return std::vector<Value*>{builder.createEmbedding(operands[0], operands[1])};
     });
 
     bl.add("rms_norm", [](Builder& builder,
                            const std::vector<Value*>& operands,
-                           const AttrMap& attrs) -> std::vector<Value*> {
+                           const AttrMap& attrs,
+                           int numResults) -> Result<std::vector<Value*>> {
+        auto resultCount = expect_num_results("rms_norm", numResults, 1);
+        if (!resultCount) return make_error(resultCount.error());
         float epsilon = 1.0e-6f;
         auto it = attrs.find("epsilon");
         if (it != attrs.end() && it->second.kind == AttrValue::Float) {
             epsilon = static_cast<float>(it->second.floatVal);
         }
-        return {builder.createRMSNorm(operands[0], operands[1], epsilon)};
+        return std::vector<Value*>{builder.createRMSNorm(operands[0], operands[1], epsilon)};
     });
 
     return bl;

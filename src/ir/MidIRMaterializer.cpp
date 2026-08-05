@@ -66,9 +66,16 @@ Result<std::unique_ptr<Graph>> MidIRMaterializer::materialize(
                 if (!fn)
                     return make_error("no lowering for builtin '" + op.name + "'");
 
-                auto results = (*fn)(builder, operands, attrs);
-                for (size_t i = 0; i < results.size(); i++)
-                    value_map[op.results[i]->id] = results[i];
+                auto results = (*fn)(builder, operands, attrs, static_cast<int>(op.results.size()));
+                if (!results)
+                    return make_error(results.error());
+                auto midResults = results.take();
+                if (midResults.size() != op.results.size()) {
+                    return make_error("lowering for builtin '" + op.name +
+                                      "' returned wrong number of results");
+                }
+                for (size_t i = 0; i < midResults.size(); i++)
+                    value_map[op.results[i]->id] = midResults[i];
                 break;
             }
             case high_ir::Op::IntConst:
