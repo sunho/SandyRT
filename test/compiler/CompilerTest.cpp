@@ -308,3 +308,31 @@ TEST(CompilerTest, ProgrammaticSlidingQueryKeyScoreMaterializesToMidIROp) {
     EXPECT_EQ(midGraph->outputs()[0]->shape, sandy::core::Shape({2, 4, 3, 5}));
     EXPECT_EQ(midGraph->outputs()[0]->def->attrs.at("window").intVal, 2);
 }
+
+TEST(CompilerTest, ProgrammaticSoftmaxMaterializesToMidIROp) {
+    sandy::ir::high_ir::Graph highGraph;
+    auto* x = highGraph.addInput("x");
+    auto softmax = highGraph.addBuiltin(
+        "softmax",
+        {x},
+        {sandy::ir::high_ir::Attr::fromInt("dim", -1)},
+        1);
+    highGraph.setOutputs({softmax[0]});
+
+    sandy::Compiler compiler;
+    TestWeights weights;
+    sandy::ir::mid_ir::MaterializeOptions options;
+    options.input_tensor_descs["x"] = sandy::core::TensorDesc(
+        sandy::core::Shape({2, 4, 3, 5}), sandy::core::DType::F32);
+
+    auto result = compiler.materialize_mid_ir(highGraph, weights, options);
+    ASSERT_TRUE(result) << result.error();
+    auto midGraph = result.take();
+
+    ASSERT_EQ(midGraph->outputs().size(), 1u);
+    ASSERT_NE(midGraph->outputs()[0], nullptr);
+    ASSERT_NE(midGraph->outputs()[0]->def, nullptr);
+    EXPECT_EQ(midGraph->outputs()[0]->def->kind, sandy::ir::mid_ir::OpKind::Softmax);
+    EXPECT_EQ(midGraph->outputs()[0]->shape, sandy::core::Shape({2, 4, 3, 5}));
+    EXPECT_EQ(midGraph->outputs()[0]->def->attrs.at("dim").intVal, -1);
+}

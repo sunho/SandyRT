@@ -174,6 +174,19 @@ TEST_F(MidIRTest, SlidingQueryKeyScoreTypeInferenceSupportsRank3AndRank4) {
     EXPECT_EQ(bout->def->kind, sandy::ir::mid_ir::OpKind::SlidingQueryKeyScore);
 }
 
+TEST_F(MidIRTest, SoftmaxTypeInference) {
+    sandy::ir::mid_ir::Graph graph;
+    sandy::ir::mid_ir::Builder builder(graph);
+
+    auto* x = builder.createInput("x", sandy::core::Shape({2, 3, 4}), sandy::core::DType::F32);
+    auto* out = builder.createSoftmax(x, -1);
+
+    EXPECT_EQ(out->shape, x->shape);
+    EXPECT_EQ(out->dtype, sandy::core::DType::F32);
+    EXPECT_EQ(out->def->kind, sandy::ir::mid_ir::OpKind::Softmax);
+    EXPECT_EQ(out->def->attrs.at("dim").intVal, -1);
+}
+
 TEST_F(MidIRTest, EmbeddingTypeInference) {
     sandy::ir::mid_ir::Graph graph;
     sandy::ir::mid_ir::Builder builder(graph);

@@ -69,6 +69,11 @@ Result<OwnedTensor> sliding_query_key_score_f32(
     const TensorDesc& kDesc,
     int64_t window);
 
+Result<OwnedTensor> softmax_f32(
+    std::span<const uint8_t> x,
+    const TensorDesc& xDesc,
+    int64_t dim);
+
 Result<OwnedTensor> embedding_f32(
     std::span<const uint8_t> ids,
     const TensorDesc& idsDesc,

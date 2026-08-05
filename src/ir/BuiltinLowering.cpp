@@ -79,6 +79,16 @@ BuiltinLowering BuiltinLowering::createDefault() {
         return {builder.createSlidingQueryKeyScore(operands[0], operands[1], window)};
     });
 
+    bl.add("softmax", [](Builder& builder,
+                          const std::vector<Value*>& operands,
+                          const AttrMap& attrs) -> std::vector<Value*> {
+        int64_t dim = -1;
+        auto it = attrs.find("dim");
+        if (it != attrs.end() && it->second.kind == AttrValue::Int)
+            dim = it->second.intVal;
+        return {builder.createSoftmax(operands[0], dim)};
+    });
+
     bl.add("embedding", [](Builder& builder,
                             const std::vector<Value*>& operands,
                             const AttrMap&) -> std::vector<Value*> {

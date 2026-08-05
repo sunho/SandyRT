@@ -26,6 +26,7 @@ enum class OpKind {
     Reshape,
     Permute,
     SlidingQueryKeyScore,
+    Softmax,
     Embedding,
     RMSNorm,
 
@@ -172,6 +173,7 @@ public:
     Value* createReshape(Value* x, std::vector<int64_t> shape);
     Value* createPermute(Value* x, std::vector<int64_t> dims);
     Value* createSlidingQueryKeyScore(Value* q, Value* k, int64_t window = 0);
+    Value* createSoftmax(Value* x, int64_t dim = -1);
     Value* createEmbedding(Value* ids, Value* weight);
     Value* createRMSNorm(Value* x, Value* weight, float epsilon = 1.0e-6f);
 

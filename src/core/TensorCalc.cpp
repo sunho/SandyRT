@@ -594,6 +594,77 @@ Result<OwnedTensor> sliding_query_key_score_f32(
     return out;
 }
 
+Result<OwnedTensor> softmax_f32(
+        std::span<const uint8_t> x,
+        const TensorDesc& xDesc,
+        int64_t dim) {
+    auto xDtype = require_f32(xDesc, "softmax input");
+    if (!xDtype) return make_error(xDtype.error());
+
+    int rank = xDesc.shape.rank();
+    if (rank < 1)
+        return make_error("softmax input must have rank >= 1");
+    if (dim < -rank || dim >= rank)
+        return make_error("softmax dim out of range");
+    if (dim < 0)
+        dim += rank;
+
+    int64_t total = xDesc.shape.numel();
+    if (total < 0)
+        return make_error("softmax input must have static shape");
+
+    int64_t axis = xDesc.shape.dim(static_cast<int>(dim));
+    if (axis < 0)
+        return make_error("softmax axis dimension must be static");
+
+    auto xBytes = require_bytes(x, xDesc, "softmax input");
+    if (!xBytes) return make_error(xBytes.error());
+
+    int64_t inner = 1;
+    for (int i = static_cast<int>(dim) + 1; i < rank; i++)
+        inner *= xDesc.shape.dim(i);
+    int64_t outer = total / (axis * inner);
+
+    OwnedTensor out;
+    out.desc = xDesc;
+    out.data.resize(x.size());
+
+    for (int64_t o = 0; o < outer; o++) {
+        for (int64_t i = 0; i < inner; i++) {
+            size_t base = static_cast<size_t>(o * axis * inner + i);
+            float maxValue = -std::numeric_limits<float>::infinity();
+            for (int64_t a = 0; a < axis; a++) {
+                size_t index = base + static_cast<size_t>(a * inner);
+                maxValue = std::max(maxValue, read_f32(x, index));
+            }
+
+            if (std::isinf(maxValue) && maxValue < 0.0f) {
+                for (int64_t a = 0; a < axis; a++) {
+                    size_t index = base + static_cast<size_t>(a * inner);
+                    write_f32(out.data, index, 0.0f);
+                }
+                continue;
+            }
+
+            double sum = 0.0;
+            for (int64_t a = 0; a < axis; a++) {
+                size_t index = base + static_cast<size_t>(a * inner);
+                float value = std::exp(read_f32(x, index) - maxValue);
+                write_f32(out.data, index, value);
+                sum += static_cast<double>(value);
+            }
+
+            float invSum = 1.0f / static_cast<float>(sum);
+            for (int64_t a = 0; a < axis; a++) {
+                size_t index = base + static_cast<size_t>(a * inner);
+                write_f32(out.data, index, read_f32(out.data, index) * invSum);
+            }
+        }
+    }
+
+    return out;
+}
+
 Result<OwnedTensor> embedding_f32(
         std::span<const uint8_t> ids,
         const TensorDesc& idsDesc,

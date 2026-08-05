@@ -260,6 +260,18 @@ Result<core::OwnedTensor> eval_sliding_query_key_score(
         attr_int_or(op, "window", 0));
 }
 
+Result<core::OwnedTensor> eval_softmax(
+        const ir::mid_ir::Op& op,
+        const std::unordered_map<const ir::mid_ir::Value*, const BackendBuffer*>& values) {
+    if (op.operands.size() != 1)
+        return make_error("softmax expects one operand");
+
+    auto x = lookup_value(values, op.operands[0]);
+    if (!x) return make_error(x.error());
+
+    return core::softmax_f32((*x)->data(), (*x)->desc(), attr_int_or(op, "dim", -1));
+}
+
 Result<core::OwnedTensor> eval_embedding(
         const ir::mid_ir::Op& op,
         const std::unordered_map<const ir::mid_ir::Value*, const BackendBuffer*>& values) {
@@ -404,6 +416,14 @@ Result<BackendRunResult> interpret_graph(
             }
             case ir::mid_ir::OpKind::SlidingQueryKeyScore: {
                 auto tensor = eval_sliding_query_key_score(*op, values);
+                if (!tensor) return make_error(tensor.error());
+                temporaries.push_back(make_cpu_buffer(tensor.take()));
+                auto bind = bind_single_result(*op, temporaries.back().get(), values);
+                if (!bind) return make_error(bind.error());
+                break;
+            }
+            case ir::mid_ir::OpKind::Softmax: {
+                auto tensor = eval_softmax(*op, values);
                 if (!tensor) return make_error(tensor.error());
                 temporaries.push_back(make_cpu_buffer(tensor.take()));
                 auto bind = bind_single_result(*op, temporaries.back().get(), values);

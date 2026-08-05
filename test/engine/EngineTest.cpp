@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <span>
 #include <utility>
@@ -520,6 +521,58 @@ TEST(TensorCalcTest, SlidingQueryKeyScoreF32GroupedQueryBatched) {
     EXPECT_TRUE(std::isinf(read_f32(out.data, 3)) && read_f32(out.data, 3) < 0.0f);
 }
 
+TEST(TensorCalcTest, SoftmaxF32LastDim) {
+    auto x = f32_bytes({
+        1.0f, 1.0f,
+        1.0f, 2.0f,
+        -std::numeric_limits<float>::infinity(),
+        -std::numeric_limits<float>::infinity(),
+    });
+
+    auto result = sandy::core::softmax_f32(
+        x, sandy::core::TensorDesc(sandy::core::Shape({3, 2}), sandy::core::DType::F32),
+        -1);
+
+    ASSERT_TRUE(result) << result.error();
+    auto out = result.take();
+    EXPECT_EQ(out.desc.shape, sandy::core::Shape({3, 2}));
+
+    float inv = 1.0f / (1.0f + std::exp(1.0f));
+    EXPECT_NEAR(read_f32(out.data, 0), 0.5f, 1.0e-6f);
+    EXPECT_NEAR(read_f32(out.data, 1), 0.5f, 1.0e-6f);
+    EXPECT_NEAR(read_f32(out.data, 2), inv, 1.0e-6f);
+    EXPECT_NEAR(read_f32(out.data, 3), 1.0f - inv, 1.0e-6f);
+    EXPECT_FLOAT_EQ(read_f32(out.data, 4), 0.0f);
+    EXPECT_FLOAT_EQ(read_f32(out.data, 5), 0.0f);
+}
+
+TEST(TensorCalcTest, SoftmaxF32MiddleDim) {
+    auto x = f32_bytes({
+        1.0f, 10.0f,
+        1.0f, 20.0f,
+        1.0f, 30.0f,
+    });
+
+    auto result = sandy::core::softmax_f32(
+        x, sandy::core::TensorDesc(sandy::core::Shape({1, 3, 2}), sandy::core::DType::F32),
+        1);
+
+    ASSERT_TRUE(result) << result.error();
+    auto out = result.take();
+    EXPECT_EQ(out.desc.shape, sandy::core::Shape({1, 3, 2}));
+
+    EXPECT_NEAR(read_f32(out.data, 0), 1.0f / 3.0f, 1.0e-6f);
+    EXPECT_NEAR(read_f32(out.data, 2), 1.0f / 3.0f, 1.0e-6f);
+    EXPECT_NEAR(read_f32(out.data, 4), 1.0f / 3.0f, 1.0e-6f);
+
+    double e0 = std::exp(-20.0);
+    double e1 = std::exp(-10.0);
+    double sum = e0 + e1 + 1.0;
+    EXPECT_NEAR(read_f32(out.data, 1), static_cast<float>(e0 / sum), 1.0e-6f);
+    EXPECT_NEAR(read_f32(out.data, 3), static_cast<float>(e1 / sum), 1.0e-6f);
+    EXPECT_NEAR(read_f32(out.data, 5), static_cast<float>(1.0 / sum), 1.0e-6f);
+}
+
 TEST(TensorCalcTest, EmbeddingF32WithI32Ids) {
     auto ids = i32_bytes({2, 0, 3});
     auto weight = f32_bytes({
@@ -934,6 +987,50 @@ TEST(CpuInterpretTest, SlidingQueryKeyScore) {
                 read_f32(it->second->data(), 6) < 0.0f);
     EXPECT_FLOAT_EQ(read_f32(it->second->data(), 7), 60.0f);
     EXPECT_FLOAT_EQ(read_f32(it->second->data(), 8), 90.0f);
+}
+
+TEST(CpuInterpretTest, SoftmaxAfterSlidingQueryKeyScore) {
+    sandy::ir::mid_ir::register_all_ops();
+
+    sandy::ir::mid_ir::Graph graph;
+    sandy::ir::mid_ir::Builder builder(graph);
+    auto* q = builder.createInput("q", sandy::core::Shape({1, 1, 2, 1}), sandy::core::DType::F32);
+    auto* k = builder.createInput("k", sandy::core::Shape({1, 1, 2, 1}), sandy::core::DType::F32);
+    auto* scores = builder.createSlidingQueryKeyScore(q, k);
+    auto* out = builder.createSoftmax(scores, -1);
+    sandy::ir::mid_ir::Value* outputs[] = {out};
+    builder.setOutputs(outputs);
+
+    sandy::engine::Engine engine(
+        std::make_unique<sandy::engine::backend::CpuInterpreterBackend>());
+
+    auto planResult = engine.create_plan(graph);
+    ASSERT_TRUE(planResult) << planResult.error();
+    auto plan = planResult.take();
+
+    sandy::engine::TensorMap inputs;
+    inputs["q"] = make_f32_buffer("q", sandy::core::Shape({1, 1, 2, 1}), {
+        1.0f, 1.0f,
+    });
+    inputs["k"] = make_f32_buffer("k", sandy::core::Shape({1, 1, 2, 1}), {
+        1.0f, 2.0f,
+    });
+
+    sandy::engine::TensorMap weights;
+    auto runResult = engine.run(*plan, inputs, weights);
+    ASSERT_TRUE(runResult) << runResult.error();
+    auto outputsMap = runResult.take();
+
+    auto it = outputsMap.find("output0");
+    ASSERT_NE(it, outputsMap.end());
+    ASSERT_NE(it->second, nullptr);
+    EXPECT_EQ(it->second->desc().shape, sandy::core::Shape({1, 1, 2, 2}));
+
+    float inv = 1.0f / (1.0f + std::exp(1.0f));
+    EXPECT_FLOAT_EQ(read_f32(it->second->data(), 0), 1.0f);
+    EXPECT_FLOAT_EQ(read_f32(it->second->data(), 1), 0.0f);
+    EXPECT_NEAR(read_f32(it->second->data(), 2), inv, 1.0e-6f);
+    EXPECT_NEAR(read_f32(it->second->data(), 3), 1.0f - inv, 1.0e-6f);
 }
 
 TEST(CpuInterpretTest, EmbeddingLoadsRowsFromFullWeightBuffer) {

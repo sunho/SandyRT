@@ -25,6 +25,7 @@ const char* op_kind_name(OpKind kind) {
         case OpKind::Reshape:   return "reshape";
         case OpKind::Permute:   return "permute";
         case OpKind::SlidingQueryKeyScore: return "sliding_query_key_score";
+        case OpKind::Softmax:   return "softmax";
         case OpKind::Embedding: return "embedding";
         case OpKind::RMSNorm:   return "rms_norm";
         case OpKind::NUM_KINDS: return "?";
@@ -440,6 +441,47 @@ public:
     }
 };
 
+class SoftmaxOpDef : public OpDef {
+public:
+    OpKind kind() const override { return OpKind::Softmax; }
+    const char* name() const override { return "softmax"; }
+    std::vector<ValueType> infer_types(
+        std::span<Value* const> operands,
+        const AttrMap&) const override
+    {
+        return {{operands[0]->shape, operands[0]->dtype}};
+    }
+    void verify(
+        std::span<Value* const> operands,
+        const AttrMap& attrs) const override
+    {
+        if (operands.size() != 1) {
+            fprintf(stderr, "softmax expects 1 operand, got %zu\n", operands.size());
+            abort();
+        }
+        if (operands[0]->dtype != core::DType::F32) {
+            fprintf(stderr, "softmax input must be f32\n");
+            abort();
+        }
+        int rank = operands[0]->shape.rank();
+        if (rank < 1) {
+            fprintf(stderr, "softmax input must have rank >= 1\n");
+            abort();
+        }
+
+        auto dim = attrs.find("dim");
+        if (dim != attrs.end() && dim->second.kind != AttrValue::Int) {
+            fprintf(stderr, "softmax dim attr must be int\n");
+            abort();
+        }
+        int64_t dimValue = dim == attrs.end() ? -1 : dim->second.intVal;
+        if (dimValue < -rank || dimValue >= rank) {
+            fprintf(stderr, "softmax dim out of range\n");
+            abort();
+        }
+    }
+};
+
 class EmbeddingOpDef : public OpDef {
 public:
     OpKind kind() const override { return OpKind::Embedding; }
@@ -531,6 +573,7 @@ void register_all_ops() {
     static ReshapeOpDef reshape_def;
     static PermuteOpDef permute_def;
     static SlidingQueryKeyScoreOpDef sliding_query_key_score_def;
+    static SoftmaxOpDef softmax_def;
     static EmbeddingOpDef embedding_def;
     static RMSNormOpDef rms_norm_def;
 
@@ -545,6 +588,7 @@ void register_all_ops() {
     reg.add(&reshape_def);
     reg.add(&permute_def);
     reg.add(&sliding_query_key_score_def);
+    reg.add(&softmax_def);
     reg.add(&embedding_def);
     reg.add(&rms_norm_def);
 }
@@ -749,6 +793,13 @@ Value* Builder::createSlidingQueryKeyScore(Value* q, Value* k, int64_t window) {
     AttrMap attrs;
     attrs["window"] = AttrValue::make_int(window);
     return createOp(OpKind::SlidingQueryKeyScore, operands, attrs)[0];
+}
+
+Value* Builder::createSoftmax(Value* x, int64_t dim) {
+    Value* operands[] = {x};
+    AttrMap attrs;
+    attrs["dim"] = AttrValue::make_int(dim);
+    return createOp(OpKind::Softmax, operands, attrs)[0];
 }
 
 Value* Builder::createEmbedding(Value* ids, Value* weight) {
