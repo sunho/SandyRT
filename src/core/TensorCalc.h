@@ -62,6 +62,13 @@ Result<OwnedTensor> permute_f32(
     const TensorDesc& xDesc,
     std::span<const int64_t> dims);
 
+Result<OwnedTensor> sliding_query_key_score_f32(
+    std::span<const uint8_t> q,
+    const TensorDesc& qDesc,
+    std::span<const uint8_t> k,
+    const TensorDesc& kDesc,
+    int64_t window);
+
 Result<OwnedTensor> embedding_f32(
     std::span<const uint8_t> ids,
     const TensorDesc& idsDesc,

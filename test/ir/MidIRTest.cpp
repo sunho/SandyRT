@@ -152,6 +152,28 @@ TEST_F(MidIRTest, PermuteTypeInference) {
     EXPECT_EQ(out->def->attrs.at("dims").intListVal[1], 2);
 }
 
+TEST_F(MidIRTest, SlidingQueryKeyScoreTypeInferenceSupportsRank3AndRank4) {
+    sandy::ir::mid_ir::Graph graph;
+    sandy::ir::mid_ir::Builder builder(graph);
+
+    auto* q = builder.createInput("q", sandy::core::Shape({4, 3, 8}), sandy::core::DType::F32);
+    auto* k = builder.createInput("k", sandy::core::Shape({2, 5, 8}), sandy::core::DType::F32);
+    auto* out = builder.createSlidingQueryKeyScore(q, k, 2);
+
+    EXPECT_EQ(out->shape, sandy::core::Shape({4, 3, 5}));
+    EXPECT_EQ(out->dtype, sandy::core::DType::F32);
+    EXPECT_EQ(out->def->kind, sandy::ir::mid_ir::OpKind::SlidingQueryKeyScore);
+    EXPECT_EQ(out->def->attrs.at("window").intVal, 2);
+
+    auto* bq = builder.createInput("bq", sandy::core::Shape({2, 4, 3, 8}), sandy::core::DType::F32);
+    auto* bk = builder.createInput("bk", sandy::core::Shape({2, 2, 5, 8}), sandy::core::DType::F32);
+    auto* bout = builder.createSlidingQueryKeyScore(bq, bk);
+
+    EXPECT_EQ(bout->shape, sandy::core::Shape({2, 4, 3, 5}));
+    EXPECT_EQ(bout->dtype, sandy::core::DType::F32);
+    EXPECT_EQ(bout->def->kind, sandy::ir::mid_ir::OpKind::SlidingQueryKeyScore);
+}
+
 TEST_F(MidIRTest, EmbeddingTypeInference) {
     sandy::ir::mid_ir::Graph graph;
     sandy::ir::mid_ir::Builder builder(graph);

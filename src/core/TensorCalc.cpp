@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <string>
 
 namespace sandy::core {
@@ -485,6 +486,109 @@ Result<OwnedTensor> permute_f32(
                 static_cast<size_t>(inputStrides[static_cast<size_t>(inputAxis)]);
         }
         write_f32(out.data, outIndex, read_f32(x, sourceIndex));
+    }
+
+    return out;
+}
+
+Result<OwnedTensor> sliding_query_key_score_f32(
+        std::span<const uint8_t> q,
+        const TensorDesc& qDesc,
+        std::span<const uint8_t> k,
+        const TensorDesc& kDesc,
+        int64_t window) {
+    auto qDtype = require_f32(qDesc, "sliding_query_key_score q");
+    if (!qDtype) return make_error(qDtype.error());
+
+    auto kDtype = require_f32(kDesc, "sliding_query_key_score k");
+    if (!kDtype) return make_error(kDtype.error());
+
+    int rank = qDesc.shape.rank();
+    if ((rank != 3 && rank != 4) || kDesc.shape.rank() != rank)
+        return make_error("sliding_query_key_score operands must both have rank 3 or rank 4");
+    if (window < 0)
+        return make_error("sliding_query_key_score window must be >= 0");
+
+    int64_t batch = rank == 4 ? qDesc.shape.dim(0) : 1;
+    int64_t kBatch = rank == 4 ? kDesc.shape.dim(0) : 1;
+    int64_t heads = qDesc.shape.dim(rank - 3);
+    int64_t kvHeads = kDesc.shape.dim(rank - 3);
+    int64_t tq = qDesc.shape.dim(rank - 2);
+    int64_t tk = kDesc.shape.dim(rank - 2);
+    int64_t headDim = qDesc.shape.dim(rank - 1);
+    int64_t kHeadDim = kDesc.shape.dim(rank - 1);
+    if (batch < 0 || kBatch < 0 || heads < 0 || kvHeads < 0 ||
+        tq < 0 || tk < 0 || headDim < 0 || kHeadDim < 0) {
+        return make_error("sliding_query_key_score inputs must have static shape");
+    }
+    if (batch != kBatch)
+        return make_error("sliding_query_key_score batch dimension mismatch");
+    if (headDim != kHeadDim)
+        return make_error("sliding_query_key_score head dimension mismatch");
+    if (heads <= 0 || kvHeads <= 0 || heads % kvHeads != 0)
+        return make_error("sliding_query_key_score heads must be divisible by kv_heads");
+
+    auto qBytes = require_bytes(q, qDesc, "sliding_query_key_score q");
+    if (!qBytes) return make_error(qBytes.error());
+
+    auto kBytes = require_bytes(k, kDesc, "sliding_query_key_score k");
+    if (!kBytes) return make_error(kBytes.error());
+
+    std::vector<int64_t> outDims;
+    if (rank == 4)
+        outDims.push_back(batch);
+    outDims.push_back(heads);
+    outDims.push_back(tq);
+    outDims.push_back(tk);
+
+    OwnedTensor out;
+    out.desc = TensorDesc(Shape(outDims), DType::F32);
+    out.data.resize(static_cast<size_t>(out.desc.shape.numel()) * sizeof(float));
+
+    int64_t headsPerKv = heads / kvHeads;
+    float scale = 1.0f / std::sqrt(static_cast<float>(headDim));
+    float masked = -std::numeric_limits<float>::infinity();
+
+    for (int64_t b = 0; b < batch; b++) {
+        for (int64_t h = 0; h < heads; h++) {
+            int64_t kh = h / headsPerKv;
+            for (int64_t qi = 0; qi < tq; qi++) {
+                int64_t minKey = 0;
+                if (window > 0)
+                    minKey = std::max<int64_t>(0, qi + 1 - window);
+                for (int64_t ki = 0; ki < tk; ki++) {
+                    size_t outIndex = 0;
+                    if (rank == 4) {
+                        outIndex = static_cast<size_t>(
+                            ((b * heads + h) * tq + qi) * tk + ki);
+                    } else {
+                        outIndex = static_cast<size_t>((h * tq + qi) * tk + ki);
+                    }
+
+                    if (ki > qi || ki < minKey) {
+                        write_f32(out.data, outIndex, masked);
+                        continue;
+                    }
+
+                    float acc = 0.0f;
+                    for (int64_t d = 0; d < headDim; d++) {
+                        size_t qIndex = 0;
+                        size_t kIndex = 0;
+                        if (rank == 4) {
+                            qIndex = static_cast<size_t>(
+                                ((b * heads + h) * tq + qi) * headDim + d);
+                            kIndex = static_cast<size_t>(
+                                ((b * kvHeads + kh) * tk + ki) * headDim + d);
+                        } else {
+                            qIndex = static_cast<size_t>((h * tq + qi) * headDim + d);
+                            kIndex = static_cast<size_t>((kh * tk + ki) * headDim + d);
+                        }
+                        acc += read_f32(q, qIndex) * read_f32(k, kIndex);
+                    }
+                    write_f32(out.data, outIndex, acc * scale);
+                }
+            }
+        }
     }
 
     return out;

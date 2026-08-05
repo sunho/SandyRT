@@ -405,6 +405,121 @@ TEST(TensorCalcTest, PermuteF32ReordersAxes) {
         EXPECT_FLOAT_EQ(read_f32(out.data, i), expected[i]);
 }
 
+TEST(TensorCalcTest, SlidingQueryKeyScoreF32CausalUnbatched) {
+    auto q = f32_bytes({
+        1.0f, 0.0f,
+        0.0f, 2.0f,
+        1.0f, 1.0f,
+    });
+    auto k = f32_bytes({
+        1.0f, 0.0f,
+        0.0f, 1.0f,
+        1.0f, 1.0f,
+    });
+
+    auto result = sandy::core::sliding_query_key_score_f32(
+        q, sandy::core::TensorDesc(sandy::core::Shape({1, 3, 2}), sandy::core::DType::F32),
+        k, sandy::core::TensorDesc(sandy::core::Shape({1, 3, 2}), sandy::core::DType::F32),
+        0);
+
+    ASSERT_TRUE(result) << result.error();
+    auto out = result.take();
+    EXPECT_EQ(out.desc.shape, sandy::core::Shape({1, 3, 3}));
+
+    float scale = 1.0f / std::sqrt(2.0f);
+    EXPECT_NEAR(read_f32(out.data, 0), 1.0f * scale, 1.0e-6f);
+    EXPECT_TRUE(std::isinf(read_f32(out.data, 1)) && read_f32(out.data, 1) < 0.0f);
+    EXPECT_TRUE(std::isinf(read_f32(out.data, 2)) && read_f32(out.data, 2) < 0.0f);
+    EXPECT_NEAR(read_f32(out.data, 3), 0.0f, 1.0e-6f);
+    EXPECT_NEAR(read_f32(out.data, 4), 2.0f * scale, 1.0e-6f);
+    EXPECT_TRUE(std::isinf(read_f32(out.data, 5)) && read_f32(out.data, 5) < 0.0f);
+    EXPECT_NEAR(read_f32(out.data, 6), 1.0f * scale, 1.0e-6f);
+    EXPECT_NEAR(read_f32(out.data, 7), 1.0f * scale, 1.0e-6f);
+    EXPECT_NEAR(read_f32(out.data, 8), 2.0f * scale, 1.0e-6f);
+}
+
+TEST(TensorCalcTest, SlidingQueryKeyScoreF32AppliesSlidingWindow) {
+    auto q = f32_bytes({
+        1.0f,
+        2.0f,
+        3.0f,
+        4.0f,
+    });
+    auto k = f32_bytes({
+        10.0f,
+        20.0f,
+        30.0f,
+        40.0f,
+    });
+
+    auto result = sandy::core::sliding_query_key_score_f32(
+        q, sandy::core::TensorDesc(sandy::core::Shape({1, 4, 1}), sandy::core::DType::F32),
+        k, sandy::core::TensorDesc(sandy::core::Shape({1, 4, 1}), sandy::core::DType::F32),
+        2);
+
+    ASSERT_TRUE(result) << result.error();
+    auto out = result.take();
+    EXPECT_EQ(out.desc.shape, sandy::core::Shape({1, 4, 4}));
+
+    EXPECT_FLOAT_EQ(read_f32(out.data, 0), 10.0f);
+    EXPECT_TRUE(std::isinf(read_f32(out.data, 1)) && read_f32(out.data, 1) < 0.0f);
+    EXPECT_TRUE(std::isinf(read_f32(out.data, 2)) && read_f32(out.data, 2) < 0.0f);
+    EXPECT_TRUE(std::isinf(read_f32(out.data, 3)) && read_f32(out.data, 3) < 0.0f);
+
+    EXPECT_FLOAT_EQ(read_f32(out.data, 4), 20.0f);
+    EXPECT_FLOAT_EQ(read_f32(out.data, 5), 40.0f);
+    EXPECT_TRUE(std::isinf(read_f32(out.data, 6)) && read_f32(out.data, 6) < 0.0f);
+    EXPECT_TRUE(std::isinf(read_f32(out.data, 7)) && read_f32(out.data, 7) < 0.0f);
+
+    EXPECT_TRUE(std::isinf(read_f32(out.data, 8)) && read_f32(out.data, 8) < 0.0f);
+    EXPECT_FLOAT_EQ(read_f32(out.data, 9), 60.0f);
+    EXPECT_FLOAT_EQ(read_f32(out.data, 10), 90.0f);
+    EXPECT_TRUE(std::isinf(read_f32(out.data, 11)) && read_f32(out.data, 11) < 0.0f);
+
+    EXPECT_TRUE(std::isinf(read_f32(out.data, 12)) && read_f32(out.data, 12) < 0.0f);
+    EXPECT_TRUE(std::isinf(read_f32(out.data, 13)) && read_f32(out.data, 13) < 0.0f);
+    EXPECT_FLOAT_EQ(read_f32(out.data, 14), 120.0f);
+    EXPECT_FLOAT_EQ(read_f32(out.data, 15), 160.0f);
+}
+
+TEST(TensorCalcTest, SlidingQueryKeyScoreF32GroupedQueryBatched) {
+    auto q = f32_bytes({
+        1.0f, 2.0f,
+        3.0f, 4.0f,
+    });
+    auto k = f32_bytes({
+        10.0f,
+        20.0f,
+    });
+
+    auto result = sandy::core::sliding_query_key_score_f32(
+        q, sandy::core::TensorDesc(sandy::core::Shape({1, 2, 1, 2}), sandy::core::DType::F32),
+        k, sandy::core::TensorDesc(sandy::core::Shape({1, 1, 2, 1}), sandy::core::DType::F32),
+        0);
+
+    EXPECT_FALSE(result);
+    EXPECT_NE(result.error().find("head dimension mismatch"), std::string::npos);
+
+    auto validK = f32_bytes({
+        10.0f, 1.0f,
+        20.0f, 2.0f,
+    });
+    result = sandy::core::sliding_query_key_score_f32(
+        q, sandy::core::TensorDesc(sandy::core::Shape({1, 2, 1, 2}), sandy::core::DType::F32),
+        validK, sandy::core::TensorDesc(sandy::core::Shape({1, 1, 2, 2}), sandy::core::DType::F32),
+        0);
+
+    ASSERT_TRUE(result) << result.error();
+    auto out = result.take();
+    EXPECT_EQ(out.desc.shape, sandy::core::Shape({1, 2, 1, 2}));
+
+    float scale = 1.0f / std::sqrt(2.0f);
+    EXPECT_NEAR(read_f32(out.data, 0), 12.0f * scale, 1.0e-6f);
+    EXPECT_TRUE(std::isinf(read_f32(out.data, 1)) && read_f32(out.data, 1) < 0.0f);
+    EXPECT_NEAR(read_f32(out.data, 2), 34.0f * scale, 1.0e-6f);
+    EXPECT_TRUE(std::isinf(read_f32(out.data, 3)) && read_f32(out.data, 3) < 0.0f);
+}
+
 TEST(TensorCalcTest, EmbeddingF32WithI32Ids) {
     auto ids = i32_bytes({2, 0, 3});
     auto weight = f32_bytes({
@@ -768,6 +883,57 @@ TEST(CpuInterpretTest, PermuteAttentionLayout) {
     };
     for (size_t i = 0; i < expected.size(); i++)
         EXPECT_FLOAT_EQ(read_f32(it->second->data(), i), expected[i]);
+}
+
+TEST(CpuInterpretTest, SlidingQueryKeyScore) {
+    sandy::ir::mid_ir::register_all_ops();
+
+    sandy::ir::mid_ir::Graph graph;
+    sandy::ir::mid_ir::Builder builder(graph);
+    auto* q = builder.createInput("q", sandy::core::Shape({1, 1, 3, 1}), sandy::core::DType::F32);
+    auto* k = builder.createInput("k", sandy::core::Shape({1, 1, 3, 1}), sandy::core::DType::F32);
+    auto* out = builder.createSlidingQueryKeyScore(q, k, 2);
+    sandy::ir::mid_ir::Value* outputs[] = {out};
+    builder.setOutputs(outputs);
+
+    sandy::engine::Engine engine(
+        std::make_unique<sandy::engine::backend::CpuInterpreterBackend>());
+
+    auto planResult = engine.create_plan(graph);
+    ASSERT_TRUE(planResult) << planResult.error();
+    auto plan = planResult.take();
+
+    sandy::engine::TensorMap inputs;
+    inputs["q"] = make_f32_buffer("q", sandy::core::Shape({1, 1, 3, 1}), {
+        1.0f, 2.0f, 3.0f,
+    });
+    inputs["k"] = make_f32_buffer("k", sandy::core::Shape({1, 1, 3, 1}), {
+        10.0f, 20.0f, 30.0f,
+    });
+
+    sandy::engine::TensorMap weights;
+    auto runResult = engine.run(*plan, inputs, weights);
+    ASSERT_TRUE(runResult) << runResult.error();
+    auto outputsMap = runResult.take();
+
+    auto it = outputsMap.find("output0");
+    ASSERT_NE(it, outputsMap.end());
+    ASSERT_NE(it->second, nullptr);
+    EXPECT_EQ(it->second->desc().shape, sandy::core::Shape({1, 1, 3, 3}));
+
+    EXPECT_FLOAT_EQ(read_f32(it->second->data(), 0), 10.0f);
+    EXPECT_TRUE(std::isinf(read_f32(it->second->data(), 1)) &&
+                read_f32(it->second->data(), 1) < 0.0f);
+    EXPECT_TRUE(std::isinf(read_f32(it->second->data(), 2)) &&
+                read_f32(it->second->data(), 2) < 0.0f);
+    EXPECT_FLOAT_EQ(read_f32(it->second->data(), 3), 20.0f);
+    EXPECT_FLOAT_EQ(read_f32(it->second->data(), 4), 40.0f);
+    EXPECT_TRUE(std::isinf(read_f32(it->second->data(), 5)) &&
+                read_f32(it->second->data(), 5) < 0.0f);
+    EXPECT_TRUE(std::isinf(read_f32(it->second->data(), 6)) &&
+                read_f32(it->second->data(), 6) < 0.0f);
+    EXPECT_FLOAT_EQ(read_f32(it->second->data(), 7), 60.0f);
+    EXPECT_FLOAT_EQ(read_f32(it->second->data(), 8), 90.0f);
 }
 
 TEST(CpuInterpretTest, EmbeddingLoadsRowsFromFullWeightBuffer) {

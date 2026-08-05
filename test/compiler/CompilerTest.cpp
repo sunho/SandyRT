@@ -276,3 +276,35 @@ TEST(CompilerTest, ProgrammaticReshapePermuteMaterializesToMidIROps) {
     EXPECT_EQ(midGraph->outputs()[0]->def->operands[0]->def->kind,
               sandy::ir::mid_ir::OpKind::Reshape);
 }
+
+TEST(CompilerTest, ProgrammaticSlidingQueryKeyScoreMaterializesToMidIROp) {
+    sandy::ir::high_ir::Graph highGraph;
+    auto* q = highGraph.addInput("q");
+    auto* k = highGraph.addInput("k");
+    auto score = highGraph.addBuiltin(
+        "sliding_query_key_score",
+        {q, k},
+        {sandy::ir::high_ir::Attr::fromInt("window", 2)},
+        1);
+    highGraph.setOutputs({score[0]});
+
+    sandy::Compiler compiler;
+    TestWeights weights;
+    sandy::ir::mid_ir::MaterializeOptions options;
+    options.input_tensor_descs["q"] = sandy::core::TensorDesc(
+        sandy::core::Shape({2, 4, 3, 8}), sandy::core::DType::F32);
+    options.input_tensor_descs["k"] = sandy::core::TensorDesc(
+        sandy::core::Shape({2, 2, 5, 8}), sandy::core::DType::F32);
+
+    auto result = compiler.materialize_mid_ir(highGraph, weights, options);
+    ASSERT_TRUE(result) << result.error();
+    auto midGraph = result.take();
+
+    ASSERT_EQ(midGraph->outputs().size(), 1u);
+    ASSERT_NE(midGraph->outputs()[0], nullptr);
+    ASSERT_NE(midGraph->outputs()[0]->def, nullptr);
+    EXPECT_EQ(midGraph->outputs()[0]->def->kind,
+              sandy::ir::mid_ir::OpKind::SlidingQueryKeyScore);
+    EXPECT_EQ(midGraph->outputs()[0]->shape, sandy::core::Shape({2, 4, 3, 5}));
+    EXPECT_EQ(midGraph->outputs()[0]->def->attrs.at("window").intVal, 2);
+}

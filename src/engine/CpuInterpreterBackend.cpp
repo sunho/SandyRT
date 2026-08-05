@@ -59,6 +59,16 @@ float attr_float_or(const ir::mid_ir::Op& op, const std::string& name, float fal
     return static_cast<float>(it->second.floatVal);
 }
 
+int64_t attr_int_or(const ir::mid_ir::Op& op, const std::string& name, int64_t fallback) {
+    auto it = op.attrs.find(name);
+    if (it == op.attrs.end()) return fallback;
+    if (it->second.kind != ir::mid_ir::AttrValue::Int) {
+        fprintf(stderr, "attr '%s' must be int\n", name.c_str());
+        abort();
+    }
+    return it->second.intVal;
+}
+
 std::vector<int64_t> attr_int_list(const ir::mid_ir::Op& op, const std::string& name) {
     auto it = op.attrs.find(name);
     if (it == op.attrs.end() || it->second.kind != ir::mid_ir::AttrValue::IntList) {
@@ -233,6 +243,23 @@ Result<core::OwnedTensor> eval_permute(
     return core::permute_f32((*x)->data(), (*x)->desc(), dims);
 }
 
+Result<core::OwnedTensor> eval_sliding_query_key_score(
+        const ir::mid_ir::Op& op,
+        const std::unordered_map<const ir::mid_ir::Value*, const BackendBuffer*>& values) {
+    if (op.operands.size() != 2)
+        return make_error("sliding_query_key_score expects two operands");
+
+    auto q = lookup_value(values, op.operands[0]);
+    if (!q) return make_error(q.error());
+    auto k = lookup_value(values, op.operands[1]);
+    if (!k) return make_error(k.error());
+
+    return core::sliding_query_key_score_f32(
+        (*q)->data(), (*q)->desc(),
+        (*k)->data(), (*k)->desc(),
+        attr_int_or(op, "window", 0));
+}
+
 Result<core::OwnedTensor> eval_embedding(
         const ir::mid_ir::Op& op,
         const std::unordered_map<const ir::mid_ir::Value*, const BackendBuffer*>& values) {
@@ -369,6 +396,14 @@ Result<BackendRunResult> interpret_graph(
             }
             case ir::mid_ir::OpKind::Permute: {
                 auto tensor = eval_permute(*op, values);
+                if (!tensor) return make_error(tensor.error());
+                temporaries.push_back(make_cpu_buffer(tensor.take()));
+                auto bind = bind_single_result(*op, temporaries.back().get(), values);
+                if (!bind) return make_error(bind.error());
+                break;
+            }
+            case ir::mid_ir::OpKind::SlidingQueryKeyScore: {
+                auto tensor = eval_sliding_query_key_score(*op, values);
                 if (!tensor) return make_error(tensor.error());
                 temporaries.push_back(make_cpu_buffer(tensor.take()));
                 auto bind = bind_single_result(*op, temporaries.back().get(), values);

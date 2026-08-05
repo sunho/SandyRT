@@ -24,6 +24,7 @@ const char* op_kind_name(OpKind kind) {
         case OpKind::Transpose: return "transpose";
         case OpKind::Reshape:   return "reshape";
         case OpKind::Permute:   return "permute";
+        case OpKind::SlidingQueryKeyScore: return "sliding_query_key_score";
         case OpKind::Embedding: return "embedding";
         case OpKind::RMSNorm:   return "rms_norm";
         case OpKind::NUM_KINDS: return "?";
@@ -361,6 +362,84 @@ public:
     }
 };
 
+class SlidingQueryKeyScoreOpDef : public OpDef {
+public:
+    OpKind kind() const override { return OpKind::SlidingQueryKeyScore; }
+    const char* name() const override { return "sliding_query_key_score"; }
+    std::vector<ValueType> infer_types(
+        std::span<Value* const> operands,
+        const AttrMap&) const override
+    {
+        const auto& qShape = operands[0]->shape;
+        const auto& kShape = operands[1]->shape;
+        int rank = qShape.rank();
+        std::vector<int64_t> outDims;
+        if (rank == 4)
+            outDims.push_back(qShape.dim(0));
+        outDims.push_back(qShape.dim(rank - 3));
+        outDims.push_back(qShape.dim(rank - 2));
+        outDims.push_back(kShape.dim(rank - 2));
+        return {{core::Shape(outDims), operands[0]->dtype}};
+    }
+    void verify(
+        std::span<Value* const> operands,
+        const AttrMap& attrs) const override
+    {
+        if (operands.size() != 2) {
+            fprintf(stderr, "sliding_query_key_score expects 2 operands, got %zu\n",
+                    operands.size());
+            abort();
+        }
+        if (operands[0]->dtype != core::DType::F32 ||
+            operands[1]->dtype != core::DType::F32) {
+            fprintf(stderr, "sliding_query_key_score operands must be f32\n");
+            abort();
+        }
+
+        const auto& qShape = operands[0]->shape;
+        const auto& kShape = operands[1]->shape;
+        int rank = qShape.rank();
+        if ((rank != 3 && rank != 4) || kShape.rank() != rank) {
+            fprintf(stderr, "sliding_query_key_score operands must both have rank 3 or rank 4\n");
+            abort();
+        }
+
+        auto window = attrs.find("window");
+        if (window != attrs.end() && window->second.kind != AttrValue::Int) {
+            fprintf(stderr, "sliding_query_key_score window attr must be int\n");
+            abort();
+        }
+        if (window != attrs.end() && window->second.intVal < 0) {
+            fprintf(stderr, "sliding_query_key_score window attr must be >= 0\n");
+            abort();
+        }
+
+        if (rank == 4) {
+            int64_t qBatch = qShape.dim(0);
+            int64_t kBatch = kShape.dim(0);
+            if (qBatch >= 0 && kBatch >= 0 && qBatch != kBatch) {
+                fprintf(stderr, "sliding_query_key_score batch dimension mismatch\n");
+                abort();
+            }
+        }
+
+        int64_t qHeads = qShape.dim(rank - 3);
+        int64_t kvHeads = kShape.dim(rank - 3);
+        int64_t qDim = qShape.dim(rank - 1);
+        int64_t kDim = kShape.dim(rank - 1);
+        if (qDim >= 0 && kDim >= 0 && qDim != kDim) {
+            fprintf(stderr, "sliding_query_key_score head dimension mismatch\n");
+            abort();
+        }
+        if (qHeads >= 0 && kvHeads >= 0) {
+            if (kvHeads <= 0 || qHeads <= 0 || qHeads % kvHeads != 0) {
+                fprintf(stderr, "sliding_query_key_score heads must be divisible by kv_heads\n");
+                abort();
+            }
+        }
+    }
+};
+
 class EmbeddingOpDef : public OpDef {
 public:
     OpKind kind() const override { return OpKind::Embedding; }
@@ -451,6 +530,7 @@ void register_all_ops() {
     static TransposeOpDef transpose_def;
     static ReshapeOpDef reshape_def;
     static PermuteOpDef permute_def;
+    static SlidingQueryKeyScoreOpDef sliding_query_key_score_def;
     static EmbeddingOpDef embedding_def;
     static RMSNormOpDef rms_norm_def;
 
@@ -464,6 +544,7 @@ void register_all_ops() {
     reg.add(&transpose_def);
     reg.add(&reshape_def);
     reg.add(&permute_def);
+    reg.add(&sliding_query_key_score_def);
     reg.add(&embedding_def);
     reg.add(&rms_norm_def);
 }
@@ -661,6 +742,13 @@ Value* Builder::createPermute(Value* x, std::vector<int64_t> dims) {
     AttrMap attrs;
     attrs["dims"] = AttrValue::make_int_list(std::move(dims));
     return createOp(OpKind::Permute, operands, attrs)[0];
+}
+
+Value* Builder::createSlidingQueryKeyScore(Value* q, Value* k, int64_t window) {
+    Value* operands[] = {q, k};
+    AttrMap attrs;
+    attrs["window"] = AttrValue::make_int(window);
+    return createOp(OpKind::SlidingQueryKeyScore, operands, attrs)[0];
 }
 
 Value* Builder::createEmbedding(Value* ids, Value* weight) {

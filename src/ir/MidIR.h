@@ -25,6 +25,7 @@ enum class OpKind {
     Transpose,
     Reshape,
     Permute,
+    SlidingQueryKeyScore,
     Embedding,
     RMSNorm,
 
@@ -170,6 +171,7 @@ public:
     Value* createTranspose(Value* x);
     Value* createReshape(Value* x, std::vector<int64_t> shape);
     Value* createPermute(Value* x, std::vector<int64_t> dims);
+    Value* createSlidingQueryKeyScore(Value* q, Value* k, int64_t window = 0);
     Value* createEmbedding(Value* ids, Value* weight);
     Value* createRMSNorm(Value* x, Value* weight, float epsilon = 1.0e-6f);
 

@@ -69,6 +69,16 @@ BuiltinLowering BuiltinLowering::createDefault() {
         return {builder.createPermute(operands[0], attrs.at("dims").intListVal)};
     });
 
+    bl.add("sliding_query_key_score", [](Builder& builder,
+                                          const std::vector<Value*>& operands,
+                                          const AttrMap& attrs) -> std::vector<Value*> {
+        int64_t window = 0;
+        auto it = attrs.find("window");
+        if (it != attrs.end() && it->second.kind == AttrValue::Int)
+            window = it->second.intVal;
+        return {builder.createSlidingQueryKeyScore(operands[0], operands[1], window)};
+    });
+
     bl.add("embedding", [](Builder& builder,
                             const std::vector<Value*>& operands,
                             const AttrMap&) -> std::vector<Value*> {
