@@ -57,6 +57,18 @@ BuiltinLowering BuiltinLowering::createDefault() {
         return {builder.createTranspose(operands[0])};
     });
 
+    bl.add("reshape", [](Builder& builder,
+                          const std::vector<Value*>& operands,
+                          const AttrMap& attrs) -> std::vector<Value*> {
+        return {builder.createReshape(operands[0], attrs.at("shape").intListVal)};
+    });
+
+    bl.add("permute", [](Builder& builder,
+                          const std::vector<Value*>& operands,
+                          const AttrMap& attrs) -> std::vector<Value*> {
+        return {builder.createPermute(operands[0], attrs.at("dims").intListVal)};
+    });
+
     bl.add("embedding", [](Builder& builder,
                             const std::vector<Value*>& operands,
                             const AttrMap&) -> std::vector<Value*> {

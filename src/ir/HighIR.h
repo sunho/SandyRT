@@ -7,7 +7,7 @@
 
 namespace sandy::ir::high_ir {
 
-enum class Type { Node, Int, Float, String };
+enum class Type { Node, Int, Float, String, IntList };
 
 const char* typeName(Type type);
 
@@ -25,10 +25,12 @@ struct Attr {
     int64_t intVal = 0;
     double floatVal = 0.0;
     std::string strVal;
+    std::vector<int64_t> intListVal;
 
     static Attr fromInt(const std::string& name, int64_t v);
     static Attr fromFloat(const std::string& name, double v);
     static Attr fromString(const std::string& name, const std::string& v);
+    static Attr fromIntList(const std::string& name, std::vector<int64_t> v);
 };
 
 struct Op {

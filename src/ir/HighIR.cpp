@@ -1,5 +1,6 @@
 #include "HighIR.h"
 #include <iostream>
+#include <utility>
 
 namespace sandy::ir::high_ir {
 
@@ -9,6 +10,7 @@ const char* typeName(Type type) {
         case Type::Int: return "int";
         case Type::Float: return "float";
         case Type::String: return "string";
+        case Type::IntList: return "int_list";
     }
     return "unknown";
 }
@@ -23,6 +25,10 @@ Attr Attr::fromFloat(const std::string& name, double v) {
 
 Attr Attr::fromString(const std::string& name, const std::string& v) {
     Attr a; a.name = name; a.type = Type::String; a.strVal = v; return a;
+}
+
+Attr Attr::fromIntList(const std::string& name, std::vector<int64_t> v) {
+    Attr a; a.name = name; a.type = Type::IntList; a.intListVal = std::move(v); return a;
 }
 
 Value* Graph::newValue(Type type) {
@@ -110,6 +116,14 @@ static void printAttrVal(const Attr& a) {
         case Type::Int: std::cout << a.intVal; break;
         case Type::Float: std::cout << a.floatVal; break;
         case Type::String: std::cout << "\"" << a.strVal << "\""; break;
+        case Type::IntList:
+            std::cout << "[";
+            for (size_t i = 0; i < a.intListVal.size(); i++) {
+                if (i > 0) std::cout << ", ";
+                std::cout << a.intListVal[i];
+            }
+            std::cout << "]";
+            break;
         default: std::cout << "?"; break;
     }
 }

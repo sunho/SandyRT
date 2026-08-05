@@ -403,6 +403,34 @@ Result<OwnedTensor> transpose_f32(
     return out;
 }
 
+Result<OwnedTensor> reshape_f32(
+        std::span<const uint8_t> x,
+        const TensorDesc& xDesc,
+        Shape shape) {
+    auto xDtype = require_f32(xDesc, "reshape input");
+    if (!xDtype) return make_error(xDtype.error());
+
+    for (int i = 0; i < shape.rank(); i++) {
+        if (shape.dim(i) < Shape::kDynamic)
+            return make_error("reshape dimensions must be >= -1");
+    }
+
+    int64_t inputNumel = xDesc.shape.numel();
+    int64_t outputNumel = shape.numel();
+    if (inputNumel < 0 || outputNumel < 0)
+        return make_error("reshape input and output must have static shape");
+    if (inputNumel != outputNumel)
+        return make_error("reshape element count mismatch");
+
+    auto xBytes = require_bytes(x, xDesc, "reshape input");
+    if (!xBytes) return make_error(xBytes.error());
+
+    OwnedTensor out;
+    out.desc = TensorDesc(std::move(shape), DType::F32);
+    out.data.assign(x.begin(), x.end());
+    return out;
+}
+
 Result<OwnedTensor> permute_f32(
         std::span<const uint8_t> x,
         const TensorDesc& xDesc,

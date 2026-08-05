@@ -207,6 +207,19 @@ Result<core::OwnedTensor> eval_transpose(
     return core::transpose_f32((*x)->data(), (*x)->desc());
 }
 
+Result<core::OwnedTensor> eval_reshape(
+        const ir::mid_ir::Op& op,
+        const std::unordered_map<const ir::mid_ir::Value*, const BackendBuffer*>& values) {
+    if (op.operands.size() != 1)
+        return make_error("reshape expects one operand");
+
+    auto x = lookup_value(values, op.operands[0]);
+    if (!x) return make_error(x.error());
+
+    auto shape = attr_int_list(op, "shape");
+    return core::reshape_f32((*x)->data(), (*x)->desc(), core::Shape(std::move(shape)));
+}
+
 Result<core::OwnedTensor> eval_permute(
         const ir::mid_ir::Op& op,
         const std::unordered_map<const ir::mid_ir::Value*, const BackendBuffer*>& values) {
@@ -340,6 +353,14 @@ Result<BackendRunResult> interpret_graph(
             }
             case ir::mid_ir::OpKind::Transpose: {
                 auto tensor = eval_transpose(*op, values);
+                if (!tensor) return make_error(tensor.error());
+                temporaries.push_back(make_cpu_buffer(tensor.take()));
+                auto bind = bind_single_result(*op, temporaries.back().get(), values);
+                if (!bind) return make_error(bind.error());
+                break;
+            }
+            case ir::mid_ir::OpKind::Reshape: {
+                auto tensor = eval_reshape(*op, values);
                 if (!tensor) return make_error(tensor.error());
                 temporaries.push_back(make_cpu_buffer(tensor.take()));
                 auto bind = bind_single_result(*op, temporaries.back().get(), values);

@@ -241,3 +241,38 @@ func main(input_ids Node) Node {
     std::error_code ec;
     fs::remove_all(dir, ec);
 }
+
+TEST(CompilerTest, ProgrammaticReshapePermuteMaterializesToMidIROps) {
+    sandy::ir::high_ir::Graph highGraph;
+    auto* x = highGraph.addInput("x");
+    auto reshaped = highGraph.addBuiltin(
+        "reshape",
+        {x},
+        {sandy::ir::high_ir::Attr::fromIntList("shape", {1, 2, 3, 2})},
+        1);
+    auto permuted = highGraph.addBuiltin(
+        "permute",
+        {reshaped[0]},
+        {sandy::ir::high_ir::Attr::fromIntList("dims", {0, 2, 1, 3})},
+        1);
+    highGraph.setOutputs({permuted[0]});
+
+    sandy::Compiler compiler;
+    TestWeights weights;
+    sandy::ir::mid_ir::MaterializeOptions options;
+    options.input_tensor_descs["x"] = sandy::core::TensorDesc(
+        sandy::core::Shape({1, 2, 6}), sandy::core::DType::F32);
+
+    auto result = compiler.materialize_mid_ir(highGraph, weights, options);
+    ASSERT_TRUE(result) << result.error();
+    auto midGraph = result.take();
+
+    ASSERT_EQ(midGraph->outputs().size(), 1u);
+    ASSERT_NE(midGraph->outputs()[0], nullptr);
+    ASSERT_NE(midGraph->outputs()[0]->def, nullptr);
+    EXPECT_EQ(midGraph->outputs()[0]->def->kind, sandy::ir::mid_ir::OpKind::Permute);
+    EXPECT_EQ(midGraph->outputs()[0]->shape, sandy::core::Shape({1, 3, 2, 2}));
+    ASSERT_EQ(midGraph->outputs()[0]->def->operands.size(), 1u);
+    EXPECT_EQ(midGraph->outputs()[0]->def->operands[0]->def->kind,
+              sandy::ir::mid_ir::OpKind::Reshape);
+}

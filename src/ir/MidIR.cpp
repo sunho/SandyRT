@@ -22,6 +22,7 @@ const char* op_kind_name(OpKind kind) {
         case OpKind::Sqrt:      return "sqrt";
         case OpKind::MatMul:    return "matmul";
         case OpKind::Transpose: return "transpose";
+        case OpKind::Reshape:   return "reshape";
         case OpKind::Permute:   return "permute";
         case OpKind::Embedding: return "embedding";
         case OpKind::RMSNorm:   return "rms_norm";
@@ -265,6 +266,48 @@ public:
     }
 };
 
+class ReshapeOpDef : public OpDef {
+public:
+    OpKind kind() const override { return OpKind::Reshape; }
+    const char* name() const override { return "reshape"; }
+    std::vector<ValueType> infer_types(
+        std::span<Value* const> operands,
+        const AttrMap& attrs) const override
+    {
+        return {{core::Shape(attrs.at("shape").intListVal), operands[0]->dtype}};
+    }
+    void verify(
+        std::span<Value* const> operands,
+        const AttrMap& attrs) const override
+    {
+        if (operands.size() != 1) {
+            fprintf(stderr, "reshape expects 1 operand, got %zu\n", operands.size());
+            abort();
+        }
+
+        auto it = attrs.find("shape");
+        if (it == attrs.end() || it->second.kind != AttrValue::IntList) {
+            fprintf(stderr, "reshape shape attr must be int list\n");
+            abort();
+        }
+
+        for (int64_t dim : it->second.intListVal) {
+            if (dim < core::Shape::kDynamic) {
+                fprintf(stderr, "reshape dimensions must be >= -1\n");
+                abort();
+            }
+        }
+
+        core::Shape outShape(it->second.intListVal);
+        int64_t inputNumel = operands[0]->shape.numel();
+        int64_t outputNumel = outShape.numel();
+        if (inputNumel >= 0 && outputNumel >= 0 && inputNumel != outputNumel) {
+            fprintf(stderr, "reshape element count mismatch\n");
+            abort();
+        }
+    }
+};
+
 class PermuteOpDef : public OpDef {
 public:
     OpKind kind() const override { return OpKind::Permute; }
@@ -406,6 +449,7 @@ void register_all_ops() {
     static SqrtOpDef sqrt_def;
     static MatMulOpDef matmul_def;
     static TransposeOpDef transpose_def;
+    static ReshapeOpDef reshape_def;
     static PermuteOpDef permute_def;
     static EmbeddingOpDef embedding_def;
     static RMSNormOpDef rms_norm_def;
@@ -418,6 +462,7 @@ void register_all_ops() {
     reg.add(&sqrt_def);
     reg.add(&matmul_def);
     reg.add(&transpose_def);
+    reg.add(&reshape_def);
     reg.add(&permute_def);
     reg.add(&embedding_def);
     reg.add(&rms_norm_def);
@@ -602,6 +647,13 @@ Value* Builder::createMatMul(Value* lhs, Value* rhs) {
 Value* Builder::createTranspose(Value* x) {
     Value* operands[] = {x};
     return createOp(OpKind::Transpose, operands)[0];
+}
+
+Value* Builder::createReshape(Value* x, std::vector<int64_t> shape) {
+    Value* operands[] = {x};
+    AttrMap attrs;
+    attrs["shape"] = AttrValue::make_int_list(std::move(shape));
+    return createOp(OpKind::Reshape, operands, attrs)[0];
 }
 
 Value* Builder::createPermute(Value* x, std::vector<int64_t> dims) {

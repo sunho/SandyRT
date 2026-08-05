@@ -124,6 +124,20 @@ TEST_F(MidIRTest, Transpose2DTypeInference) {
     EXPECT_EQ(out->def->kind, sandy::ir::mid_ir::OpKind::Transpose);
 }
 
+TEST_F(MidIRTest, ReshapeTypeInference) {
+    sandy::ir::mid_ir::Graph graph;
+    sandy::ir::mid_ir::Builder builder(graph);
+
+    auto* x = builder.createInput("x", sandy::core::Shape({2, 3, 4}), sandy::core::DType::F32);
+    auto* out = builder.createReshape(x, {2, 12});
+
+    EXPECT_EQ(out->shape, sandy::core::Shape({2, 12}));
+    EXPECT_EQ(out->dtype, sandy::core::DType::F32);
+    EXPECT_EQ(out->def->kind, sandy::ir::mid_ir::OpKind::Reshape);
+    ASSERT_EQ(out->def->attrs.at("shape").intListVal.size(), 2u);
+    EXPECT_EQ(out->def->attrs.at("shape").intListVal[1], 12);
+}
+
 TEST_F(MidIRTest, PermuteTypeInference) {
     sandy::ir::mid_ir::Graph graph;
     sandy::ir::mid_ir::Builder builder(graph);

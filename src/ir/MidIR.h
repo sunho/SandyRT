@@ -23,6 +23,7 @@ enum class OpKind {
     Sqrt,
     MatMul,
     Transpose,
+    Reshape,
     Permute,
     Embedding,
     RMSNorm,
@@ -167,6 +168,7 @@ public:
     Value* createSqrt(Value* x);
     Value* createMatMul(Value* lhs, Value* rhs);
     Value* createTranspose(Value* x);
+    Value* createReshape(Value* x, std::vector<int64_t> shape);
     Value* createPermute(Value* x, std::vector<int64_t> dims);
     Value* createEmbedding(Value* ids, Value* weight);
     Value* createRMSNorm(Value* x, Value* weight, float epsilon = 1.0e-6f);

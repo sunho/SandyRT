@@ -54,6 +54,9 @@ Result<std::unique_ptr<Graph>> MidIRMaterializer::materialize(
                         case high_ir::Type::String:
                             attrs[a.name] = AttrValue::make_string(a.strVal);
                             break;
+                        case high_ir::Type::IntList:
+                            attrs[a.name] = AttrValue::make_int_list(a.intListVal);
+                            break;
                         default:
                             break;
                     }

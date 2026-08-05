@@ -52,6 +52,11 @@ Result<OwnedTensor> transpose_f32(
     std::span<const uint8_t> x,
     const TensorDesc& xDesc);
 
+Result<OwnedTensor> reshape_f32(
+    std::span<const uint8_t> x,
+    const TensorDesc& xDesc,
+    Shape shape);
+
 Result<OwnedTensor> permute_f32(
     std::span<const uint8_t> x,
     const TensorDesc& xDesc,
