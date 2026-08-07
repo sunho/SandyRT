@@ -1,5 +1,10 @@
 build/
+build-opt/
+build-release/
+external/googletest/
 experiments/mnist/data/
 experiments/mnist/.venv/
 experiments/mnist/*.safetensors
 experiments/gpt2_small/model.safetensors
+experiments/gpt2_small/sandy_model.safetensors
+experiments/gpt2_small/input_*.safetensors
