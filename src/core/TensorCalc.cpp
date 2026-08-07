@@ -115,6 +115,29 @@ size_t broadcast_batch_offset(
 }
 
 using BinaryOp = float (*)(float, float);
+using UnaryOp = float (*)(float);
+
+Result<OwnedTensor> unary_elementwise_f32(
+        std::span<const uint8_t> x,
+        const TensorDesc& xDesc,
+        const std::string& opName,
+        UnaryOp op) {
+    auto xDtype = require_f32(xDesc, opName + " input");
+    if (!xDtype) return make_error(xDtype.error());
+
+    auto xBytes = require_bytes(x, xDesc, opName + " input");
+    if (!xBytes) return make_error(xBytes.error());
+
+    OwnedTensor out;
+    out.desc = xDesc;
+    out.data.resize(x.size());
+
+    size_t count = x.size() / sizeof(float);
+    for (size_t i = 0; i < count; i++)
+        write_f32(out.data, i, op(read_f32(x, i)));
+
+    return out;
+}
 
 Result<OwnedTensor> binary_elementwise_f32(
         std::span<const uint8_t> lhs,
@@ -265,21 +288,17 @@ Result<OwnedTensor> mul_f32(
 Result<OwnedTensor> sqrt_f32(
         std::span<const uint8_t> x,
         const TensorDesc& xDesc) {
-    auto xDtype = require_f32(xDesc, "sqrt input");
-    if (!xDtype) return make_error(xDtype.error());
+    return unary_elementwise_f32(
+        x, xDesc, "sqrt",
+        [](float v) { return std::sqrt(v); });
+}
 
-    auto xBytes = require_bytes(x, xDesc, "sqrt input");
-    if (!xBytes) return make_error(xBytes.error());
-
-    OwnedTensor out;
-    out.desc = xDesc;
-    out.data.resize(x.size());
-
-    size_t count = x.size() / sizeof(float);
-    for (size_t i = 0; i < count; i++)
-        write_f32(out.data, i, std::sqrt(read_f32(x, i)));
-
-    return out;
+Result<OwnedTensor> tanh_f32(
+        std::span<const uint8_t> x,
+        const TensorDesc& xDesc) {
+    return unary_elementwise_f32(
+        x, xDesc, "tanh",
+        [](float v) { return std::tanh(v); });
 }
 
 Result<OwnedTensor> matmul_f32(

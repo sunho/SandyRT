@@ -84,6 +84,43 @@ BuiltinLowering BuiltinLowering::createDefault() {
         return std::vector<Value*>{builder.createSqrt(operands[0])};
     });
 
+    bl.add("tanh", [](Builder& builder,
+                       const std::vector<Value*>& operands,
+                       const AttrMap&,
+                       int numResults) -> Result<std::vector<Value*>> {
+        auto resultCount = expect_num_results("tanh", numResults, 1);
+        if (!resultCount) return make_error(resultCount.error());
+        if (operands.size() != 1)
+            return make_error("tanh expects one operand");
+        return std::vector<Value*>{builder.createTanh(operands[0])};
+    });
+
+    bl.add("gelu", [](Builder& builder,
+                       const std::vector<Value*>& operands,
+                       const AttrMap&,
+                       int numResults) -> Result<std::vector<Value*>> {
+        auto resultCount = expect_num_results("gelu", numResults, 1);
+        if (!resultCount) return make_error(resultCount.error());
+        if (operands.size() != 1)
+            return make_error("gelu expects one operand");
+
+        auto* x = operands[0];
+        auto* half = builder.createConstantF32(0.5f);
+        auto* one = builder.createConstantF32(1.0f);
+        auto* cubicCoeff = builder.createConstantF32(0.044715f);
+        auto* sqrtTwoOverPi = builder.createConstantF32(0.7978845608028654f);
+
+        auto* x2 = builder.createMul(x, x);
+        auto* x3 = builder.createMul(x2, x);
+        auto* cubic = builder.createMul(cubicCoeff, x3);
+        auto* inner = builder.createAdd(x, cubic);
+        auto* scaled = builder.createMul(sqrtTwoOverPi, inner);
+        auto* tanh = builder.createTanh(scaled);
+        auto* onePlusTanh = builder.createAdd(one, tanh);
+        auto* halfX = builder.createMul(half, x);
+        return std::vector<Value*>{builder.createMul(halfX, onePlusTanh)};
+    });
+
     bl.add("matmul", [](Builder& builder,
                          const std::vector<Value*>& operands,
                          const AttrMap&,

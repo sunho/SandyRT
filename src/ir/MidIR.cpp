@@ -15,11 +15,13 @@ const char* op_kind_name(OpKind kind) {
     switch (kind) {
         case OpKind::Input:     return "input";
         case OpKind::Weight:    return "weight";
+        case OpKind::Constant:  return "constant";
         case OpKind::Linear:    return "linear";
         case OpKind::ReLU:      return "relu";
         case OpKind::Add:       return "add";
         case OpKind::Mul:       return "mul";
         case OpKind::Sqrt:      return "sqrt";
+        case OpKind::Tanh:      return "tanh";
         case OpKind::MatMul:    return "matmul";
         case OpKind::Transpose: return "transpose";
         case OpKind::Reshape:   return "reshape";
@@ -186,10 +188,13 @@ private:
     const char* name_;
 };
 
-class SqrtOpDef : public OpDef {
+class UnaryElementwiseOpDef : public OpDef {
 public:
-    OpKind kind() const override { return OpKind::Sqrt; }
-    const char* name() const override { return "sqrt"; }
+    UnaryElementwiseOpDef(OpKind kind, const char* name)
+        : kind_(kind), name_(name) {}
+
+    OpKind kind() const override { return kind_; }
+    const char* name() const override { return name_; }
     std::vector<ValueType> infer_types(
         std::span<Value* const> operands,
         const AttrMap&) const override
@@ -201,10 +206,18 @@ public:
         const AttrMap&) const override
     {
         if (operands.size() != 1) {
-            fprintf(stderr, "sqrt expects 1 operand, got %zu\n", operands.size());
+            fprintf(stderr, "%s expects 1 operand, got %zu\n", name_, operands.size());
+            abort();
+        }
+        if (operands[0]->dtype != core::DType::F32) {
+            fprintf(stderr, "%s operand must be f32\n", name_);
             abort();
         }
     }
+
+private:
+    OpKind kind_;
+    const char* name_;
 };
 
 class MatMulOpDef : public OpDef {
@@ -613,7 +626,8 @@ void register_all_ops() {
     static LinearOpDef linear_def;
     static BinaryElementwiseOpDef add_def(OpKind::Add, "add");
     static BinaryElementwiseOpDef mul_def(OpKind::Mul, "mul");
-    static SqrtOpDef sqrt_def;
+    static UnaryElementwiseOpDef sqrt_def(OpKind::Sqrt, "sqrt");
+    static UnaryElementwiseOpDef tanh_def(OpKind::Tanh, "tanh");
     static MatMulOpDef matmul_def;
     static TransposeOpDef transpose_def;
     static ReshapeOpDef reshape_def;
@@ -629,6 +643,7 @@ void register_all_ops() {
     reg.add(&add_def);
     reg.add(&mul_def);
     reg.add(&sqrt_def);
+    reg.add(&tanh_def);
     reg.add(&matmul_def);
     reg.add(&transpose_def);
     reg.add(&reshape_def);
@@ -785,6 +800,20 @@ Value* Builder::createWeight(const std::string& name, core::Shape shape, core::D
     return v;
 }
 
+Value* Builder::createConstantF32(float value) {
+    auto& op = graph_.ops_.emplace_back();
+    op.kind = OpKind::Constant;
+    op.attrs["value"] = AttrValue::make_float(value);
+    op.parent = block_;
+
+    auto* v = graph_.newValue(core::Shape({}), core::DType::F32);
+    v->def = &op;
+    op.results.push_back(v);
+
+    block_->ops.push_back(&op);
+    return v;
+}
+
 Value* Builder::createLinear(Value* x, Value* weight, Value* bias) {
     Value* operands[] = {x, weight, bias};
     return createOp(OpKind::Linear, operands)[0];
@@ -808,6 +837,11 @@ Value* Builder::createMul(Value* lhs, Value* rhs) {
 Value* Builder::createSqrt(Value* x) {
     Value* operands[] = {x};
     return createOp(OpKind::Sqrt, operands)[0];
+}
+
+Value* Builder::createTanh(Value* x) {
+    Value* operands[] = {x};
+    return createOp(OpKind::Tanh, operands)[0];
 }
 
 Value* Builder::createMatMul(Value* lhs, Value* rhs) {

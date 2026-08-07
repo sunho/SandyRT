@@ -3,6 +3,7 @@
 #include "MidIR.h"
 #include "TensorCalc.h"
 
+#include <cstring>
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
@@ -104,6 +105,14 @@ std::unique_ptr<CpuBackendBuffer> make_cpu_buffer(core::OwnedTensor tensor) {
         std::move(tensor.desc), std::move(tensor.data));
 }
 
+std::unique_ptr<CpuBackendBuffer> make_constant_buffer(float value) {
+    std::vector<uint8_t> data(sizeof(float));
+    std::memcpy(data.data(), &value, sizeof(float));
+    return std::make_unique<CpuBackendBuffer>(
+        core::TensorDesc(core::Shape({}), core::DType::F32),
+        std::move(data));
+}
+
 Result<void> bind_single_result(
         const ir::mid_ir::Op& op,
         const BackendBuffer* buffer,
@@ -187,6 +196,18 @@ Result<core::OwnedTensor> eval_sqrt(
     if (!x) return make_error(x.error());
 
     return core::sqrt_f32((*x)->data(), (*x)->desc());
+}
+
+Result<core::OwnedTensor> eval_tanh(
+        const ir::mid_ir::Op& op,
+        const std::unordered_map<const ir::mid_ir::Value*, const BackendBuffer*>& values) {
+    if (op.operands.size() != 1)
+        return make_error("tanh expects one operand");
+
+    auto x = lookup_value(values, op.operands[0]);
+    if (!x) return make_error(x.error());
+
+    return core::tanh_f32((*x)->data(), (*x)->desc());
 }
 
 Result<core::OwnedTensor> eval_matmul(
@@ -342,6 +363,12 @@ Result<BackendRunResult> interpret_graph(
                 if (!bind) return make_error(bind.error());
                 break;
             }
+            case ir::mid_ir::OpKind::Constant: {
+                temporaries.push_back(make_constant_buffer(attr_float_or(*op, "value", 0.0f)));
+                auto bind = bind_single_result(*op, temporaries.back().get(), values);
+                if (!bind) return make_error(bind.error());
+                break;
+            }
             case ir::mid_ir::OpKind::Linear: {
                 auto tensor = eval_linear(*op, values);
                 if (!tensor) return make_error(tensor.error());
@@ -376,6 +403,14 @@ Result<BackendRunResult> interpret_graph(
             }
             case ir::mid_ir::OpKind::Sqrt: {
                 auto tensor = eval_sqrt(*op, values);
+                if (!tensor) return make_error(tensor.error());
+                temporaries.push_back(make_cpu_buffer(tensor.take()));
+                auto bind = bind_single_result(*op, temporaries.back().get(), values);
+                if (!bind) return make_error(bind.error());
+                break;
+            }
+            case ir::mid_ir::OpKind::Tanh: {
+                auto tensor = eval_tanh(*op, values);
                 if (!tensor) return make_error(tensor.error());
                 temporaries.push_back(make_cpu_buffer(tensor.take()));
                 auto bind = bind_single_result(*op, temporaries.back().get(), values);

@@ -273,6 +273,20 @@ TEST(TensorCalcTest, SqrtF32) {
     EXPECT_FLOAT_EQ(read_f32(out.data, 3), 4.0f);
 }
 
+TEST(TensorCalcTest, TanhF32) {
+    auto x = f32_bytes({-1.0f, 0.0f, 1.0f});
+
+    auto result = sandy::core::tanh_f32(
+        x, sandy::core::TensorDesc(sandy::core::Shape({3}), sandy::core::DType::F32));
+
+    ASSERT_TRUE(result) << result.error();
+    auto out = result.take();
+    EXPECT_EQ(out.desc.shape, sandy::core::Shape({3}));
+    EXPECT_NEAR(read_f32(out.data, 0), std::tanh(-1.0f), 1.0e-6f);
+    EXPECT_FLOAT_EQ(read_f32(out.data, 1), 0.0f);
+    EXPECT_NEAR(read_f32(out.data, 2), std::tanh(1.0f), 1.0e-6f);
+}
+
 TEST(TensorCalcTest, MatMulF32UsesTorchLayout) {
     auto lhs = f32_bytes({
         1.0f, 2.0f, 3.0f,
@@ -820,6 +834,43 @@ TEST(CpuInterpretTest, AddMulSqrt) {
     EXPECT_FLOAT_EQ(read_f32(it->second->data(), 3), 8.0f);
     EXPECT_FLOAT_EQ(read_f32(it->second->data(), 4), std::sqrt(120.0f));
     EXPECT_FLOAT_EQ(read_f32(it->second->data(), 5), std::sqrt(172.0f));
+}
+
+TEST(CpuInterpretTest, ConstantBroadcastAndTanh) {
+    sandy::ir::mid_ir::register_all_ops();
+
+    sandy::ir::mid_ir::Graph graph;
+    sandy::ir::mid_ir::Builder builder(graph);
+    auto* x = builder.createInput("x", sandy::core::Shape({3}), sandy::core::DType::F32);
+    auto* offset = builder.createConstantF32(1.0f);
+    auto* shifted = builder.createAdd(x, offset);
+    auto* out = builder.createTanh(shifted);
+    sandy::ir::mid_ir::Value* outputs[] = {out};
+    builder.setOutputs(outputs);
+
+    sandy::engine::Engine engine(
+        std::make_unique<sandy::engine::backend::CpuInterpreterBackend>());
+
+    auto planResult = engine.create_plan(graph);
+    ASSERT_TRUE(planResult) << planResult.error();
+    auto plan = planResult.take();
+
+    sandy::engine::TensorMap inputs;
+    inputs["x"] = make_f32_buffer("x", sandy::core::Shape({3}), {-2.0f, -1.0f, 0.0f});
+
+    sandy::engine::TensorMap weights;
+
+    auto runResult = engine.run(*plan, inputs, weights);
+    ASSERT_TRUE(runResult) << runResult.error();
+    auto outputsMap = runResult.take();
+
+    auto it = outputsMap.find("output0");
+    ASSERT_NE(it, outputsMap.end());
+    ASSERT_NE(it->second, nullptr);
+    EXPECT_EQ(it->second->desc().shape, sandy::core::Shape({3}));
+    EXPECT_NEAR(read_f32(it->second->data(), 0), std::tanh(-1.0f), 1.0e-6f);
+    EXPECT_FLOAT_EQ(read_f32(it->second->data(), 1), 0.0f);
+    EXPECT_NEAR(read_f32(it->second->data(), 2), std::tanh(1.0f), 1.0e-6f);
 }
 
 TEST(CpuInterpretTest, GemmaStyleMatMulWithTransposedWeight) {

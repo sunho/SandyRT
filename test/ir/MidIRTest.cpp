@@ -99,6 +99,22 @@ TEST_F(MidIRTest, SqrtTypeInference) {
     EXPECT_EQ(out->def->kind, sandy::ir::mid_ir::OpKind::Sqrt);
 }
 
+TEST_F(MidIRTest, ConstantAndTanhTypeInference) {
+    sandy::ir::mid_ir::Graph graph;
+    sandy::ir::mid_ir::Builder builder(graph);
+
+    auto* c = builder.createConstantF32(1.25f);
+    auto* out = builder.createTanh(c);
+
+    EXPECT_EQ(c->shape, sandy::core::Shape({}));
+    EXPECT_EQ(c->dtype, sandy::core::DType::F32);
+    EXPECT_EQ(c->def->kind, sandy::ir::mid_ir::OpKind::Constant);
+    EXPECT_EQ(c->def->attrs.at("value").floatVal, 1.25);
+    EXPECT_EQ(out->shape, c->shape);
+    EXPECT_EQ(out->dtype, c->dtype);
+    EXPECT_EQ(out->def->kind, sandy::ir::mid_ir::OpKind::Tanh);
+}
+
 TEST_F(MidIRTest, MatMulTypeInference) {
     sandy::ir::mid_ir::Graph graph;
     sandy::ir::mid_ir::Builder builder(graph);

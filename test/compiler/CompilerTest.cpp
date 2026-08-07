@@ -176,6 +176,44 @@ func main(x Node, y Node, z Node) Node {
     fs::remove_all(dir, ec);
 }
 
+TEST(CompilerTest, GeluBuiltinLowersThroughConstantsAndTanh) {
+    fs::path dir = makeTempDir();
+    writeFile(dir / "main.sandy.go", R"(
+func main(x Node) Node {
+    return __gelu(x)
+}
+)");
+
+    sandy::Compiler compiler;
+    auto highGraph = compiler.load_sandygo((dir / "main.sandy.go").string());
+
+    TestWeights weights;
+    sandy::ir::mid_ir::MaterializeOptions options;
+    options.input_tensor_descs["x"] = sandy::core::TensorDesc(
+        sandy::core::Shape({2, 3}), sandy::core::DType::F32);
+
+    auto result = compiler.materialize_mid_ir(highGraph, weights, options);
+    ASSERT_TRUE(result) << result.error();
+    auto midGraph = result.take();
+
+    ASSERT_EQ(midGraph->outputs().size(), 1u);
+    ASSERT_NE(midGraph->outputs()[0], nullptr);
+    EXPECT_EQ(midGraph->outputs()[0]->shape, sandy::core::Shape({2, 3}));
+    EXPECT_EQ(midGraph->outputs()[0]->def->kind, sandy::ir::mid_ir::OpKind::Mul);
+
+    bool sawConstant = false;
+    bool sawTanh = false;
+    for (auto* op : midGraph->entry()->ops) {
+        sawConstant = sawConstant || op->kind == sandy::ir::mid_ir::OpKind::Constant;
+        sawTanh = sawTanh || op->kind == sandy::ir::mid_ir::OpKind::Tanh;
+    }
+    EXPECT_TRUE(sawConstant);
+    EXPECT_TRUE(sawTanh);
+
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
 TEST(CompilerTest, GemmaStyleMatMulWithTransposeMaterializesToMidIROps) {
     fs::path dir = makeTempDir();
     writeFile(dir / "main.sandy.go", R"(

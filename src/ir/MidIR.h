@@ -16,11 +16,13 @@ namespace sandy::ir::mid_ir {
 enum class OpKind {
     Input,
     Weight,
+    Constant,
     Linear,
     ReLU,
     Add,
     Mul,
     Sqrt,
+    Tanh,
     MatMul,
     Transpose,
     Reshape,
@@ -162,12 +164,14 @@ public:
 
     Value* createInput(const std::string& name, core::Shape shape, core::DType dtype);
     Value* createWeight(const std::string& name, core::Shape shape, core::DType dtype);
+    Value* createConstantF32(float value);
 
     Value* createLinear(Value* x, Value* weight, Value* bias);
     Value* createReLU(Value* x);
     Value* createAdd(Value* lhs, Value* rhs);
     Value* createMul(Value* lhs, Value* rhs);
     Value* createSqrt(Value* x);
+    Value* createTanh(Value* x);
     Value* createMatMul(Value* lhs, Value* rhs);
     Value* createTranspose(Value* x);
     Value* createReshape(Value* x, std::vector<int64_t> shape);

@@ -78,8 +78,16 @@ Result<std::unique_ptr<Graph>> MidIRMaterializer::materialize(
                     value_map[op.results[i]->id] = midResults[i];
                 break;
             }
-            case high_ir::Op::IntConst:
-            case high_ir::Op::FloatConst:
+            case high_ir::Op::IntConst: {
+                auto* v = builder.createConstantF32(static_cast<float>(op.intVal));
+                value_map[op.results[0]->id] = v;
+                break;
+            }
+            case high_ir::Op::FloatConst: {
+                auto* v = builder.createConstantF32(static_cast<float>(op.floatVal));
+                value_map[op.results[0]->id] = v;
+                break;
+            }
             case high_ir::Op::StringConst:
                 return make_error("unexpected const op in materialization");
         }
