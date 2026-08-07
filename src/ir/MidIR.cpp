@@ -30,6 +30,7 @@ const char* op_kind_name(OpKind kind) {
         case OpKind::Softmax:   return "softmax";
         case OpKind::Embedding: return "embedding";
         case OpKind::RMSNorm:   return "rms_norm";
+        case OpKind::LayerNorm: return "layer_norm";
         case OpKind::NUM_KINDS: return "?";
     }
     return "?";
@@ -619,6 +620,62 @@ public:
     }
 };
 
+class LayerNormOpDef : public OpDef {
+public:
+    OpKind kind() const override { return OpKind::LayerNorm; }
+    const char* name() const override { return "layer_norm"; }
+    std::vector<ValueType> infer_types(
+        std::span<Value* const> operands,
+        const AttrMap&) const override
+    {
+        return {{operands[0]->shape, operands[0]->dtype}};
+    }
+    void verify(
+        std::span<Value* const> operands,
+        const AttrMap& attrs) const override
+    {
+        if (operands.size() != 3) {
+            fprintf(stderr, "layer_norm expects 3 operands (x, weight, bias), got %zu\n",
+                    operands.size());
+            abort();
+        }
+        auto epsilon = attrs.find("epsilon");
+        if (epsilon != attrs.end() && epsilon->second.kind != AttrValue::Float) {
+            fprintf(stderr, "layer_norm epsilon attr must be float\n");
+            abort();
+        }
+        if (operands[0]->shape.rank() < 1) {
+            fprintf(stderr, "layer_norm input must have rank >= 1\n");
+            abort();
+        }
+        if (operands[1]->shape.rank() != 1) {
+            fprintf(stderr, "layer_norm weight must have rank 1\n");
+            abort();
+        }
+        if (operands[2]->shape.rank() != 1) {
+            fprintf(stderr, "layer_norm bias must have rank 1\n");
+            abort();
+        }
+        if (operands[0]->dtype != core::DType::F32 ||
+            operands[1]->dtype != core::DType::F32 ||
+            operands[2]->dtype != core::DType::F32) {
+            fprintf(stderr, "layer_norm operands must be f32\n");
+            abort();
+        }
+        int64_t hidden = operands[0]->shape.dim(operands[0]->shape.rank() - 1);
+        int64_t weightDim = operands[1]->shape.dim(0);
+        int64_t biasDim = operands[2]->shape.dim(0);
+        if (hidden >= 0 && weightDim >= 0 && hidden != weightDim) {
+            fprintf(stderr, "layer_norm weight dimension mismatch\n");
+            abort();
+        }
+        if (hidden >= 0 && biasDim >= 0 && hidden != biasDim) {
+            fprintf(stderr, "layer_norm bias dimension mismatch\n");
+            abort();
+        }
+    }
+};
+
 } // anonymous namespace
 
 void register_all_ops() {
@@ -636,6 +693,7 @@ void register_all_ops() {
     static SoftmaxOpDef softmax_def;
     static EmbeddingOpDef embedding_def;
     static RMSNormOpDef rms_norm_def;
+    static LayerNormOpDef layer_norm_def;
 
     auto& reg = OpRegistry::global();
     reg.add(&relu_def);
@@ -652,6 +710,7 @@ void register_all_ops() {
     reg.add(&softmax_def);
     reg.add(&embedding_def);
     reg.add(&rms_norm_def);
+    reg.add(&layer_norm_def);
 }
 
 // === Graph ===
@@ -892,6 +951,13 @@ Value* Builder::createRMSNorm(Value* x, Value* weight, float epsilon) {
     AttrMap attrs;
     attrs["epsilon"] = AttrValue::make_float(epsilon);
     return createOp(OpKind::RMSNorm, operands, attrs)[0];
+}
+
+Value* Builder::createLayerNorm(Value* x, Value* weight, Value* bias, float epsilon) {
+    Value* operands[] = {x, weight, bias};
+    AttrMap attrs;
+    attrs["epsilon"] = AttrValue::make_float(epsilon);
+    return createOp(OpKind::LayerNorm, operands, attrs)[0];
 }
 
 void Builder::setOutputs(std::span<Value* const> outputs) {

@@ -200,17 +200,17 @@ Result<OwnedTensor> linear_f32(
     auto biasDtype = require_f32(biasDesc, "linear bias");
     if (!biasDtype) return make_error(biasDtype.error());
 
-    if (xDesc.shape.rank() != 2)
-        return make_error("linear input must have rank 2");
+    if (xDesc.shape.rank() < 2)
+        return make_error("linear input must have rank >= 2");
     if (weightDesc.shape.rank() != 2)
         return make_error("linear weight must have rank 2");
     if (biasDesc.shape.rank() != 1)
         return make_error("linear bias must have rank 1");
 
-    int64_t batch = xDesc.shape.dim(0);
-    int64_t inFeatures = xDesc.shape.dim(1);
+    int xRank = xDesc.shape.rank();
+    int64_t inFeatures = xDesc.shape.dim(xRank - 1);
     int64_t outFeatures = weightDesc.shape.dim(0);
-    if (batch < 0 || inFeatures < 0 || outFeatures < 0)
+    if (inFeatures < 0 || outFeatures < 0)
         return make_error("linear inputs must have static shape");
     if (weightDesc.shape.dim(1) != inFeatures)
         return make_error("linear weight input dimension mismatch");
@@ -226,11 +226,19 @@ Result<OwnedTensor> linear_f32(
     auto biasBytes = require_bytes(bias, biasDesc, "linear bias");
     if (!biasBytes) return make_error(biasBytes.error());
 
-    OwnedTensor out;
-    out.desc = TensorDesc(Shape({batch, outFeatures}), DType::F32);
-    out.data.resize(static_cast<size_t>(batch * outFeatures) * sizeof(float));
+    auto outDims = xDesc.shape.dims();
+    outDims.back() = outFeatures;
+    Shape outShape(outDims);
+    int64_t outNumel = outShape.numel();
+    if (outNumel < 0)
+        return make_error("linear output must have static shape");
 
-    for (int64_t b = 0; b < batch; b++) {
+    int64_t rows = xDesc.shape.numel() / inFeatures;
+    OwnedTensor out;
+    out.desc = TensorDesc(outShape, DType::F32);
+    out.data.resize(static_cast<size_t>(outNumel) * sizeof(float));
+
+    for (int64_t b = 0; b < rows; b++) {
         for (int64_t o = 0; o < outFeatures; o++) {
             float acc = read_f32(bias, static_cast<size_t>(o));
             for (int64_t i = 0; i < inFeatures; i++) {
@@ -807,6 +815,86 @@ Result<OwnedTensor> rms_norm_f32(
             float xv = read_f32(x, rowOffset + col);
             float wv = read_f32(weight, col);
             write_f32(out.data, rowOffset + col, xv * invRms * wv);
+        }
+    }
+
+    return out;
+}
+
+Result<OwnedTensor> layer_norm_f32(
+        std::span<const uint8_t> x,
+        const TensorDesc& xDesc,
+        std::span<const uint8_t> weight,
+        const TensorDesc& weightDesc,
+        std::span<const uint8_t> bias,
+        const TensorDesc& biasDesc,
+        float epsilon) {
+    auto xDtype = require_f32(xDesc, "layer_norm input");
+    if (!xDtype) return make_error(xDtype.error());
+
+    auto weightDtype = require_f32(weightDesc, "layer_norm weight");
+    if (!weightDtype) return make_error(weightDtype.error());
+
+    auto biasDtype = require_f32(biasDesc, "layer_norm bias");
+    if (!biasDtype) return make_error(biasDtype.error());
+
+    int rank = xDesc.shape.rank();
+    if (rank < 1)
+        return make_error("layer_norm input must have rank >= 1");
+    if (weightDesc.shape.rank() != 1)
+        return make_error("layer_norm weight must have rank 1");
+    if (biasDesc.shape.rank() != 1)
+        return make_error("layer_norm bias must have rank 1");
+
+    int64_t hidden = xDesc.shape.dim(rank - 1);
+    if (hidden < 0)
+        return make_error("layer_norm hidden dimension must be static");
+    if (weightDesc.shape.dim(0) != hidden)
+        return make_error("layer_norm weight dimension mismatch");
+    if (biasDesc.shape.dim(0) != hidden)
+        return make_error("layer_norm bias dimension mismatch");
+
+    auto xBytes = require_bytes(x, xDesc, "layer_norm input");
+    if (!xBytes) return make_error(xBytes.error());
+
+    auto weightBytes = require_bytes(weight, weightDesc, "layer_norm weight");
+    if (!weightBytes) return make_error(weightBytes.error());
+
+    auto biasBytes = require_bytes(bias, biasDesc, "layer_norm bias");
+    if (!biasBytes) return make_error(biasBytes.error());
+
+    int64_t total = xDesc.shape.numel();
+    if (total < 0)
+        return make_error("layer_norm input must have static shape");
+    int64_t rows = total / hidden;
+
+    OwnedTensor out;
+    out.desc = xDesc;
+    out.data.resize(x.size());
+
+    for (int64_t row = 0; row < rows; row++) {
+        size_t base = static_cast<size_t>(row * hidden);
+        double mean = 0.0;
+        for (int64_t i = 0; i < hidden; i++)
+            mean += static_cast<double>(read_f32(x, base + static_cast<size_t>(i)));
+        mean /= static_cast<double>(hidden);
+
+        double variance = 0.0;
+        for (int64_t i = 0; i < hidden; i++) {
+            double centered =
+                static_cast<double>(read_f32(x, base + static_cast<size_t>(i))) - mean;
+            variance += centered * centered;
+        }
+        variance /= static_cast<double>(hidden);
+
+        float invStd = 1.0f / std::sqrt(static_cast<float>(variance) + epsilon);
+        for (int64_t i = 0; i < hidden; i++) {
+            float centered = read_f32(x, base + static_cast<size_t>(i)) -
+                static_cast<float>(mean);
+            float value = centered * invStd *
+                read_f32(weight, static_cast<size_t>(i)) +
+                read_f32(bias, static_cast<size_t>(i));
+            write_f32(out.data, base + static_cast<size_t>(i), value);
         }
     }
 

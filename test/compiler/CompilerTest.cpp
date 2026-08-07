@@ -142,6 +142,41 @@ func main(x Node) Node {
     fs::remove_all(dir, ec);
 }
 
+TEST(CompilerTest, LayerNormBuiltinMaterializesToMidIROp) {
+    fs::path dir = makeTempDir();
+    writeFile(dir / "main.sandy.go", R"(
+func main(x Node) Node {
+    return __layer_norm(x, @ln.weight, @ln.bias, epsilon=0.00001)
+}
+)");
+
+    sandy::Compiler compiler;
+    auto highGraph = compiler.load_sandygo((dir / "main.sandy.go").string());
+
+    TestWeights weights;
+    weights.add(sandy::core::TensorDesc(
+        "ln.weight", sandy::core::Shape({3}), sandy::core::DType::F32));
+    weights.add(sandy::core::TensorDesc(
+        "ln.bias", sandy::core::Shape({3}), sandy::core::DType::F32));
+
+    sandy::ir::mid_ir::MaterializeOptions options;
+    options.input_tensor_descs["x"] = sandy::core::TensorDesc(
+        sandy::core::Shape({2, 4, 3}), sandy::core::DType::F32);
+
+    auto result = compiler.materialize_mid_ir(highGraph, weights, options);
+    ASSERT_TRUE(result) << result.error();
+    auto midGraph = result.take();
+
+    ASSERT_EQ(midGraph->outputs().size(), 1u);
+    ASSERT_NE(midGraph->outputs()[0], nullptr);
+    ASSERT_NE(midGraph->outputs()[0]->def, nullptr);
+    EXPECT_EQ(midGraph->outputs()[0]->def->kind, sandy::ir::mid_ir::OpKind::LayerNorm);
+    EXPECT_EQ(midGraph->outputs()[0]->shape, sandy::core::Shape({2, 4, 3}));
+
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
 TEST(CompilerTest, AddMulSqrtBuiltinsMaterializeToMidIROps) {
     fs::path dir = makeTempDir();
     writeFile(dir / "main.sandy.go", R"(

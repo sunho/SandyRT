@@ -326,6 +326,26 @@ Result<core::OwnedTensor> eval_rms_norm(
         attr_float_or(op, "epsilon", 1.0e-6f));
 }
 
+Result<core::OwnedTensor> eval_layer_norm(
+        const ir::mid_ir::Op& op,
+        const std::unordered_map<const ir::mid_ir::Value*, const BackendBuffer*>& values) {
+    if (op.operands.size() != 3)
+        return make_error("layer_norm expects three operands");
+
+    auto x = lookup_value(values, op.operands[0]);
+    if (!x) return make_error(x.error());
+    auto weight = lookup_value(values, op.operands[1]);
+    if (!weight) return make_error(weight.error());
+    auto bias = lookup_value(values, op.operands[2]);
+    if (!bias) return make_error(bias.error());
+
+    return core::layer_norm_f32(
+        (*x)->data(), (*x)->desc(),
+        (*weight)->data(), (*weight)->desc(),
+        (*bias)->data(), (*bias)->desc(),
+        attr_float_or(op, "epsilon", 1.0e-5f));
+}
+
 Result<void> copy_output(BackendBufferMap& outputs,
                          const std::string& name,
                          const BackendBuffer& source) {
@@ -475,6 +495,14 @@ Result<BackendRunResult> interpret_graph(
             }
             case ir::mid_ir::OpKind::RMSNorm: {
                 auto tensor = eval_rms_norm(*op, values);
+                if (!tensor) return make_error(tensor.error());
+                temporaries.push_back(make_cpu_buffer(tensor.take()));
+                auto bind = bind_single_result(*op, temporaries.back().get(), values);
+                if (!bind) return make_error(bind.error());
+                break;
+            }
+            case ir::mid_ir::OpKind::LayerNorm: {
+                auto tensor = eval_layer_norm(*op, values);
                 if (!tensor) return make_error(tensor.error());
                 temporaries.push_back(make_cpu_buffer(tensor.take()));
                 auto bind = bind_single_result(*op, temporaries.back().get(), values);

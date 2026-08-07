@@ -306,6 +306,23 @@ BuiltinLowering BuiltinLowering::createDefault() {
         return std::vector<Value*>{builder.createRMSNorm(operands[0], operands[1], epsilon)};
     });
 
+    bl.add("layer_norm", [](Builder& builder,
+                             const std::vector<Value*>& operands,
+                             const AttrMap& attrs,
+                             int numResults) -> Result<std::vector<Value*>> {
+        auto resultCount = expect_num_results("layer_norm", numResults, 1);
+        if (!resultCount) return make_error(resultCount.error());
+        if (operands.size() != 3)
+            return make_error("layer_norm expects operands (x, weight, bias)");
+        float epsilon = 1.0e-5f;
+        auto it = attrs.find("epsilon");
+        if (it != attrs.end() && it->second.kind == AttrValue::Float) {
+            epsilon = static_cast<float>(it->second.floatVal);
+        }
+        return std::vector<Value*>{builder.createLayerNorm(
+            operands[0], operands[1], operands[2], epsilon)};
+    });
+
     return bl;
 }
 

@@ -70,6 +70,20 @@ TEST_F(MidIRTest, RMSNormTypeInference) {
     EXPECT_EQ(out->def->kind, sandy::ir::mid_ir::OpKind::RMSNorm);
 }
 
+TEST_F(MidIRTest, LayerNormTypeInference) {
+    sandy::ir::mid_ir::Graph graph;
+    sandy::ir::mid_ir::Builder builder(graph);
+
+    auto* x = builder.createInput("x", sandy::core::Shape({2, 4, 3}), sandy::core::DType::F32);
+    auto* weight = builder.createWeight("ln.weight", sandy::core::Shape({3}), sandy::core::DType::F32);
+    auto* bias = builder.createWeight("ln.bias", sandy::core::Shape({3}), sandy::core::DType::F32);
+    auto* out = builder.createLayerNorm(x, weight, bias, 1.0e-5f);
+
+    EXPECT_EQ(out->shape, x->shape);
+    EXPECT_EQ(out->dtype, x->dtype);
+    EXPECT_EQ(out->def->kind, sandy::ir::mid_ir::OpKind::LayerNorm);
+}
+
 TEST_F(MidIRTest, BinaryElementwiseBroadcastTypeInference) {
     sandy::ir::mid_ir::Graph graph;
     sandy::ir::mid_ir::Builder builder(graph);

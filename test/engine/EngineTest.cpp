@@ -192,6 +192,36 @@ TEST(TensorCalcTest, LinearF32) {
     EXPECT_FLOAT_EQ(read_f32(out.data, 1), 25.0f);
 }
 
+TEST(TensorCalcTest, LinearF32Rank3FlattensLeadingDims) {
+    auto x = f32_bytes({
+        1.0f, 2.0f,
+        3.0f, 4.0f,
+        5.0f, 6.0f,
+        7.0f, 8.0f,
+    });
+    auto w = f32_bytes({
+        10.0f, 100.0f,
+        -1.0f, 1.0f,
+        2.0f, 3.0f,
+    });
+    auto b = f32_bytes({1.0f, 2.0f, 3.0f});
+
+    auto result = sandy::core::linear_f32(
+        x, sandy::core::TensorDesc(sandy::core::Shape({2, 2, 2}), sandy::core::DType::F32),
+        w, sandy::core::TensorDesc(sandy::core::Shape({3, 2}), sandy::core::DType::F32),
+        b, sandy::core::TensorDesc(sandy::core::Shape({3}), sandy::core::DType::F32));
+
+    ASSERT_TRUE(result) << result.error();
+    auto out = result.take();
+    EXPECT_EQ(out.desc.shape, sandy::core::Shape({2, 2, 3}));
+    EXPECT_FLOAT_EQ(read_f32(out.data, 0), 211.0f);
+    EXPECT_FLOAT_EQ(read_f32(out.data, 1), 3.0f);
+    EXPECT_FLOAT_EQ(read_f32(out.data, 2), 11.0f);
+    EXPECT_FLOAT_EQ(read_f32(out.data, 9), 871.0f);
+    EXPECT_FLOAT_EQ(read_f32(out.data, 10), 3.0f);
+    EXPECT_FLOAT_EQ(read_f32(out.data, 11), 41.0f);
+}
+
 TEST(TensorCalcTest, ReLUF32) {
     auto x = f32_bytes({-2.0f, 0.5f, 3.0f});
 
@@ -707,6 +737,38 @@ TEST(TensorCalcTest, RMSNormF32Rank3NormalizesLastDim) {
     }
 }
 
+TEST(TensorCalcTest, LayerNormF32Rank3NormalizesLastDimWithBias) {
+    auto x = f32_bytes({
+        1.0f, 2.0f,
+        3.0f, 5.0f,
+        10.0f, 14.0f,
+        -2.0f, 2.0f,
+    });
+    auto weight = f32_bytes({2.0f, -1.0f});
+    auto bias = f32_bytes({0.5f, 10.0f});
+    constexpr float eps = 1.0e-5f;
+
+    auto result = sandy::core::layer_norm_f32(
+        x, sandy::core::TensorDesc(sandy::core::Shape({2, 2, 2}), sandy::core::DType::F32),
+        weight, sandy::core::TensorDesc(sandy::core::Shape({2}), sandy::core::DType::F32),
+        bias, sandy::core::TensorDesc(sandy::core::Shape({2}), sandy::core::DType::F32),
+        eps);
+
+    ASSERT_TRUE(result) << result.error();
+    auto out = result.take();
+    EXPECT_EQ(out.desc.shape, sandy::core::Shape({2, 2, 2}));
+
+    for (size_t row = 0; row < 4; row++) {
+        float a = read_f32(x, row * 2);
+        float b = read_f32(x, row * 2 + 1);
+        float mean = (a + b) / 2.0f;
+        float var = ((a - mean) * (a - mean) + (b - mean) * (b - mean)) / 2.0f;
+        float invStd = 1.0f / std::sqrt(var + eps);
+        EXPECT_NEAR(read_f32(out.data, row * 2), (a - mean) * invStd * 2.0f + 0.5f, 1.0e-5f);
+        EXPECT_NEAR(read_f32(out.data, row * 2 + 1), (b - mean) * invStd * -1.0f + 10.0f, 1.0e-5f);
+    }
+}
+
 TEST(CpuInterpretTest, EngineRunReturnsOutput0) {
     sandy::ir::mid_ir::register_all_ops();
 
@@ -743,6 +805,46 @@ TEST(CpuInterpretTest, EngineRunReturnsOutput0) {
     EXPECT_EQ(it->second->desc().shape, sandy::core::Shape({1, 2}));
     EXPECT_FLOAT_EQ(read_f32(it->second->data(), 0), 18.0f);
     EXPECT_FLOAT_EQ(read_f32(it->second->data(), 1), 25.0f);
+}
+
+TEST(CpuInterpretTest, LinearRank3) {
+    sandy::ir::mid_ir::register_all_ops();
+
+    sandy::ir::mid_ir::Graph graph;
+    sandy::ir::mid_ir::Builder builder(graph);
+    auto* x = builder.createInput("x", sandy::core::Shape({2, 2, 2}), sandy::core::DType::F32);
+    auto* w = builder.createWeight("w", sandy::core::Shape({3, 2}), sandy::core::DType::F32);
+    auto* b = builder.createWeight("b", sandy::core::Shape({3}), sandy::core::DType::F32);
+    auto* out = builder.createLinear(x, w, b);
+    sandy::ir::mid_ir::Value* outputs[] = {out};
+    builder.setOutputs(outputs);
+
+    sandy::engine::Engine engine(
+        std::make_unique<sandy::engine::backend::CpuInterpreterBackend>());
+
+    auto planResult = engine.create_plan(graph);
+    ASSERT_TRUE(planResult) << planResult.error();
+    auto plan = planResult.take();
+
+    sandy::engine::TensorMap inputs;
+    inputs["x"] = make_f32_buffer(
+        "x", sandy::core::Shape({2, 2, 2}), {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f});
+
+    sandy::engine::TensorMap weights;
+    weights["w"] = make_f32_buffer(
+        "w", sandy::core::Shape({3, 2}), {10.0f, 100.0f, -1.0f, 1.0f, 2.0f, 3.0f});
+    weights["b"] = make_f32_buffer("b", sandy::core::Shape({3}), {1.0f, 2.0f, 3.0f});
+
+    auto runResult = engine.run(*plan, inputs, weights);
+    ASSERT_TRUE(runResult) << runResult.error();
+    auto outputsMap = runResult.take();
+
+    auto it = outputsMap.find("output0");
+    ASSERT_NE(it, outputsMap.end());
+    ASSERT_NE(it->second, nullptr);
+    EXPECT_EQ(it->second->desc().shape, sandy::core::Shape({2, 2, 3}));
+    EXPECT_FLOAT_EQ(read_f32(it->second->data(), 0), 211.0f);
+    EXPECT_FLOAT_EQ(read_f32(it->second->data(), 11), 41.0f);
 }
 
 TEST(CpuInterpretTest, RMSNorm) {
@@ -789,6 +891,46 @@ TEST(CpuInterpretTest, RMSNorm) {
     EXPECT_NEAR(read_f32(it->second->data(), 3), 0.0f, 1.0e-5f);
     EXPECT_NEAR(read_f32(it->second->data(), 4), 30.0f * row1Scale, 1.0e-5f);
     EXPECT_NEAR(read_f32(it->second->data(), 5), -4.0f * row1Scale, 1.0e-5f);
+}
+
+TEST(CpuInterpretTest, LayerNorm) {
+    sandy::ir::mid_ir::register_all_ops();
+
+    sandy::ir::mid_ir::Graph graph;
+    sandy::ir::mid_ir::Builder builder(graph);
+    auto* x = builder.createInput("x", sandy::core::Shape({1, 2, 2}), sandy::core::DType::F32);
+    auto* weight = builder.createWeight("ln.weight", sandy::core::Shape({2}), sandy::core::DType::F32);
+    auto* bias = builder.createWeight("ln.bias", sandy::core::Shape({2}), sandy::core::DType::F32);
+    auto* out = builder.createLayerNorm(x, weight, bias, 1.0e-5f);
+    sandy::ir::mid_ir::Value* outputs[] = {out};
+    builder.setOutputs(outputs);
+
+    sandy::engine::Engine engine(
+        std::make_unique<sandy::engine::backend::CpuInterpreterBackend>());
+
+    auto planResult = engine.create_plan(graph);
+    ASSERT_TRUE(planResult) << planResult.error();
+    auto plan = planResult.take();
+
+    sandy::engine::TensorMap inputs;
+    inputs["x"] = make_f32_buffer("x", sandy::core::Shape({1, 2, 2}), {1.0f, 2.0f, 3.0f, 5.0f});
+
+    sandy::engine::TensorMap weights;
+    weights["ln.weight"] = make_f32_buffer("ln.weight", sandy::core::Shape({2}), {2.0f, -1.0f});
+    weights["ln.bias"] = make_f32_buffer("ln.bias", sandy::core::Shape({2}), {0.5f, 10.0f});
+
+    auto runResult = engine.run(*plan, inputs, weights);
+    ASSERT_TRUE(runResult) << runResult.error();
+    auto outputsMap = runResult.take();
+
+    auto it = outputsMap.find("output0");
+    ASSERT_NE(it, outputsMap.end());
+    ASSERT_NE(it->second, nullptr);
+    EXPECT_EQ(it->second->desc().shape, sandy::core::Shape({1, 2, 2}));
+    EXPECT_NEAR(read_f32(it->second->data(), 0), -1.49996f, 1.0e-4f);
+    EXPECT_NEAR(read_f32(it->second->data(), 1), 9.00002f, 1.0e-4f);
+    EXPECT_NEAR(read_f32(it->second->data(), 2), -1.49999f, 1.0e-4f);
+    EXPECT_NEAR(read_f32(it->second->data(), 3), 9.00001f, 1.0e-4f);
 }
 
 TEST(CpuInterpretTest, AddMulSqrt) {

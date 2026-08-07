@@ -91,4 +91,13 @@ Result<OwnedTensor> rms_norm_f32(
     const TensorDesc& weightDesc,
     float epsilon);
 
+Result<OwnedTensor> layer_norm_f32(
+    std::span<const uint8_t> x,
+    const TensorDesc& xDesc,
+    std::span<const uint8_t> weight,
+    const TensorDesc& weightDesc,
+    std::span<const uint8_t> bias,
+    const TensorDesc& biasDesc,
+    float epsilon);
+
 } // namespace sandy::core
