@@ -430,9 +430,12 @@ ExprPtr Parser::parsePrimary() {
         std::vector<int64_t> values;
         if (!check(TokenKind::RBracket)) {
             while (true) {
+                int64_t sign = 1;
+                if (match(TokenKind::Minus))
+                    sign = -1;
                 Token value = expect(TokenKind::IntLit, "expected integer in int list literal");
                 if (hasError_) return std::make_unique<Expr>();
-                values.push_back(std::strtoll(value.value.c_str(), nullptr, 10));
+                values.push_back(sign * std::strtoll(value.value.c_str(), nullptr, 10));
                 if (!match(TokenKind::Comma)) break;
                 if (check(TokenKind::RBracket)) break;
             }

@@ -70,6 +70,31 @@ const OpDef* OpRegistry::lookup(OpKind kind) const {
 
 namespace {
 
+core::Shape infer_reshape_shape(const core::Shape& inputShape,
+                                const std::vector<int64_t>& requestedShape) {
+    int64_t inputNumel = inputShape.numel();
+    if (inputNumel < 0)
+        return core::Shape(requestedShape);
+
+    std::vector<int64_t> dims = requestedShape;
+    int inferIndex = -1;
+    int64_t knownProduct = 1;
+    for (int i = 0; i < static_cast<int>(dims.size()); i++) {
+        if (dims[static_cast<size_t>(i)] == core::Shape::kDynamic) {
+            if (inferIndex >= 0)
+                return core::Shape(requestedShape);
+            inferIndex = i;
+        } else {
+            knownProduct *= dims[static_cast<size_t>(i)];
+        }
+    }
+
+    if (inferIndex >= 0 && knownProduct != 0 && inputNumel % knownProduct == 0)
+        dims[static_cast<size_t>(inferIndex)] = inputNumel / knownProduct;
+
+    return core::Shape(std::move(dims));
+}
+
 class ReLUOpDef : public OpDef {
 public:
     OpKind kind() const override { return OpKind::ReLU; }
@@ -276,7 +301,8 @@ public:
         std::span<Value* const> operands,
         const AttrMap& attrs) const override
     {
-        return {{core::Shape(attrs.at("shape").intListVal), operands[0]->dtype}};
+        return {{infer_reshape_shape(operands[0]->shape, attrs.at("shape").intListVal),
+                 operands[0]->dtype}};
     }
     void verify(
         std::span<Value* const> operands,
@@ -300,12 +326,32 @@ public:
             }
         }
 
-        core::Shape outShape(it->second.intListVal);
+        int inferCount = 0;
+        int64_t knownProduct = 1;
+        for (int64_t dim : it->second.intListVal) {
+            if (dim == core::Shape::kDynamic) {
+                inferCount++;
+            } else {
+                knownProduct *= dim;
+            }
+        }
+        if (inferCount > 1) {
+            fprintf(stderr, "reshape may contain at most one -1 dimension\n");
+            abort();
+        }
+
+        core::Shape outShape = infer_reshape_shape(operands[0]->shape, it->second.intListVal);
         int64_t inputNumel = operands[0]->shape.numel();
         int64_t outputNumel = outShape.numel();
-        if (inputNumel >= 0 && outputNumel >= 0 && inputNumel != outputNumel) {
-            fprintf(stderr, "reshape element count mismatch\n");
-            abort();
+        if (inputNumel >= 0) {
+            if (inferCount == 1 && (knownProduct == 0 || inputNumel % knownProduct != 0)) {
+                fprintf(stderr, "reshape cannot infer -1 dimension\n");
+                abort();
+            }
+            if (outputNumel >= 0 && inputNumel != outputNumel) {
+                fprintf(stderr, "reshape element count mismatch\n");
+                abort();
+            }
         }
     }
 };

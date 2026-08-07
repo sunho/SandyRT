@@ -229,7 +229,7 @@ func f() {
 TEST(Parser, FunctionCallWithIntListNamedArg) {
     auto prog = parseSource(R"(
 func f() {
-    x := __reshape(x, shape=[1, 16, 12, 64])
+    x := __reshape(x, shape=[-1, 16, 12, 64])
 }
 )");
     auto& call = prog.funcs[0].body[0]->value;
@@ -237,7 +237,7 @@ func f() {
     ASSERT_EQ(call->namedArgs.size(), 1u);
     EXPECT_EQ(call->namedArgs[0].name, "shape");
     ASSERT_EQ(call->namedArgs[0].value->kind, Expr::IntListLit);
-    EXPECT_EQ(call->namedArgs[0].value->intListVal, (std::vector<int64_t>{1, 16, 12, 64}));
+    EXPECT_EQ(call->namedArgs[0].value->intListVal, (std::vector<int64_t>{-1, 16, 12, 64}));
 }
 
 TEST(Parser, IndexExpr) {

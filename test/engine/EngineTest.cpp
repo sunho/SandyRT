@@ -373,6 +373,24 @@ TEST(TensorCalcTest, ReshapeF32ChangesShapeOnly) {
         EXPECT_FLOAT_EQ(read_f32(out.data, i), static_cast<float>(i));
 }
 
+TEST(TensorCalcTest, ReshapeF32InfersNegativeOneDimension) {
+    auto x = f32_bytes({
+        0.0f, 1.0f, 2.0f, 3.0f,
+        4.0f, 5.0f, 6.0f, 7.0f,
+        8.0f, 9.0f, 10.0f, 11.0f,
+    });
+
+    auto result = sandy::core::reshape_f32(
+        x, sandy::core::TensorDesc(sandy::core::Shape({2, 6}), sandy::core::DType::F32),
+        sandy::core::Shape({-1, 3, 2}));
+
+    ASSERT_TRUE(result) << result.error();
+    auto out = result.take();
+    EXPECT_EQ(out.desc.shape, sandy::core::Shape({2, 3, 2}));
+    for (size_t i = 0; i < 12; i++)
+        EXPECT_FLOAT_EQ(read_f32(out.data, i), static_cast<float>(i));
+}
+
 TEST(TensorCalcTest, PermuteF32ReordersAxes) {
     auto x = f32_bytes({
         0.0f, 1.0f, 2.0f, 3.0f,

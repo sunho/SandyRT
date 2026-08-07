@@ -4,9 +4,9 @@ func gpt2_attention(x Node, i int) Node {
         k := __linear(x, @k_proj.weight, @k_proj.bias)
         v := __linear(x, @v_proj.weight, @v_proj.bias)
 
-        q = __reshape(q, shape=[1, 16, 12, 64])
-        k = __reshape(k, shape=[1, 16, 12, 64])
-        v = __reshape(v, shape=[1, 16, 12, 64])
+        q = __reshape(q, shape=[-1, 16, 12, 64])
+        k = __reshape(k, shape=[-1, 16, 12, 64])
+        v = __reshape(v, shape=[-1, 16, 12, 64])
 
         q = __permute(q, dims=[0, 2, 1, 3])
         k = __permute(k, dims=[0, 2, 1, 3])
@@ -17,7 +17,7 @@ func gpt2_attention(x Node, i int) Node {
         ctx := __matmul(probs, v)
 
         ctx = __permute(ctx, dims=[0, 2, 1, 3])
-        ctx = __reshape(ctx, shape=[1, 16, 768])
+        ctx = __reshape(ctx, shape=[-1, 16, 768])
 
         out := __linear(ctx, @c_proj.weight, @c_proj.bias)
     }

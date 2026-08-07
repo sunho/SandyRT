@@ -138,6 +138,19 @@ TEST_F(MidIRTest, ReshapeTypeInference) {
     EXPECT_EQ(out->def->attrs.at("shape").intListVal[1], 12);
 }
 
+TEST_F(MidIRTest, ReshapeInfersNegativeOneDimension) {
+    sandy::ir::mid_ir::Graph graph;
+    sandy::ir::mid_ir::Builder builder(graph);
+
+    auto* x = builder.createInput("x", sandy::core::Shape({2, 3, 4}), sandy::core::DType::F32);
+    auto* out = builder.createReshape(x, {-1, 4});
+
+    EXPECT_EQ(out->shape, sandy::core::Shape({6, 4}));
+    EXPECT_EQ(out->dtype, sandy::core::DType::F32);
+    ASSERT_EQ(out->def->attrs.at("shape").intListVal.size(), 2u);
+    EXPECT_EQ(out->def->attrs.at("shape").intListVal[0], -1);
+}
+
 TEST_F(MidIRTest, PermuteTypeInference) {
     sandy::ir::mid_ir::Graph graph;
     sandy::ir::mid_ir::Builder builder(graph);
