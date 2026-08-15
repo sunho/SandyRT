@@ -270,7 +270,9 @@ Result<void> CpuDevice::run(
             if (!out) return make_error(out.error());
             auto window = attr_int_or(program.attrs, "window", 0);
             if (!window) return make_error(window.error());
-            return core::sliding_query_key_score(*q, *k, window.take(), *out);
+            auto scale = attr_float_or(program.attrs, "scale", -1.0f);
+            if (!scale) return make_error(scale.error());
+            return core::sliding_query_key_score(*q, *k, window.take(), scale.take(), *out);
         }
         case ir::mid_ir::OpKind::Softmax: {
             auto x = inputRef(0);
@@ -299,7 +301,9 @@ Result<void> CpuDevice::run(
             if (!theta) return make_error(theta.error());
             auto rotaryDim = attr_int_or(program.attrs, "rotary_dim", -1);
             if (!rotaryDim) return make_error(rotaryDim.error());
-            return core::rope(*x, theta.take(), rotaryDim.take(), *out);
+            auto splitHalf = attr_int_or(program.attrs, "split_half", 0);
+            if (!splitHalf) return make_error(splitHalf.error());
+            return core::rope(*x, theta.take(), rotaryDim.take(), splitHalf.take() != 0, *out);
         }
         case ir::mid_ir::OpKind::RMSNorm: {
             auto x = inputRef(0);

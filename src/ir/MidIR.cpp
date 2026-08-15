@@ -451,6 +451,15 @@ public:
             fprintf(stderr, "sliding_query_key_score window attr must be >= 0\n");
             abort();
         }
+        auto scale = attrs.find("scale");
+        if (scale != attrs.end() && scale->second.kind != AttrValue::Float) {
+            fprintf(stderr, "sliding_query_key_score scale attr must be float\n");
+            abort();
+        }
+        if (scale != attrs.end() && scale->second.floatVal <= 0.0) {
+            fprintf(stderr, "sliding_query_key_score scale attr must be > 0\n");
+            abort();
+        }
 
         if (rank == 4) {
             int64_t qBatch = qShape.dim(0);
@@ -613,6 +622,11 @@ public:
         }
         if (theta != attrs.end() && theta->second.floatVal <= 0.0) {
             fprintf(stderr, "rope theta attr must be > 0\n");
+            abort();
+        }
+        auto splitHalf = attrs.find("split_half");
+        if (splitHalf != attrs.end() && splitHalf->second.kind != AttrValue::Int) {
+            fprintf(stderr, "rope split_half attr must be int\n");
             abort();
         }
     }
@@ -970,10 +984,12 @@ Value* Builder::createPermute(Value* x, std::vector<int64_t> dims) {
     return createOp(OpKind::Permute, operands, attrs)[0];
 }
 
-Value* Builder::createSlidingQueryKeyScore(Value* q, Value* k, int64_t window) {
+Value* Builder::createSlidingQueryKeyScore(Value* q, Value* k, int64_t window, float scale) {
     Value* operands[] = {q, k};
     AttrMap attrs;
     attrs["window"] = AttrValue::make_int(window);
+    if (scale > 0.0f)
+        attrs["scale"] = AttrValue::make_float(scale);
     return createOp(OpKind::SlidingQueryKeyScore, operands, attrs)[0];
 }
 
@@ -989,12 +1005,14 @@ Value* Builder::createEmbedding(Value* ids, Value* weight) {
     return createOp(OpKind::Embedding, operands)[0];
 }
 
-Value* Builder::createRoPE(Value* x, float theta, int64_t rotary_dim) {
+Value* Builder::createRoPE(Value* x, float theta, int64_t rotary_dim, bool split_half) {
     Value* operands[] = {x};
     AttrMap attrs;
     attrs["rope_theta"] = AttrValue::make_float(theta);
     if (rotary_dim > 0)
         attrs["rotary_dim"] = AttrValue::make_int(rotary_dim);
+    if (split_half)
+        attrs["split_half"] = AttrValue::make_int(1);
     return createOp(OpKind::RoPE, operands, attrs)[0];
 }
 

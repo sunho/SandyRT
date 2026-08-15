@@ -14,6 +14,7 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace {
@@ -245,6 +246,12 @@ bool read_file(const std::string& path, std::string& out) {
     return true;
 }
 
+struct ProfileStat {
+    int64_t count = 0;
+    double totalMs = 0.0;
+    double maxMs = 0.0;
+};
+
 void print_tensor(const std::string& name, sandy::core::TensorBuffer& buffer) {
     auto accessResult = buffer.access();
     if (!accessResult) {
@@ -331,15 +338,25 @@ void print_tensor(const std::string& name, sandy::core::TensorBuffer& buffer) {
 } // namespace
 
 int main(int argc, char* argv[]) {
-    if (argc != 4) {
-        fprintf(stderr, "usage: cpu_runner <program.sandy.go> <weights.safetensors> <inputs.safetensors>\n");
+    bool instrument = false;
+    int arg = 1;
+    if (argc >= 2 && std::strcmp(argv[1], "--instrument") == 0) {
+        instrument = true;
+        arg = 2;
+    }
+    if (argc - arg != 3) {
+        fprintf(stderr, "usage: cpu_runner [--instrument] <program.sandy.go> <weights.safetensors> <inputs.safetensors>\n");
         return 1;
     }
 
-    printf("[1/8] reading sandy go: %s\n", argv[1]);
+    const char* programPath = argv[arg];
+    const char* weightsPath = argv[arg + 1];
+    const char* inputsPath = argv[arg + 2];
+
+    printf("[1/8] reading sandy go: %s\n", programPath);
     std::string source;
-    if (!read_file(argv[1], source)) {
-        fprintf(stderr, "cannot open %s\n", argv[1]);
+    if (!read_file(programPath, source)) {
+        fprintf(stderr, "cannot open %s\n", programPath);
         return 1;
     }
 
@@ -371,11 +388,11 @@ int main(int argc, char* argv[]) {
 
     sandy::Compiler compiler;
 
-    printf("[4/8] loading weights: %s\n", argv[2]);
-    auto weights = sandy::weight::EagerSafeTensorWeights::load(argv[2]);
+    printf("[4/8] loading weights: %s\n", weightsPath);
+    auto weights = sandy::weight::EagerSafeTensorWeights::load(weightsPath);
 
-    printf("[5/8] loading inputs: %s\n", argv[3]);
-    auto inputs = sandy::weight::EagerSafeTensorWeights::load(argv[3]);
+    printf("[5/8] loading inputs: %s\n", inputsPath);
+    auto inputs = sandy::weight::EagerSafeTensorWeights::load(inputsPath);
 
     sandy::ir::mid_ir::MaterializeOptions options;
     for (const auto& desc : inputs->descriptors())
@@ -407,10 +424,59 @@ int main(int argc, char* argv[]) {
     add_tensors_to_map(*weights, weightMap);
 
     printf("[8/8] invocation plan runs\n");
-    auto runResult = engine.run(*plan, inputBuffers, weightMap);
+    sandy::engine::EngineRunOptions runOptions;
+    std::unordered_map<int, ProfileStat> profileStats;
+    int64_t profileKernelCount = 0;
+    double profileTotalMs = 0.0;
+    if (instrument) {
+        runOptions.profileKernel = [&](const sandy::engine::InvocProfileEvent& event) {
+            profileKernelCount++;
+            profileTotalMs += event.elapsedMs;
+            auto key = static_cast<int>(event.opKind);
+            auto& stat = profileStats[key];
+            stat.count++;
+            stat.totalMs += event.elapsedMs;
+            if (event.elapsedMs > stat.maxMs)
+                stat.maxMs = event.elapsedMs;
+            printf("[profile] instr=%zu program=%u device=%u op=%s inputs=%zu outputs=%zu time_ms=%.3f\n",
+                   event.instructionIndex,
+                   event.program,
+                   event.device,
+                   sandy::ir::mid_ir::op_kind_name(event.opKind),
+                   event.inputCount,
+                   event.outputCount,
+                   event.elapsedMs);
+        };
+    }
+
+    auto runResult = engine.run(
+        *plan,
+        inputBuffers,
+        weightMap,
+        instrument ? &runOptions : nullptr);
     if (!runResult) {
         fprintf(stderr, "run error: %s\n", runResult.error().c_str());
         return 1;
+    }
+    if (instrument) {
+        printf("[profile] total kernels=%lld time_ms=%.3f\n",
+               static_cast<long long>(profileKernelCount),
+               profileTotalMs);
+        printf("[profile] by op:\n");
+        for (int kind = 0; kind < static_cast<int>(sandy::ir::mid_ir::OpKind::NUM_KINDS); kind++) {
+            auto it = profileStats.find(kind);
+            if (it == profileStats.end())
+                continue;
+            auto opKind = static_cast<sandy::ir::mid_ir::OpKind>(kind);
+            const auto& stat = it->second;
+            double avgMs = stat.count == 0 ? 0.0 : stat.totalMs / static_cast<double>(stat.count);
+            printf("  %s count=%lld total_ms=%.3f avg_ms=%.3f max_ms=%.3f\n",
+                   sandy::ir::mid_ir::op_kind_name(opKind),
+                   static_cast<long long>(stat.count),
+                   stat.totalMs,
+                   avgMs,
+                   stat.maxMs);
+        }
     }
 
     auto outputs = runResult.take();

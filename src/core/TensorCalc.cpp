@@ -515,6 +515,7 @@ Result<void> sliding_query_key_score(
         TensorRef q,
         TensorRef k,
         int64_t window,
+        float scale,
         MutableTensorRef out) {
     auto qFloat = require_float_tensor(q, "sliding_query_key_score q");
     if (!qFloat) return make_error(qFloat.error());
@@ -558,7 +559,8 @@ Result<void> sliding_query_key_score(
     if (!output) return make_error(output.error());
 
     int64_t headsPerKv = heads / kvHeads;
-    float scale = 1.0f / std::sqrt(static_cast<float>(headDim));
+    if (scale <= 0.0f)
+        scale = 1.0f / std::sqrt(static_cast<float>(headDim));
     float masked = -std::numeric_limits<float>::infinity();
 
     for (int64_t b = 0; b < batch; b++) {
@@ -600,6 +602,14 @@ Result<void> sliding_query_key_score(
     }
 
     return {};
+}
+
+Result<void> sliding_query_key_score(
+        TensorRef q,
+        TensorRef k,
+        int64_t window,
+        MutableTensorRef out) {
+    return sliding_query_key_score(q, k, window, -1.0f, out);
 }
 
 Result<void> softmax(TensorRef x, int64_t dim, MutableTensorRef out) {
@@ -702,10 +712,14 @@ Result<void> embedding(TensorRef ids, TensorRef weight, MutableTensorRef out) {
 }
 
 Result<void> rope(TensorRef x, float theta, MutableTensorRef out) {
-    return rope(x, theta, -1, out);
+    return rope(x, theta, -1, false, out);
 }
 
 Result<void> rope(TensorRef x, float theta, int64_t rotaryDim, MutableTensorRef out) {
+    return rope(x, theta, rotaryDim, false, out);
+}
+
+Result<void> rope(TensorRef x, float theta, int64_t rotaryDim, bool splitHalf, MutableTensorRef out) {
     auto xFloat = require_float_tensor(x, "rope input");
     if (!xFloat) return make_error(xFloat.error());
     auto output = require_output(out, x.desc.shape, x.desc.dtype, "rope");
@@ -738,21 +752,44 @@ Result<void> rope(TensorRef x, float theta, int64_t rotaryDim, MutableTensorRef 
     for (int64_t vector = 0; vector < vectors; vector++) {
         int64_t position = vector % seq;
         size_t base = static_cast<size_t>(vector * dim);
-        for (int64_t pair = 0; pair < rotaryDim / 2; pair++) {
-            float angle = static_cast<float>(position) /
-                std::pow(theta, static_cast<float>(2 * pair) / static_cast<float>(rotaryDim));
-            float c = std::cos(angle);
-            float s = std::sin(angle);
-            size_t evenIndex = base + static_cast<size_t>(2 * pair);
-            size_t oddIndex = evenIndex + 1;
-            float even = x.load_float(evenIndex);
-            float odd = x.load_float(oddIndex);
-            out.store_float(evenIndex, even * c - odd * s);
-            out.store_float(oddIndex, even * s + odd * c);
-        }
-        for (int64_t i = rotaryDim; i < dim; i++) {
-            size_t index = base + static_cast<size_t>(i);
-            out.store_float(index, x.load_float(index));
+        if (splitHalf) {
+            int64_t half = dim / 2;
+            int64_t rotatedPairs = rotaryDim / 2;
+            for (int64_t pair = 0; pair < rotatedPairs; pair++) {
+                float angle = static_cast<float>(position) /
+                    std::pow(theta, static_cast<float>(2 * pair) / static_cast<float>(dim));
+                float c = std::cos(angle);
+                float s = std::sin(angle);
+                size_t firstIndex = base + static_cast<size_t>(pair);
+                size_t secondIndex = base + static_cast<size_t>(half + pair);
+                float first = x.load_float(firstIndex);
+                float second = x.load_float(secondIndex);
+                out.store_float(firstIndex, first * c - second * s);
+                out.store_float(secondIndex, first * s + second * c);
+            }
+            for (int64_t i = rotatedPairs; i < half; i++) {
+                size_t firstIndex = base + static_cast<size_t>(i);
+                size_t secondIndex = base + static_cast<size_t>(half + i);
+                out.store_float(firstIndex, x.load_float(firstIndex));
+                out.store_float(secondIndex, x.load_float(secondIndex));
+            }
+        } else {
+            for (int64_t pair = 0; pair < rotaryDim / 2; pair++) {
+                float angle = static_cast<float>(position) /
+                    std::pow(theta, static_cast<float>(2 * pair) / static_cast<float>(rotaryDim));
+                float c = std::cos(angle);
+                float s = std::sin(angle);
+                size_t evenIndex = base + static_cast<size_t>(2 * pair);
+                size_t oddIndex = evenIndex + 1;
+                float even = x.load_float(evenIndex);
+                float odd = x.load_float(oddIndex);
+                out.store_float(evenIndex, even * c - odd * s);
+                out.store_float(oddIndex, even * s + odd * c);
+            }
+            for (int64_t i = rotaryDim; i < dim; i++) {
+                size_t index = base + static_cast<size_t>(i);
+                out.store_float(index, x.load_float(index));
+            }
         }
     }
 

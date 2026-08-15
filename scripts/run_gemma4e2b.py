@@ -440,6 +440,8 @@ def main() -> int:
     parser.add_argument("--force-convert", action="store_true")
     parser.add_argument("--prepare-only", action="store_true")
     parser.add_argument("--keep-input", action="store_true")
+    parser.add_argument("--instrument", action="store_true",
+                        help="Print per-kernel CPU engine timing from cpu_runner.")
     args = parser.parse_args()
 
     if args.max_seq != MAX_SEQ:
@@ -483,7 +485,10 @@ def main() -> int:
         print("build with: cmake --build build --target cpu_runner", file=sys.stderr)
         return 1
 
-    cmd = [str(args.runner), str(args.model), str(sandy_weights), str(input_path)]
+    cmd = [str(args.runner)]
+    if args.instrument:
+        cmd.append("--instrument")
+    cmd.extend([str(args.model), str(sandy_weights), str(input_path)])
     print("[run]", " ".join(cmd))
     return subprocess.call(cmd)
 

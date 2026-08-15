@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Device.h"
+#include "MidIR.h"
 #include "Tensor.h"
 
 #include <cstdint>
@@ -101,6 +102,7 @@ struct InvocProgram {
     InvocProgramId id = 0;
     InvocDeviceId device = 0;
     DeviceProgramId deviceProgram = 0;
+    ir::mid_ir::OpKind opKind = ir::mid_ir::OpKind::NUM_KINDS;
 };
 
 struct InvocPlan {

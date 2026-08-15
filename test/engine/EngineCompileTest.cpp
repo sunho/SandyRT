@@ -119,12 +119,15 @@ TEST_F(EngineCompileTest, CompileStoresDeviceProgramsInInvocPlan) {
     EXPECT_EQ(plan->programs[0].id, 0u);
     EXPECT_EQ(plan->programs[0].device, 0u);
     EXPECT_EQ(plan->programs[0].deviceProgram, 100u);
+    EXPECT_EQ(plan->programs[0].opKind, sandy::ir::mid_ir::OpKind::Reshape);
     EXPECT_EQ(plan->programs[1].id, 1u);
     EXPECT_EQ(plan->programs[1].device, 0u);
     EXPECT_EQ(plan->programs[1].deviceProgram, 101u);
+    EXPECT_EQ(plan->programs[1].opKind, sandy::ir::mid_ir::OpKind::Tanh);
     EXPECT_EQ(plan->programs[2].id, 2u);
     EXPECT_EQ(plan->programs[2].device, 0u);
     EXPECT_EQ(plan->programs[2].deviceProgram, 102u);
+    EXPECT_EQ(plan->programs[2].opKind, sandy::ir::mid_ir::OpKind::ReLU);
 
     EXPECT_EQ(plan->outputs, std::vector<sandy::engine::InvocValueId>({3}));
     ASSERT_FALSE(plan->instructions.empty());
@@ -211,6 +214,47 @@ TEST_F(EngineCompileTest, RunInterpretsInvocPlanWithFakeDevice) {
 
     EXPECT_EQ(fakePtr->reads, std::vector<sandy::engine::DeviceBufferId>({202}));
     EXPECT_EQ(fakePtr->deallocs, std::vector<sandy::engine::DeviceBufferId>({200, 201, 202}));
+}
+
+TEST_F(EngineCompileTest, RunReportsProfileEventsForKernels) {
+    sandy::ir::mid_ir::Graph graph;
+    sandy::ir::mid_ir::Builder builder(graph);
+    auto* x = builder.createInput(0, sandy::core::Shape({1}), sandy::core::DType::F32);
+    auto* out = builder.createTanh(x);
+    sandy::ir::mid_ir::Value* outputs[] = {out};
+    builder.setOutputs(outputs);
+
+    auto fake = std::make_unique<FakeDevice>();
+    std::vector<std::unique_ptr<sandy::engine::Device>> devices;
+    devices.push_back(std::move(fake));
+    sandy::engine::Engine engine(std::move(devices));
+
+    auto planResult = engine.compile(graph);
+    ASSERT_TRUE(planResult) << planResult.error();
+    auto plan = planResult.take();
+
+    std::vector<sandy::engine::TensorBufferPtr> inputs;
+    inputs.push_back(std::make_shared<FakeTensorBuffer>(
+        sandy::core::TensorDesc("x", sandy::core::Shape({1}), sandy::core::DType::F32)));
+    sandy::engine::TensorMap weights;
+
+    std::vector<sandy::engine::InvocProfileEvent> events;
+    sandy::engine::EngineRunOptions options;
+    options.profileKernel = [&](const sandy::engine::InvocProfileEvent& event) {
+        events.push_back(event);
+    };
+
+    auto outputsResult = engine.run(*plan, inputs, weights, &options);
+    ASSERT_TRUE(outputsResult) << outputsResult.error();
+
+    ASSERT_EQ(events.size(), 1u);
+    EXPECT_EQ(events[0].program, 0u);
+    EXPECT_EQ(events[0].device, 0u);
+    EXPECT_EQ(events[0].deviceProgram, 100u);
+    EXPECT_EQ(events[0].opKind, sandy::ir::mid_ir::OpKind::Tanh);
+    EXPECT_EQ(events[0].inputCount, 1u);
+    EXPECT_EQ(events[0].outputCount, 1u);
+    EXPECT_GE(events[0].elapsedMs, 0.0);
 }
 
 TEST_F(EngineCompileTest, RunUsesStoreOutputsOrder) {

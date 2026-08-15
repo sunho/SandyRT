@@ -2,6 +2,7 @@
 
 #include "InvocPlanner.h"
 
+#include <chrono>
 #include <memory>
 #include <span>
 #include <string>
@@ -99,6 +100,7 @@ Result<std::unique_ptr<InvocPlan>> Engine::compile(const ir::mid_ir::Graph& grap
             source.id,
             source.device,
             compiled.take(),
+            source.op->kind,
         });
     }
 
@@ -108,7 +110,8 @@ Result<std::unique_ptr<InvocPlan>> Engine::compile(const ir::mid_ir::Graph& grap
 Result<std::vector<TensorBufferPtr>> Engine::run(
         const InvocPlan& plan,
         std::span<TensorBufferPtr const> inputs,
-        const TensorMap& weights) {
+        const TensorMap& weights,
+        const EngineRunOptions* options) {
     if (devices_.empty())
         return make_error("engine has no devices");
 
@@ -121,7 +124,8 @@ Result<std::vector<TensorBufferPtr>> Engine::run(
     for (const auto& program : plan.programs)
         programs[program.id] = program;
 
-    for (const auto& instruction : plan.instructions) {
+    for (size_t instructionIndex = 0; instructionIndex < plan.instructions.size(); instructionIndex++) {
+        const auto& instruction = plan.instructions[instructionIndex];
         switch (instruction.kind) {
             case InvocInstructionKind::LoadInput: {
                 const auto& load = std::get<InvocLoadInput>(instruction.payload);
@@ -203,7 +207,22 @@ Result<std::vector<TensorBufferPtr>> Engine::run(
                     outputBuffers.push_back(buffer.take());
                 }
 
+                auto start = std::chrono::steady_clock::now();
                 auto result = (*device)->run(program.deviceProgram, inputBuffers, outputBuffers);
+                auto end = std::chrono::steady_clock::now();
+                if (options && options->profileKernel) {
+                    auto elapsed = std::chrono::duration<double, std::milli>(end - start).count();
+                    options->profileKernel({
+                        instructionIndex,
+                        run.program,
+                        run.device,
+                        program.deviceProgram,
+                        program.opKind,
+                        inputBuffers.size(),
+                        outputBuffers.size(),
+                        elapsed,
+                    });
+                }
                 if (!result)
                     return make_error(result.error());
                 break;

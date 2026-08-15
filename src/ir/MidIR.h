@@ -178,10 +178,10 @@ public:
     Value* createTranspose(Value* x);
     Value* createReshape(Value* x, std::vector<int64_t> shape);
     Value* createPermute(Value* x, std::vector<int64_t> dims);
-    Value* createSlidingQueryKeyScore(Value* q, Value* k, int64_t window = 0);
+    Value* createSlidingQueryKeyScore(Value* q, Value* k, int64_t window = 0, float scale = -1.0f);
     Value* createSoftmax(Value* x, int64_t dim = -1);
     Value* createEmbedding(Value* ids, Value* weight);
-    Value* createRoPE(Value* x, float theta = 10000.0f, int64_t rotary_dim = -1);
+    Value* createRoPE(Value* x, float theta = 10000.0f, int64_t rotary_dim = -1, bool split_half = false);
     Value* createRMSNorm(Value* x, float epsilon = 1.0e-6f);
     Value* createRMSNorm(Value* x, Value* weight, float epsilon = 1.0e-6f);
     Value* createLayerNorm(Value* x, Value* weight, Value* bias, float epsilon = 1.0e-5f);

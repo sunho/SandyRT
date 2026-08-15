@@ -210,7 +210,14 @@ BuiltinLowering BuiltinLowering::createDefault() {
         auto it = attrs.find("window");
         if (it != attrs.end() && it->second.kind == AttrValue::Int)
             window = it->second.intVal;
-        return std::vector<Value*>{builder.createSlidingQueryKeyScore(operands[0], operands[1], window)};
+        float scale = -1.0f;
+        auto scaleIt = attrs.find("scale");
+        if (scaleIt != attrs.end()) {
+            if (scaleIt->second.kind != AttrValue::Float)
+                return make_error("sliding_query_key_score scale attr must be float");
+            scale = static_cast<float>(scaleIt->second.floatVal);
+        }
+        return std::vector<Value*>{builder.createSlidingQueryKeyScore(operands[0], operands[1], window, scale)};
     });
 
     bl.add("softmax", [](Builder& builder,
@@ -451,7 +458,14 @@ BuiltinLowering BuiltinLowering::createDefault() {
                 return make_error("rope rotary_dim attr must be int");
             rotaryDim = rotaryIt->second.intVal;
         }
-        return std::vector<Value*>{builder.createRoPE(operands[0], theta, rotaryDim)};
+        bool splitHalf = false;
+        auto splitIt = attrs.find("split_half");
+        if (splitIt != attrs.end()) {
+            if (splitIt->second.kind != AttrValue::Int)
+                return make_error("rope split_half attr must be int");
+            splitHalf = splitIt->second.intVal != 0;
+        }
+        return std::vector<Value*>{builder.createRoPE(operands[0], theta, rotaryDim, splitHalf)};
     });
 
     bl.add("rms_norm", [](Builder& builder,
