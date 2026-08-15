@@ -1,5 +1,7 @@
 #include "Engine.h"
 
+#include "InvocPlanner.h"
+
 #include <memory>
 #include <utility>
 
@@ -39,6 +41,42 @@ Result<backend::BackendBufferMap> create_backend_buffers(
 
 Engine::Engine(std::unique_ptr<backend::Backend> backend)
     : backend_(std::move(backend)) {}
+
+Engine::Engine(std::vector<std::unique_ptr<Device>> devices)
+    : devices_(std::move(devices)) {}
+
+Result<std::unique_ptr<InvocPlan>> Engine::compile(const ir::mid_ir::Graph& graph) {
+    if (devices_.empty())
+        return make_error("engine has no devices");
+
+    InvocPlanner planner(0);
+    auto draftResult = planner.plan(graph);
+    if (!draftResult)
+        return make_error(draftResult.error());
+    auto draft = draftResult.take();
+
+    auto plan = std::make_unique<InvocPlan>();
+    plan->instructions = std::move(draft.instructions);
+    plan->outputs = std::move(draft.outputs);
+
+    for (const auto& source : draft.programSources) {
+        if (source.device >= devices_.size())
+            return make_error("invocation program references invalid device");
+        if (!source.op)
+            return make_error("invocation program has no MidIR op");
+
+        auto compiled = devices_[source.device]->compile(*source.op);
+        if (!compiled)
+            return make_error(compiled.error());
+        plan->programs.push_back({
+            source.id,
+            source.device,
+            compiled.take(),
+        });
+    }
+
+    return plan;
+}
 
 Result<std::unique_ptr<Plan>> Engine::create_plan(const ir::mid_ir::Graph& graph) {
     if (!backend_)

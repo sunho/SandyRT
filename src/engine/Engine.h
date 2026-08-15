@@ -1,10 +1,13 @@
 #pragma once
 
 #include "Backend.h"
+#include "Device.h"
 #include "EngineTypes.h"
+#include "InvocPlan.h"
 #include "Result.h"
 
 #include <memory>
+#include <vector>
 
 namespace sandy::engine {
 
@@ -20,6 +23,9 @@ private:
 class Engine {
 public:
     explicit Engine(std::unique_ptr<backend::Backend> backend);
+    explicit Engine(std::vector<std::unique_ptr<Device>> devices);
+
+    Result<std::unique_ptr<InvocPlan>> compile(const ir::mid_ir::Graph& graph);
 
     Result<std::unique_ptr<Plan>> create_plan(const ir::mid_ir::Graph& graph);
 
@@ -31,6 +37,7 @@ public:
 
 private:
     std::unique_ptr<backend::Backend> backend_;
+    std::vector<std::unique_ptr<Device>> devices_;
 };
 
 } // namespace sandy::engine

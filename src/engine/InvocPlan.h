@@ -21,6 +21,7 @@ enum class InvocInstructionKind {
     LoadInput,
     LoadWeight,
     RunKernel,
+    StoreOutputs,
 };
 
 struct InvocAlloc {
@@ -53,12 +54,18 @@ struct InvocRunKernel {
     std::vector<InvocValueId> outputs;
 };
 
+struct InvocStoreOutputs {
+    InvocDeviceId device = 0;
+    std::vector<InvocValueId> values;
+};
+
 using InvocInstructionPayload = std::variant<
     InvocAlloc,
     InvocDealloc,
     InvocLoadInput,
     InvocLoadWeight,
-    InvocRunKernel>;
+    InvocRunKernel,
+    InvocStoreOutputs>;
 
 struct InvocInstruction {
     InvocInstructionKind kind = InvocInstructionKind::Alloc;
@@ -82,6 +89,10 @@ struct InvocInstruction {
 
     static InvocInstruction run_kernel(InvocRunKernel value) {
         return {InvocInstructionKind::RunKernel, std::move(value)};
+    }
+
+    static InvocInstruction store_outputs(InvocStoreOutputs value) {
+        return {InvocInstructionKind::StoreOutputs, std::move(value)};
     }
 };
 
