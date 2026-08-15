@@ -116,6 +116,8 @@ TEST_F(InvocPlannerTest, ReshapeIsZeroCopyAlias) {
     ASSERT_EQ(draft.instructions[1].kind, sandy::engine::InvocInstructionKind::StoreOutputs);
     const auto& store = payload_as<sandy::engine::InvocStoreOutputs>(draft.instructions[1]);
     EXPECT_EQ(store.values, std::vector<sandy::engine::InvocValueId>({0}));
+    ASSERT_EQ(store.descs.size(), 1u);
+    EXPECT_EQ(store.descs[0].shape, sandy::core::Shape({3, 2}));
 }
 
 TEST_F(InvocPlannerTest, ReshapeFeedsComputeWithoutIndependentProgram) {
@@ -150,4 +152,64 @@ TEST_F(InvocPlannerTest, ReshapeFeedsComputeWithoutIndependentProgram) {
 
     const auto& store = payload_as<sandy::engine::InvocStoreOutputs>(draft.instructions[4]);
     EXPECT_EQ(store.values, std::vector<sandy::engine::InvocValueId>({1}));
+}
+
+TEST_F(InvocPlannerTest, DeallocsValuesImmediatelyAfterLastConsumer) {
+    sandy::ir::mid_ir::Graph graph;
+    sandy::ir::mid_ir::Builder builder(graph);
+
+    auto* x = builder.createInput(0, sandy::core::Shape({2}), sandy::core::DType::F32);
+    auto* tanh = builder.createTanh(x);
+    auto* out = builder.createReLU(tanh);
+    sandy::ir::mid_ir::Value* outputs[] = {out};
+    builder.setOutputs(outputs);
+
+    sandy::engine::InvocPlanner planner;
+    auto draftResult = planner.plan(graph);
+    ASSERT_TRUE(draftResult) << draftResult.error();
+    auto draft = draftResult.take();
+
+    ASSERT_EQ(draft.instructions.size(), 8u);
+    EXPECT_EQ(draft.instructions[0].kind, sandy::engine::InvocInstructionKind::LoadInput);
+    EXPECT_EQ(draft.instructions[1].kind, sandy::engine::InvocInstructionKind::Alloc);
+    EXPECT_EQ(draft.instructions[2].kind, sandy::engine::InvocInstructionKind::RunKernel);
+    ASSERT_EQ(draft.instructions[3].kind, sandy::engine::InvocInstructionKind::Dealloc);
+    EXPECT_EQ(payload_as<sandy::engine::InvocDealloc>(draft.instructions[3]).value, 0u);
+    EXPECT_EQ(draft.instructions[4].kind, sandy::engine::InvocInstructionKind::Alloc);
+    EXPECT_EQ(draft.instructions[5].kind, sandy::engine::InvocInstructionKind::RunKernel);
+    ASSERT_EQ(draft.instructions[6].kind, sandy::engine::InvocInstructionKind::Dealloc);
+    EXPECT_EQ(payload_as<sandy::engine::InvocDealloc>(draft.instructions[6]).value, 1u);
+    EXPECT_EQ(draft.instructions[7].kind, sandy::engine::InvocInstructionKind::StoreOutputs);
+}
+
+TEST_F(InvocPlannerTest, ReshapeAliasOutputKeepsSourceBufferAlive) {
+    sandy::ir::mid_ir::Graph graph;
+    sandy::ir::mid_ir::Builder builder(graph);
+
+    auto* x = builder.createInput(0, sandy::core::Shape({2, 3}), sandy::core::DType::F32);
+    auto* reshaped = builder.createReshape(x, {3, 2});
+    auto* dead = builder.createTanh(reshaped);
+    sandy::ir::mid_ir::Value* outputs[] = {reshaped};
+    builder.setOutputs(outputs);
+    (void)dead;
+
+    sandy::engine::InvocPlanner planner;
+    auto draftResult = planner.plan(graph);
+    ASSERT_TRUE(draftResult) << draftResult.error();
+    auto draft = draftResult.take();
+
+    ASSERT_EQ(draft.outputs, std::vector<sandy::engine::InvocValueId>({0}));
+    ASSERT_FALSE(draft.instructions.empty());
+    ASSERT_EQ(draft.instructions.back().kind, sandy::engine::InvocInstructionKind::StoreOutputs);
+
+    for (size_t index = 0; index + 1 < draft.instructions.size(); index++) {
+        if (draft.instructions[index].kind != sandy::engine::InvocInstructionKind::Dealloc)
+            continue;
+        EXPECT_NE(payload_as<sandy::engine::InvocDealloc>(draft.instructions[index]).value, 0u);
+    }
+
+    const auto& store = payload_as<sandy::engine::InvocStoreOutputs>(draft.instructions.back());
+    EXPECT_EQ(store.values, std::vector<sandy::engine::InvocValueId>({0}));
+    ASSERT_EQ(store.descs.size(), 1u);
+    EXPECT_EQ(store.descs[0].shape, sandy::core::Shape({3, 2}));
 }

@@ -35,10 +35,8 @@ Result<InvocValueId> lookup_value(
 
 void remember_materialized(
         InvocValueId value,
-        std::unordered_set<InvocValueId>& materializedValues,
-        std::vector<InvocValueId>& materializedOrder) {
-    if (materializedValues.insert(value).second)
-        materializedOrder.push_back(value);
+        std::unordered_set<InvocValueId>& materializedValues) {
+    materializedValues.insert(value);
 }
 
 } // namespace
@@ -50,9 +48,8 @@ Result<InvocPlanDraft> InvocPlanner::plan(const ir::mid_ir::Graph& graph) {
     InvocPlanDraft draft;
     std::unordered_map<const ir::mid_ir::Value*, InvocValueId> valueIds;
     std::unordered_set<InvocValueId> materializedValues;
-    std::vector<InvocValueId> materializedOrder;
+    std::unordered_map<InvocValueId, int64_t> remainingUses;
     InvocValueId nextValueId = 0;
-    InvocProgramId nextProgramId = 0;
 
     for (const auto* op : graph.entry()->ops) {
         switch (op->kind) {
@@ -65,12 +62,7 @@ Result<InvocPlanDraft> InvocPlanner::plan(const ir::mid_ir::Graph& graph) {
 
                 auto value = nextValueId++;
                 valueIds[op->results[0]] = value;
-                remember_materialized(value, materializedValues, materializedOrder);
-                draft.instructions.push_back(InvocInstruction::load_input({
-                    defaultDevice_,
-                    index.take(),
-                    value,
-                }));
+                remember_materialized(value, materializedValues);
                 break;
             }
             case ir::mid_ir::OpKind::Weight: {
@@ -82,12 +74,7 @@ Result<InvocPlanDraft> InvocPlanner::plan(const ir::mid_ir::Graph& graph) {
 
                 auto value = nextValueId++;
                 valueIds[op->results[0]] = value;
-                remember_materialized(value, materializedValues, materializedOrder);
-                draft.instructions.push_back(InvocInstruction::load_weight({
-                    defaultDevice_,
-                    name.take(),
-                    value,
-                }));
+                remember_materialized(value, materializedValues);
                 break;
             }
             case ir::mid_ir::OpKind::Reshape: {
@@ -99,6 +86,95 @@ Result<InvocPlanDraft> InvocPlanner::plan(const ir::mid_ir::Graph& graph) {
                 valueIds[op->results[0]] = operandValue.take();
                 break;
             }
+            case ir::mid_ir::OpKind::NUM_KINDS:
+                return make_error("invalid MidIR op kind");
+            default: {
+                for (auto* operand : op->operands) {
+                    auto value = lookup_value(valueIds, operand);
+                    if (!value)
+                        return make_error(value.error());
+                    remainingUses[value.take()]++;
+                }
+
+                for (auto* result : op->results) {
+                    auto value = nextValueId++;
+                    valueIds[result] = value;
+                    remember_materialized(value, materializedValues);
+                }
+                break;
+            }
+        }
+    }
+
+    std::unordered_set<InvocValueId> outputValues;
+    std::vector<core::TensorDesc> outputDescs;
+    draft.outputs.clear();
+    for (auto* output : graph.outputs()) {
+        auto value = lookup_value(valueIds, output);
+        if (!value)
+            return make_error(value.error());
+        auto outputValue = value.take();
+        draft.outputs.push_back(outputValue);
+        outputValues.insert(outputValue);
+        outputDescs.emplace_back(output->shape, output->dtype);
+    }
+
+    std::unordered_set<InvocValueId> deallocatedValues;
+    auto maybe_dealloc = [&](InvocValueId value) {
+        if (materializedValues.find(value) == materializedValues.end())
+            return;
+        if (outputValues.find(value) != outputValues.end())
+            return;
+        if (deallocatedValues.find(value) != deallocatedValues.end())
+            return;
+        if (remainingUses[value] != 0)
+            return;
+        deallocatedValues.insert(value);
+        draft.instructions.push_back(InvocInstruction::dealloc({
+            defaultDevice_,
+            value,
+        }));
+    };
+
+    InvocProgramId nextProgramId = 0;
+    for (const auto* op : graph.entry()->ops) {
+        switch (op->kind) {
+            case ir::mid_ir::OpKind::Input: {
+                auto value = lookup_value(valueIds, op->results[0]);
+                if (!value)
+                    return make_error(value.error());
+                auto index = get_int_attr(*op, "index");
+                if (!index)
+                    return make_error(index.error());
+
+                auto inputValue = value.take();
+                draft.instructions.push_back(InvocInstruction::load_input({
+                    defaultDevice_,
+                    index.take(),
+                    inputValue,
+                }));
+                maybe_dealloc(inputValue);
+                break;
+            }
+            case ir::mid_ir::OpKind::Weight: {
+                auto value = lookup_value(valueIds, op->results[0]);
+                if (!value)
+                    return make_error(value.error());
+                auto name = get_string_attr(*op, "name");
+                if (!name)
+                    return make_error(name.error());
+
+                auto weightValue = value.take();
+                draft.instructions.push_back(InvocInstruction::load_weight({
+                    defaultDevice_,
+                    name.take(),
+                    weightValue,
+                }));
+                maybe_dealloc(weightValue);
+                break;
+            }
+            case ir::mid_ir::OpKind::Reshape:
+                break;
             case ir::mid_ir::OpKind::NUM_KINDS:
                 return make_error("invalid MidIR op kind");
             default: {
@@ -114,13 +190,14 @@ Result<InvocPlanDraft> InvocPlanner::plan(const ir::mid_ir::Graph& graph) {
                 std::vector<InvocValueId> outputs;
                 outputs.reserve(op->results.size());
                 for (auto* result : op->results) {
-                    auto value = nextValueId++;
-                    valueIds[result] = value;
-                    remember_materialized(value, materializedValues, materializedOrder);
-                    outputs.push_back(value);
+                    auto value = lookup_value(valueIds, result);
+                    if (!value)
+                        return make_error(value.error());
+                    auto outputValue = value.take();
+                    outputs.push_back(outputValue);
                     draft.instructions.push_back(InvocInstruction::alloc({
                         defaultDevice_,
-                        value,
+                        outputValue,
                         core::TensorDesc(result->shape, result->dtype),
                     }));
                 }
@@ -130,33 +207,19 @@ Result<InvocPlanDraft> InvocPlanner::plan(const ir::mid_ir::Graph& graph) {
                 draft.instructions.push_back(InvocInstruction::run_kernel({
                     defaultDevice_,
                     program,
-                    std::move(inputs),
-                    std::move(outputs),
+                    inputs,
+                    outputs,
                 }));
+
+                for (auto input : inputs) {
+                    remainingUses[input]--;
+                    maybe_dealloc(input);
+                }
+                for (auto output : outputs)
+                    maybe_dealloc(output);
                 break;
             }
         }
-    }
-
-    std::unordered_set<InvocValueId> outputValues;
-    std::vector<core::TensorDesc> outputDescs;
-    for (auto* output : graph.outputs()) {
-        auto value = lookup_value(valueIds, output);
-        if (!value)
-            return make_error(value.error());
-        auto outputValue = value.take();
-        draft.outputs.push_back(outputValue);
-        outputValues.insert(outputValue);
-        outputDescs.emplace_back(output->shape, output->dtype);
-    }
-
-    for (auto value : materializedOrder) {
-        if (outputValues.find(value) != outputValues.end())
-            continue;
-        draft.instructions.push_back(InvocInstruction::dealloc({
-            defaultDevice_,
-            value,
-        }));
     }
 
     if (!draft.outputs.empty()) {
