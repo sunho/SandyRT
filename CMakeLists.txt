@@ -66,15 +66,39 @@ add_subdirectory(src/compiler)
 add_subdirectory(src/engine)
 add_subdirectory(src/cli)
 
-# GoogleTest
-include(FetchContent)
-FetchContent_Declare(
-  googletest
-  GIT_REPOSITORY https://github.com/google/googletest.git
-  GIT_TAG v1.15.2
-  SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/external/googletest
-)
-FetchContent_MakeAvailable(googletest)
+option(SANDY_BUILD_TESTS "Build Sandy test binaries" ON)
 
-enable_testing()
-add_subdirectory(test)
+if(SANDY_BUILD_TESTS)
+  # GoogleTest
+  if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/external/googletest/CMakeLists.txt")
+    add_subdirectory(external/googletest)
+  else()
+    include(FetchContent)
+    FetchContent_Declare(
+      googletest
+      GIT_REPOSITORY https://github.com/google/googletest.git
+      GIT_TAG v1.15.2
+      SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/external/googletest
+    )
+    FetchContent_MakeAvailable(googletest)
+  endif()
+
+  enable_testing()
+  add_subdirectory(test)
+else()
+  add_executable(cpu_runner
+    test/engine/CpuRunner.cpp
+  )
+
+  target_link_libraries(cpu_runner
+    PRIVATE
+    SandyCompilerLib
+    EngineLib
+    WeightLib
+  )
+
+  set_target_properties(cpu_runner PROPERTIES
+    CXX_STANDARD 20
+    CXX_STANDARD_REQUIRED ON
+  )
+endif()

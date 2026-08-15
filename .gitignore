@@ -1,6 +1,7 @@
 build/
 build-opt/
 build-release/
+build-fast/
 external/googletest/
 experiments/mnist/data/
 experiments/mnist/.venv/

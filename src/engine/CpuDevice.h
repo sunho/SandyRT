@@ -4,6 +4,7 @@
 #include "MidIR.h"
 
 #include <cstdint>
+#include <optional>
 #include <unordered_map>
 #include <vector>
 
@@ -29,6 +30,7 @@ private:
     struct CpuDeviceBuffer {
         core::TensorDesc desc;
         std::vector<uint8_t> data;
+        std::optional<core::TensorBuffer::Access> borrowed;
     };
 
     struct CpuDeviceProgram {

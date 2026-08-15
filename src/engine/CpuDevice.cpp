@@ -123,8 +123,7 @@ Result<DeviceBufferId> CpuDevice::load(core::TensorBuffer& src) {
 
     CpuDeviceBuffer buffer;
     buffer.desc = (*access).desc();
-    auto data = (*access).data();
-    buffer.data.assign(data.begin(), data.end());
+    buffer.borrowed.emplace(access.take());
 
     auto id = nextBufferId_++;
     buffers_[id] = std::move(buffer);
@@ -135,9 +134,10 @@ Result<TensorBufferPtr> CpuDevice::read(DeviceBufferId src) {
     auto it = buffers_.find(src);
     if (it == buffers_.end())
         return make_error("cpu device buffer not found");
+    auto data = it->second.borrowed ? it->second.borrowed->data() : std::span<const uint8_t>(it->second.data);
     TensorBufferPtr buffer = std::make_shared<CpuTensorBuffer>(
         it->second.desc,
-        it->second.data);
+        std::vector<uint8_t>(data.begin(), data.end()));
     return buffer;
 }
 
@@ -159,13 +159,16 @@ Result<void> CpuDevice::run(
         auto it = buffers_.find(inputs[index]);
         if (it == buffers_.end())
             return make_error("cpu device input buffer not found");
-        return core::make_tensor_ref(it->second.desc, it->second.data);
+        auto data = it->second.borrowed ? it->second.borrowed->data() : std::span<const uint8_t>(it->second.data);
+        return core::make_tensor_ref(it->second.desc, data);
     };
 
     auto outputRef = [&](size_t index) -> Result<core::MutableTensorRef> {
         auto it = buffers_.find(outputs[index]);
         if (it == buffers_.end())
             return make_error("cpu device output buffer not found");
+        if (it->second.borrowed)
+            return make_error("cpu device output buffer is not writable");
         return core::make_mutable_tensor_ref(it->second.desc, it->second.data);
     };
 

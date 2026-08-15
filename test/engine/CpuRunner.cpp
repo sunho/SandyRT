@@ -6,6 +6,7 @@
 #include "Parser.h"
 #include "SafeTensorWeights.h"
 
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -252,6 +253,12 @@ struct ProfileStat {
     double maxMs = 0.0;
 };
 
+using Clock = std::chrono::steady_clock;
+
+double elapsed_ms(Clock::time_point start, Clock::time_point end) {
+    return std::chrono::duration<double, std::milli>(end - start).count();
+}
+
 void print_tensor(const std::string& name, sandy::core::TensorBuffer& buffer) {
     auto accessResult = buffer.access();
     if (!accessResult) {
@@ -352,6 +359,15 @@ int main(int argc, char* argv[]) {
     const char* programPath = argv[arg];
     const char* weightsPath = argv[arg + 1];
     const char* inputsPath = argv[arg + 2];
+    auto totalStart = Clock::now();
+    auto stageStart = totalStart;
+    auto printStage = [&](const char* name) {
+        if (!instrument)
+            return;
+        auto now = Clock::now();
+        printf("[stage] %s time_ms=%.3f\n", name, elapsed_ms(stageStart, now));
+        stageStart = now;
+    };
 
     printf("[1/8] reading sandy go: %s\n", programPath);
     std::string source;
@@ -359,6 +375,7 @@ int main(int argc, char* argv[]) {
         fprintf(stderr, "cannot open %s\n", programPath);
         return 1;
     }
+    printStage("read_sandygo");
 
     printf("[2/8] lexing/parsing sandy go\n");
     sandy::sandygo::Lexer lexer(source);
@@ -374,29 +391,36 @@ int main(int argc, char* argv[]) {
         fprintf(stderr, "parser error: %s\n", parser.errorMessage().c_str());
         return 1;
     }
+    printStage("parse_sandygo");
 
     printf("sandy go ast:\n");
     dump_program(program);
     std::cout << std::flush;
+    printStage("dump_sandygo_ast");
 
     printf("[3/8] lowering sandy go ast -> high ir\n");
     sandy::ir::high_ir::Graph highGraph;
     sandy::sandygo::Interpreter interp(program, highGraph);
     interp.interpret();
+    printStage("lower_high_ir");
     printf("high ir:\n");
     highGraph.dump();
+    printStage("dump_high_ir");
 
     sandy::Compiler compiler;
 
     printf("[4/8] loading weights: %s\n", weightsPath);
     auto weights = sandy::weight::EagerSafeTensorWeights::load(weightsPath);
+    printStage("load_weights");
 
     printf("[5/8] loading inputs: %s\n", inputsPath);
     auto inputs = sandy::weight::EagerSafeTensorWeights::load(inputsPath);
+    printStage("load_inputs");
 
     sandy::ir::mid_ir::MaterializeOptions options;
     for (const auto& desc : inputs->descriptors())
         options.input_tensor_descs[desc.name] = desc;
+    printStage("prepare_materialize_options");
 
     printf("[6/8] materializing mid ir\n");
     auto midResult = compiler.materialize_mid_ir(highGraph, *weights, options);
@@ -405,7 +429,9 @@ int main(int argc, char* argv[]) {
         return 1;
     }
     auto midGraph = midResult.take();
+    printStage("materialize_mid_ir");
     midGraph->dump();
+    printStage("dump_mid_ir");
 
     printf("[7/8] compiling cpu invocation plan\n");
     std::vector<std::unique_ptr<sandy::engine::Device>> devices;
@@ -417,11 +443,13 @@ int main(int argc, char* argv[]) {
         return 1;
     }
     auto plan = planResult.take();
+    printStage("compile_invocation_plan");
 
     std::vector<sandy::engine::TensorBufferPtr> inputBuffers;
     sandy::engine::TensorMap weightMap;
     add_inputs_to_positional_map(*inputs, highGraph, inputBuffers);
     add_tensors_to_map(*weights, weightMap);
+    printStage("prepare_runtime_maps");
 
     printf("[8/8] invocation plan runs\n");
     sandy::engine::EngineRunOptions runOptions;
@@ -449,16 +477,20 @@ int main(int argc, char* argv[]) {
         };
     }
 
+    auto engineRunStart = Clock::now();
     auto runResult = engine.run(
         *plan,
         inputBuffers,
         weightMap,
         instrument ? &runOptions : nullptr);
+    auto engineRunEnd = Clock::now();
     if (!runResult) {
         fprintf(stderr, "run error: %s\n", runResult.error().c_str());
         return 1;
     }
+    printStage("engine_run");
     if (instrument) {
+        printf("[stage] engine_run_wall time_ms=%.3f\n", elapsed_ms(engineRunStart, engineRunEnd));
         printf("[profile] total kernels=%lld time_ms=%.3f\n",
                static_cast<long long>(profileKernelCount),
                profileTotalMs);
@@ -489,6 +521,9 @@ int main(int argc, char* argv[]) {
         }
         print_tensor(name, *buffer);
     }
+    printStage("print_outputs");
+    if (instrument)
+        printf("[stage] total_runner time_ms=%.3f\n", elapsed_ms(totalStart, Clock::now()));
 
     return 0;
 }

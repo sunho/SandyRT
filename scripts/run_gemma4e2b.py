@@ -50,9 +50,13 @@ def repo_root() -> pathlib.Path:
 
 
 def default_runner(root: pathlib.Path) -> pathlib.Path:
-    opt_runner = root / "build-opt/test/cpu_runner"
-    if opt_runner.exists():
-        return opt_runner
+    for runner in [
+        root / "build-fast/cpu_runner",
+        root / "build-opt/test/cpu_runner",
+        root / "build/test/cpu_runner",
+    ]:
+        if runner.exists():
+            return runner
     return root / "build/test/cpu_runner"
 
 
@@ -482,7 +486,7 @@ def main() -> int:
 
     if not args.runner.exists():
         print(f"missing cpu_runner: {args.runner}", file=sys.stderr)
-        print("build with: cmake --build build --target cpu_runner", file=sys.stderr)
+        print("build with: cmake --build build-fast --target cpu_runner", file=sys.stderr)
         return 1
 
     cmd = [str(args.runner)]

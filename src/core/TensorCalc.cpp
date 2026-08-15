@@ -9,6 +9,10 @@
 #include <utility>
 #include <vector>
 
+#if defined(SANDY_MATMUL_FAST) && defined(__APPLE__)
+#include <Accelerate/Accelerate.h>
+#endif
+
 namespace sandy::core {
 
 namespace {
@@ -184,6 +188,83 @@ size_t broadcast_batch_offset(
     }
     return sourceOffset;
 }
+
+#if defined(SANDY_MATMUL_FAST) && defined(__APPLE__)
+bool can_use_fast_matmul(
+        const TensorRef& lhs,
+        const TensorRef& rhs,
+        bool transpose_lhs,
+        int64_t batchNumel) {
+    if (transpose_lhs)
+        return false;
+    if (rhs.desc.shape.rank() != 2)
+        return false;
+    if (batchNumel != 1)
+        return false;
+    return lhs.desc.dtype == DType::F32 || lhs.desc.dtype == DType::BF16;
+}
+
+void copy_tensor_to_f32(TensorRef src, std::vector<float>& dst) {
+    auto numel = src.desc.shape.numel();
+    dst.resize(static_cast<size_t>(numel));
+    if (src.desc.dtype == DType::F32) {
+        std::memcpy(dst.data(), src.bytes.data(), dst.size() * sizeof(float));
+        return;
+    }
+    for (size_t i = 0; i < dst.size(); i++)
+        dst[i] = src.load_float(i);
+}
+
+void store_f32_to_output(std::span<const float> src, MutableTensorRef out) {
+    if (out.desc.dtype == DType::F32) {
+        std::memcpy(out.bytes.data(), src.data(), src.size() * sizeof(float));
+        return;
+    }
+    for (size_t i = 0; i < src.size(); i++)
+        out.store_float(i, src[i]);
+}
+
+Result<bool> matmul_fast(
+        TensorRef lhs,
+        TensorRef rhs,
+        bool transpose_lhs,
+        bool transpose_rhs,
+        int64_t rows,
+        int64_t k,
+        int64_t n,
+        int64_t batchNumel,
+        MutableTensorRef out) {
+    if (!can_use_fast_matmul(lhs, rhs, transpose_lhs, batchNumel))
+        return false;
+
+    std::vector<float> lhsF32;
+    std::vector<float> rhsF32;
+    std::vector<float> outF32(static_cast<size_t>(rows * n));
+    copy_tensor_to_f32(lhs, lhsF32);
+    copy_tensor_to_f32(rhs, rhsF32);
+
+    CBLAS_TRANSPOSE rhsTranspose = transpose_rhs ? CblasTrans : CblasNoTrans;
+    int rhsLeadingDim = static_cast<int>(transpose_rhs ? k : n);
+    cblas_sgemm(
+        CblasRowMajor,
+        CblasNoTrans,
+        rhsTranspose,
+        static_cast<int>(rows),
+        static_cast<int>(n),
+        static_cast<int>(k),
+        1.0f,
+        lhsF32.data(),
+        static_cast<int>(k),
+        rhsF32.data(),
+        rhsLeadingDim,
+        0.0f,
+        outF32.data(),
+        static_cast<int>(n));
+
+    store_f32_to_output(outF32, out);
+    return true;
+}
+#endif
 
 using UnaryOp = float (*)(float);
 using BinaryOp = float (*)(float, float);
@@ -392,6 +473,24 @@ Result<void> matmul(
     int64_t batchNumel = batchShape.numel();
     if (batchNumel < 0)
         return make_error("matmul output must have static shape");
+
+#if defined(SANDY_MATMUL_FAST) && defined(__APPLE__)
+    int64_t rows = batchNumel * m;
+    auto fast = matmul_fast(
+        lhs,
+        rhs,
+        transpose_lhs,
+        transpose_rhs,
+        rows,
+        lhsK,
+        n,
+        batchNumel,
+        out);
+    if (!fast)
+        return make_error(fast.error());
+    if (fast.take())
+        return {};
+#endif
 
     auto lhsStrides = strides_for(lhs.desc.shape);
     auto rhsStrides = strides_for(rhs.desc.shape);
