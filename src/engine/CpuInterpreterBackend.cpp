@@ -137,6 +137,15 @@ int64_t attr_int_or(const ir::mid_ir::Op& op, const std::string& name, int64_t f
     return it->second.intVal;
 }
 
+int64_t attr_int(const ir::mid_ir::Op& op, const std::string& name) {
+    auto it = op.attrs.find(name);
+    if (it == op.attrs.end() || it->second.kind != ir::mid_ir::AttrValue::Int) {
+        fprintf(stderr, "missing int attr '%s'\n", name.c_str());
+        abort();
+    }
+    return it->second.intVal;
+}
+
 std::vector<int64_t> attr_int_list(const ir::mid_ir::Op& op, const std::string& name) {
     auto it = op.attrs.find(name);
     if (it == op.attrs.end() || it->second.kind != ir::mid_ir::AttrValue::IntList) {
@@ -646,7 +655,7 @@ Result<BackendRunResult> interpret_graph(
     for (auto* op : graph.entry()->ops) {
         switch (op->kind) {
             case ir::mid_ir::OpKind::Input: {
-                auto name = attr_string(*op, "name");
+                auto name = std::to_string(attr_int(*op, "index"));
                 auto buffer = lookup_buffer(inputs, name, "input");
                 if (!buffer) return make_error(buffer.error());
                 auto bufferId = store.add_external(*buffer);

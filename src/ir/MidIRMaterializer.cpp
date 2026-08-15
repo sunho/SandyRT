@@ -17,6 +17,7 @@ Result<std::unique_ptr<Graph>> MidIRMaterializer::materialize(
     Builder builder(*mid_graph);
 
     std::unordered_map<int, Value*> value_map;
+    int64_t nextInputIndex = 0;
 
     for (auto& op : graph.ops()) {
         switch (op.kind) {
@@ -24,7 +25,7 @@ Result<std::unique_ptr<Graph>> MidIRMaterializer::materialize(
                 auto it = options.input_tensor_descs.find(op.inputName);
                 if (it == options.input_tensor_descs.end())
                     return make_error("no shape provided for input '" + op.inputName + "'");
-                auto* v = builder.createInput(op.inputName, it->second.shape, it->second.dtype);
+                auto* v = builder.createInput(nextInputIndex++, it->second.shape, it->second.dtype);
                 value_map[op.results[0]->id] = v;
                 break;
             }

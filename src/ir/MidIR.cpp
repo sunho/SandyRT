@@ -832,10 +832,10 @@ std::vector<Value*> Builder::createOp(OpKind kind,
     return results;
 }
 
-Value* Builder::createInput(const std::string& name, core::Shape shape, core::DType dtype) {
+Value* Builder::createInput(int64_t index, core::Shape shape, core::DType dtype) {
     auto& op = graph_.ops_.emplace_back();
     op.kind = OpKind::Input;
-    op.attrs["name"] = AttrValue::make_string(name);
+    op.attrs["index"] = AttrValue::make_int(index);
     op.parent = block_;
 
     auto* v = graph_.newValue(std::move(shape), dtype);

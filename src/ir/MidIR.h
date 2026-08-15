@@ -164,7 +164,7 @@ public:
                                  const AttrMap& attrs = {},
                                  int numResults = 1);
 
-    Value* createInput(const std::string& name, core::Shape shape, core::DType dtype);
+    Value* createInput(int64_t index, core::Shape shape, core::DType dtype);
     Value* createWeight(const std::string& name, core::Shape shape, core::DType dtype);
     Value* createConstantF32(float value);
 

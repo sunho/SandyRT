@@ -12,7 +12,7 @@ TEST_F(MidIRTest, BuildMNISTGraph) {
     sandy::ir::mid_ir::Graph graph;
     sandy::ir::mid_ir::Builder builder(graph);
 
-    auto* x = builder.createInput("x", sandy::core::Shape({-1, 784}), sandy::core::DType::F32);
+    auto* x = builder.createInput(0, sandy::core::Shape({-1, 784}), sandy::core::DType::F32);
     auto* w1 = builder.createWeight("fc1.weight", sandy::core::Shape({128, 784}), sandy::core::DType::F32);
     auto* b1 = builder.createWeight("fc1.bias", sandy::core::Shape({128}), sandy::core::DType::F32);
     auto* l1 = builder.createLinear(x, w1, b1);
@@ -35,7 +35,7 @@ TEST_F(MidIRTest, LinearTypeInference) {
     sandy::ir::mid_ir::Graph graph;
     sandy::ir::mid_ir::Builder builder(graph);
 
-    auto* x = builder.createInput("x", sandy::core::Shape({-1, 784}), sandy::core::DType::F32);
+    auto* x = builder.createInput(0, sandy::core::Shape({-1, 784}), sandy::core::DType::F32);
     auto* w = builder.createWeight("w", sandy::core::Shape({128, 784}), sandy::core::DType::F32);
     auto* b = builder.createWeight("b", sandy::core::Shape({128}), sandy::core::DType::F32);
     auto* out = builder.createLinear(x, w, b);
@@ -50,7 +50,7 @@ TEST_F(MidIRTest, ReLUTypeInference) {
     sandy::ir::mid_ir::Graph graph;
     sandy::ir::mid_ir::Builder builder(graph);
 
-    auto* x = builder.createInput("x", sandy::core::Shape({4, 128}), sandy::core::DType::F32);
+    auto* x = builder.createInput(0, sandy::core::Shape({4, 128}), sandy::core::DType::F32);
     auto* out = builder.createReLU(x);
 
     EXPECT_EQ(out->shape, x->shape);
@@ -61,7 +61,7 @@ TEST_F(MidIRTest, RMSNormTypeInference) {
     sandy::ir::mid_ir::Graph graph;
     sandy::ir::mid_ir::Builder builder(graph);
 
-    auto* x = builder.createInput("x", sandy::core::Shape({2, 3}), sandy::core::DType::F32);
+    auto* x = builder.createInput(0, sandy::core::Shape({2, 3}), sandy::core::DType::F32);
     auto* weight = builder.createWeight("norm.weight", sandy::core::Shape({3}), sandy::core::DType::F32);
     auto* out = builder.createRMSNorm(x, weight);
 
@@ -74,7 +74,7 @@ TEST_F(MidIRTest, LayerNormTypeInference) {
     sandy::ir::mid_ir::Graph graph;
     sandy::ir::mid_ir::Builder builder(graph);
 
-    auto* x = builder.createInput("x", sandy::core::Shape({2, 4, 3}), sandy::core::DType::F32);
+    auto* x = builder.createInput(0, sandy::core::Shape({2, 4, 3}), sandy::core::DType::F32);
     auto* weight = builder.createWeight("ln.weight", sandy::core::Shape({3}), sandy::core::DType::F32);
     auto* bias = builder.createWeight("ln.bias", sandy::core::Shape({3}), sandy::core::DType::F32);
     auto* out = builder.createLayerNorm(x, weight, bias, 1.0e-5f);
@@ -88,8 +88,8 @@ TEST_F(MidIRTest, BinaryElementwiseBroadcastTypeInference) {
     sandy::ir::mid_ir::Graph graph;
     sandy::ir::mid_ir::Builder builder(graph);
 
-    auto* lhs = builder.createInput("lhs", sandy::core::Shape({2, 3, 4}), sandy::core::DType::F32);
-    auto* rhs = builder.createInput("rhs", sandy::core::Shape({3, 1}), sandy::core::DType::F32);
+    auto* lhs = builder.createInput(0, sandy::core::Shape({2, 3, 4}), sandy::core::DType::F32);
+    auto* rhs = builder.createInput(1, sandy::core::Shape({3, 1}), sandy::core::DType::F32);
     auto* add = builder.createAdd(lhs, rhs);
     auto* mul = builder.createMul(lhs, rhs);
 
@@ -105,7 +105,7 @@ TEST_F(MidIRTest, SqrtTypeInference) {
     sandy::ir::mid_ir::Graph graph;
     sandy::ir::mid_ir::Builder builder(graph);
 
-    auto* x = builder.createInput("x", sandy::core::Shape({2, 3}), sandy::core::DType::F32);
+    auto* x = builder.createInput(0, sandy::core::Shape({2, 3}), sandy::core::DType::F32);
     auto* out = builder.createSqrt(x);
 
     EXPECT_EQ(out->shape, x->shape);
@@ -133,8 +133,8 @@ TEST_F(MidIRTest, MatMulTypeInference) {
     sandy::ir::mid_ir::Graph graph;
     sandy::ir::mid_ir::Builder builder(graph);
 
-    auto* lhs = builder.createInput("lhs", sandy::core::Shape({2, 4, 3}), sandy::core::DType::F32);
-    auto* rhs = builder.createInput("rhs", sandy::core::Shape({1, 3, 5}), sandy::core::DType::F32);
+    auto* lhs = builder.createInput(0, sandy::core::Shape({2, 4, 3}), sandy::core::DType::F32);
+    auto* rhs = builder.createInput(1, sandy::core::Shape({1, 3, 5}), sandy::core::DType::F32);
     auto* out = builder.createMatMul(lhs, rhs);
 
     EXPECT_EQ(out->shape, sandy::core::Shape({2, 4, 5}));
@@ -146,7 +146,7 @@ TEST_F(MidIRTest, Transpose2DTypeInference) {
     sandy::ir::mid_ir::Graph graph;
     sandy::ir::mid_ir::Builder builder(graph);
 
-    auto* x = builder.createInput("x", sandy::core::Shape({3, 5}), sandy::core::DType::F32);
+    auto* x = builder.createInput(0, sandy::core::Shape({3, 5}), sandy::core::DType::F32);
     auto* out = builder.createTranspose(x);
 
     EXPECT_EQ(out->shape, sandy::core::Shape({5, 3}));
@@ -158,7 +158,7 @@ TEST_F(MidIRTest, ReshapeTypeInference) {
     sandy::ir::mid_ir::Graph graph;
     sandy::ir::mid_ir::Builder builder(graph);
 
-    auto* x = builder.createInput("x", sandy::core::Shape({2, 3, 4}), sandy::core::DType::F32);
+    auto* x = builder.createInput(0, sandy::core::Shape({2, 3, 4}), sandy::core::DType::F32);
     auto* out = builder.createReshape(x, {2, 12});
 
     EXPECT_EQ(out->shape, sandy::core::Shape({2, 12}));
@@ -172,7 +172,7 @@ TEST_F(MidIRTest, ReshapeInfersNegativeOneDimension) {
     sandy::ir::mid_ir::Graph graph;
     sandy::ir::mid_ir::Builder builder(graph);
 
-    auto* x = builder.createInput("x", sandy::core::Shape({2, 3, 4}), sandy::core::DType::F32);
+    auto* x = builder.createInput(0, sandy::core::Shape({2, 3, 4}), sandy::core::DType::F32);
     auto* out = builder.createReshape(x, {-1, 4});
 
     EXPECT_EQ(out->shape, sandy::core::Shape({6, 4}));
@@ -185,7 +185,7 @@ TEST_F(MidIRTest, PermuteTypeInference) {
     sandy::ir::mid_ir::Graph graph;
     sandy::ir::mid_ir::Builder builder(graph);
 
-    auto* x = builder.createInput("x", sandy::core::Shape({2, 3, 4, 5}), sandy::core::DType::F32);
+    auto* x = builder.createInput(0, sandy::core::Shape({2, 3, 4, 5}), sandy::core::DType::F32);
     auto* out = builder.createPermute(x, {0, 2, 1, 3});
 
     EXPECT_EQ(out->shape, sandy::core::Shape({2, 4, 3, 5}));
@@ -199,8 +199,8 @@ TEST_F(MidIRTest, SlidingQueryKeyScoreTypeInferenceSupportsRank3AndRank4) {
     sandy::ir::mid_ir::Graph graph;
     sandy::ir::mid_ir::Builder builder(graph);
 
-    auto* q = builder.createInput("q", sandy::core::Shape({4, 3, 8}), sandy::core::DType::F32);
-    auto* k = builder.createInput("k", sandy::core::Shape({2, 5, 8}), sandy::core::DType::F32);
+    auto* q = builder.createInput(0, sandy::core::Shape({4, 3, 8}), sandy::core::DType::F32);
+    auto* k = builder.createInput(1, sandy::core::Shape({2, 5, 8}), sandy::core::DType::F32);
     auto* out = builder.createSlidingQueryKeyScore(q, k, 2);
 
     EXPECT_EQ(out->shape, sandy::core::Shape({4, 3, 5}));
@@ -208,8 +208,8 @@ TEST_F(MidIRTest, SlidingQueryKeyScoreTypeInferenceSupportsRank3AndRank4) {
     EXPECT_EQ(out->def->kind, sandy::ir::mid_ir::OpKind::SlidingQueryKeyScore);
     EXPECT_EQ(out->def->attrs.at("window").intVal, 2);
 
-    auto* bq = builder.createInput("bq", sandy::core::Shape({2, 4, 3, 8}), sandy::core::DType::F32);
-    auto* bk = builder.createInput("bk", sandy::core::Shape({2, 2, 5, 8}), sandy::core::DType::F32);
+    auto* bq = builder.createInput(2, sandy::core::Shape({2, 4, 3, 8}), sandy::core::DType::F32);
+    auto* bk = builder.createInput(3, sandy::core::Shape({2, 2, 5, 8}), sandy::core::DType::F32);
     auto* bout = builder.createSlidingQueryKeyScore(bq, bk);
 
     EXPECT_EQ(bout->shape, sandy::core::Shape({2, 4, 3, 5}));
@@ -221,7 +221,7 @@ TEST_F(MidIRTest, SoftmaxTypeInference) {
     sandy::ir::mid_ir::Graph graph;
     sandy::ir::mid_ir::Builder builder(graph);
 
-    auto* x = builder.createInput("x", sandy::core::Shape({2, 3, 4}), sandy::core::DType::F32);
+    auto* x = builder.createInput(0, sandy::core::Shape({2, 3, 4}), sandy::core::DType::F32);
     auto* out = builder.createSoftmax(x, -1);
 
     EXPECT_EQ(out->shape, x->shape);
@@ -234,7 +234,7 @@ TEST_F(MidIRTest, EmbeddingTypeInference) {
     sandy::ir::mid_ir::Graph graph;
     sandy::ir::mid_ir::Builder builder(graph);
 
-    auto* ids = builder.createInput("input_ids", sandy::core::Shape({2, 4}), sandy::core::DType::I32);
+    auto* ids = builder.createInput(0, sandy::core::Shape({2, 4}), sandy::core::DType::I32);
     auto* weight = builder.createWeight("embed_tokens.weight", sandy::core::Shape({10, 3}), sandy::core::DType::F32);
     auto* out = builder.createEmbedding(ids, weight);
 
@@ -247,7 +247,7 @@ TEST_F(MidIRTest, RoPETypeInferenceSupportsArbitraryRank) {
     sandy::ir::mid_ir::Graph graph;
     sandy::ir::mid_ir::Builder builder(graph);
 
-    auto* x = builder.createInput("x", sandy::core::Shape({2, 3, 4, 5, 6}), sandy::core::DType::F32);
+    auto* x = builder.createInput(0, sandy::core::Shape({2, 3, 4, 5, 6}), sandy::core::DType::F32);
     auto* out = builder.createRoPE(x, 10000.0f);
 
     EXPECT_EQ(out->shape, x->shape);
@@ -260,7 +260,7 @@ TEST_F(MidIRTest, UseDefChains) {
     sandy::ir::mid_ir::Graph graph;
     sandy::ir::mid_ir::Builder builder(graph);
 
-    auto* x = builder.createInput("x", sandy::core::Shape({-1, 784}), sandy::core::DType::F32);
+    auto* x = builder.createInput(0, sandy::core::Shape({-1, 784}), sandy::core::DType::F32);
     auto* w = builder.createWeight("w", sandy::core::Shape({128, 784}), sandy::core::DType::F32);
     auto* b = builder.createWeight("b", sandy::core::Shape({128}), sandy::core::DType::F32);
     auto* l = builder.createLinear(x, w, b);
@@ -281,9 +281,10 @@ TEST_F(MidIRTest, InputWeightAttrs) {
     sandy::ir::mid_ir::Graph graph;
     sandy::ir::mid_ir::Builder builder(graph);
 
-    auto* x = builder.createInput("x", sandy::core::Shape({1, 784}), sandy::core::DType::F32);
+    auto* x = builder.createInput(0, sandy::core::Shape({1, 784}), sandy::core::DType::F32);
     auto* w = builder.createWeight("fc1.weight", sandy::core::Shape({128, 784}), sandy::core::DType::F32);
 
-    EXPECT_EQ(x->def->attrs.at("name").strVal, "x");
+    EXPECT_EQ(x->def->attrs.at("index").intVal, 0);
+    EXPECT_EQ(x->def->attrs.count("name"), 0u);
     EXPECT_EQ(w->def->attrs.at("name").strVal, "fc1.weight");
 }

@@ -34,6 +34,22 @@ void add_tensors_to_map(const sandy::weight::Weights& tensors,
     }
 }
 
+void add_inputs_to_positional_map(const sandy::weight::Weights& tensors,
+                                  const sandy::ir::high_ir::Graph& graph,
+                                  sandy::engine::TensorMap& map) {
+    int64_t index = 0;
+    for (const auto& op : graph.ops()) {
+        if (op.kind != sandy::ir::high_ir::Op::Input)
+            continue;
+        auto tensor = tensors.get_tensor(op.inputName);
+        if (!tensor) {
+            fprintf(stderr, "input tensor missing: %s\n", op.inputName.c_str());
+            abort();
+        }
+        map[std::to_string(index++)] = tensor;
+    }
+}
+
 void indent(int depth) {
     for (int i = 0; i < depth; i++) std::cout << "  ";
 }
@@ -325,7 +341,7 @@ int main(int argc, char* argv[]) {
 
     sandy::engine::TensorMap inputMap;
     sandy::engine::TensorMap weightMap;
-    add_tensors_to_map(*inputs, inputMap);
+    add_inputs_to_positional_map(*inputs, highGraph, inputMap);
     add_tensors_to_map(*weights, weightMap);
 
     printf("[8/8] backend mid ir runs\n");

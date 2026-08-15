@@ -201,6 +201,14 @@ func main(x Node, y Node, z Node) Node {
     ASSERT_TRUE(result) << result.error();
     auto midGraph = result.take();
 
+    auto* entry = midGraph->entry();
+    ASSERT_GE(entry->ops.size(), 3u);
+    for (int64_t i = 0; i < 3; i++) {
+        ASSERT_EQ(entry->ops[static_cast<size_t>(i)]->kind, sandy::ir::mid_ir::OpKind::Input);
+        EXPECT_EQ(entry->ops[static_cast<size_t>(i)]->attrs.at("index").intVal, i);
+        EXPECT_EQ(entry->ops[static_cast<size_t>(i)]->attrs.count("name"), 0u);
+    }
+
     ASSERT_EQ(midGraph->outputs().size(), 1u);
     ASSERT_NE(midGraph->outputs()[0], nullptr);
     ASSERT_NE(midGraph->outputs()[0]->def, nullptr);

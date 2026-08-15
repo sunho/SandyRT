@@ -493,7 +493,7 @@ TEST(EngineTest, CreatePlanAndRunWithDummyCpuInterpreter) {
 
     sandy::ir::mid_ir::Graph graph;
     sandy::ir::mid_ir::Builder builder(graph);
-    auto* x = builder.createInput("x", sandy::core::Shape({1, 1}), sandy::core::DType::F32);
+    auto* x = builder.createInput(0, sandy::core::Shape({1, 1}), sandy::core::DType::F32);
     auto* w = builder.createWeight("w", sandy::core::Shape({1, 1}), sandy::core::DType::F32);
     auto* b = builder.createWeight("b", sandy::core::Shape({1}), sandy::core::DType::F32);
     auto* out = builder.createLinear(x, w, b);
@@ -508,7 +508,7 @@ TEST(EngineTest, CreatePlanAndRunWithDummyCpuInterpreter) {
     auto plan = planResult.take();
 
     sandy::engine::TensorMap inputs;
-    inputs["x"] = make_f32_buffer("x", sandy::core::Shape({1, 1}), {1.0f});
+    inputs["0"] = make_f32_buffer("x", sandy::core::Shape({1, 1}), {1.0f});
 
     sandy::engine::TensorMap weights;
     weights["w"] = make_f32_buffer("w", sandy::core::Shape({1, 1}), {2.0f});
@@ -1226,7 +1226,7 @@ TEST(CpuInterpretTest, EngineRunReturnsOutput0) {
 
     sandy::ir::mid_ir::Graph graph;
     sandy::ir::mid_ir::Builder builder(graph);
-    auto* x = builder.createInput("x", sandy::core::Shape({1, 2}), sandy::core::DType::F32);
+    auto* x = builder.createInput(0, sandy::core::Shape({1, 2}), sandy::core::DType::F32);
     auto* w = builder.createWeight("w", sandy::core::Shape({2, 2}), sandy::core::DType::F32);
     auto* b = builder.createWeight("b", sandy::core::Shape({2}), sandy::core::DType::F32);
     auto* out = builder.createLinear(x, w, b);
@@ -1241,7 +1241,7 @@ TEST(CpuInterpretTest, EngineRunReturnsOutput0) {
     auto plan = planResult.take();
 
     sandy::engine::TensorMap inputs;
-    inputs["x"] = make_f32_buffer("x", sandy::core::Shape({1, 2}), {1.0f, 2.0f});
+    inputs["0"] = make_f32_buffer("x", sandy::core::Shape({1, 2}), {1.0f, 2.0f});
 
     sandy::engine::TensorMap weights;
     weights["w"] = make_f32_buffer("w", sandy::core::Shape({2, 2}), {3.0f, 4.0f, 5.0f, 6.0f});
@@ -1264,7 +1264,7 @@ TEST(CpuInterpretTest, LinearRank3) {
 
     sandy::ir::mid_ir::Graph graph;
     sandy::ir::mid_ir::Builder builder(graph);
-    auto* x = builder.createInput("x", sandy::core::Shape({2, 2, 2}), sandy::core::DType::F32);
+    auto* x = builder.createInput(0, sandy::core::Shape({2, 2, 2}), sandy::core::DType::F32);
     auto* w = builder.createWeight("w", sandy::core::Shape({3, 2}), sandy::core::DType::F32);
     auto* b = builder.createWeight("b", sandy::core::Shape({3}), sandy::core::DType::F32);
     auto* out = builder.createLinear(x, w, b);
@@ -1279,7 +1279,7 @@ TEST(CpuInterpretTest, LinearRank3) {
     auto plan = planResult.take();
 
     sandy::engine::TensorMap inputs;
-    inputs["x"] = make_f32_buffer(
+    inputs["0"] = make_f32_buffer(
         "x", sandy::core::Shape({2, 2, 2}), {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f});
 
     sandy::engine::TensorMap weights;
@@ -1304,7 +1304,7 @@ TEST(CpuInterpretTest, RMSNorm) {
 
     sandy::ir::mid_ir::Graph graph;
     sandy::ir::mid_ir::Builder builder(graph);
-    auto* x = builder.createInput("x", sandy::core::Shape({2, 3}), sandy::core::DType::F32);
+    auto* x = builder.createInput(0, sandy::core::Shape({2, 3}), sandy::core::DType::F32);
     auto* weight = builder.createWeight("norm.weight", sandy::core::Shape({3}), sandy::core::DType::F32);
     auto* out = builder.createRMSNorm(x, weight);
     sandy::ir::mid_ir::Value* outputs[] = {out};
@@ -1318,7 +1318,7 @@ TEST(CpuInterpretTest, RMSNorm) {
     auto plan = planResult.take();
 
     sandy::engine::TensorMap inputs;
-    inputs["x"] = make_f32_buffer(
+    inputs["0"] = make_f32_buffer(
         "x", sandy::core::Shape({2, 3}), {1.0f, 2.0f, 2.0f, 0.0f, 3.0f, 4.0f});
 
     sandy::engine::TensorMap weights;
@@ -1350,7 +1350,7 @@ TEST(CpuInterpretTest, LayerNorm) {
 
     sandy::ir::mid_ir::Graph graph;
     sandy::ir::mid_ir::Builder builder(graph);
-    auto* x = builder.createInput("x", sandy::core::Shape({1, 2, 2}), sandy::core::DType::F32);
+    auto* x = builder.createInput(0, sandy::core::Shape({1, 2, 2}), sandy::core::DType::F32);
     auto* weight = builder.createWeight("ln.weight", sandy::core::Shape({2}), sandy::core::DType::F32);
     auto* bias = builder.createWeight("ln.bias", sandy::core::Shape({2}), sandy::core::DType::F32);
     auto* out = builder.createLayerNorm(x, weight, bias, 1.0e-5f);
@@ -1365,7 +1365,7 @@ TEST(CpuInterpretTest, LayerNorm) {
     auto plan = planResult.take();
 
     sandy::engine::TensorMap inputs;
-    inputs["x"] = make_f32_buffer("x", sandy::core::Shape({1, 2, 2}), {1.0f, 2.0f, 3.0f, 5.0f});
+    inputs["0"] = make_f32_buffer("x", sandy::core::Shape({1, 2, 2}), {1.0f, 2.0f, 3.0f, 5.0f});
 
     sandy::engine::TensorMap weights;
     weights["ln.weight"] = make_f32_buffer("ln.weight", sandy::core::Shape({2}), {2.0f, -1.0f});
@@ -1390,7 +1390,7 @@ TEST(CpuInterpretTest, AddMulSqrt) {
 
     sandy::ir::mid_ir::Graph graph;
     sandy::ir::mid_ir::Builder builder(graph);
-    auto* x = builder.createInput("x", sandy::core::Shape({2, 3}), sandy::core::DType::F32);
+    auto* x = builder.createInput(0, sandy::core::Shape({2, 3}), sandy::core::DType::F32);
     auto* bias = builder.createWeight("bias", sandy::core::Shape({3}), sandy::core::DType::F32);
     auto* scale = builder.createWeight("scale", sandy::core::Shape({2, 1}), sandy::core::DType::F32);
     auto* y = builder.createAdd(x, bias);
@@ -1407,7 +1407,7 @@ TEST(CpuInterpretTest, AddMulSqrt) {
     auto plan = planResult.take();
 
     sandy::engine::TensorMap inputs;
-    inputs["x"] = make_f32_buffer(
+    inputs["0"] = make_f32_buffer(
         "x", sandy::core::Shape({2, 3}), {1.0f, 4.0f, 9.0f, 16.0f, 25.0f, 36.0f});
 
     sandy::engine::TensorMap weights;
@@ -1435,7 +1435,7 @@ TEST(CpuInterpretTest, ConstantBroadcastAndTanh) {
 
     sandy::ir::mid_ir::Graph graph;
     sandy::ir::mid_ir::Builder builder(graph);
-    auto* x = builder.createInput("x", sandy::core::Shape({3}), sandy::core::DType::F32);
+    auto* x = builder.createInput(0, sandy::core::Shape({3}), sandy::core::DType::F32);
     auto* offset = builder.createConstantF32(1.0f);
     auto* shifted = builder.createAdd(x, offset);
     auto* out = builder.createTanh(shifted);
@@ -1450,7 +1450,7 @@ TEST(CpuInterpretTest, ConstantBroadcastAndTanh) {
     auto plan = planResult.take();
 
     sandy::engine::TensorMap inputs;
-    inputs["x"] = make_f32_buffer("x", sandy::core::Shape({3}), {-2.0f, -1.0f, 0.0f});
+    inputs["0"] = make_f32_buffer("x", sandy::core::Shape({3}), {-2.0f, -1.0f, 0.0f});
 
     sandy::engine::TensorMap weights;
 
@@ -1472,7 +1472,7 @@ TEST(CpuInterpretTest, GemmaStyleMatMulWithTransposedWeight) {
 
     sandy::ir::mid_ir::Graph graph;
     sandy::ir::mid_ir::Builder builder(graph);
-    auto* x = builder.createInput("x", sandy::core::Shape({2, 3}), sandy::core::DType::F32);
+    auto* x = builder.createInput(0, sandy::core::Shape({2, 3}), sandy::core::DType::F32);
     auto* weight = builder.createWeight("embed_tokens.weight", sandy::core::Shape({4, 3}), sandy::core::DType::F32);
     auto* weightT = builder.createTranspose(weight);
     auto* logits = builder.createMatMul(x, weightT);
@@ -1487,7 +1487,7 @@ TEST(CpuInterpretTest, GemmaStyleMatMulWithTransposedWeight) {
     auto plan = planResult.take();
 
     sandy::engine::TensorMap inputs;
-    inputs["x"] = make_f32_buffer(
+    inputs["0"] = make_f32_buffer(
         "x", sandy::core::Shape({2, 3}), {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f});
 
     sandy::engine::TensorMap weights;
@@ -1522,7 +1522,7 @@ TEST(CpuInterpretTest, ReshapeProjectionLayout) {
 
     sandy::ir::mid_ir::Graph graph;
     sandy::ir::mid_ir::Builder builder(graph);
-    auto* x = builder.createInput("x", sandy::core::Shape({1, 2, 6}), sandy::core::DType::F32);
+    auto* x = builder.createInput(0, sandy::core::Shape({1, 2, 6}), sandy::core::DType::F32);
     auto* out = builder.createReshape(x, {1, 2, 3, 2});
     sandy::ir::mid_ir::Value* outputs[] = {out};
     builder.setOutputs(outputs);
@@ -1535,7 +1535,7 @@ TEST(CpuInterpretTest, ReshapeProjectionLayout) {
     auto plan = planResult.take();
 
     sandy::engine::TensorMap inputs;
-    inputs["x"] = make_f32_buffer(
+    inputs["0"] = make_f32_buffer(
         "x", sandy::core::Shape({1, 2, 6}), {
             0.0f, 1.0f, 2.0f, 3.0f, 4.0f, 5.0f,
             6.0f, 7.0f, 8.0f, 9.0f, 10.0f, 11.0f,
@@ -1559,7 +1559,7 @@ TEST(CpuInterpretTest, PermuteAttentionLayout) {
 
     sandy::ir::mid_ir::Graph graph;
     sandy::ir::mid_ir::Builder builder(graph);
-    auto* x = builder.createInput("x", sandy::core::Shape({1, 2, 3, 2}), sandy::core::DType::F32);
+    auto* x = builder.createInput(0, sandy::core::Shape({1, 2, 3, 2}), sandy::core::DType::F32);
     auto* out = builder.createPermute(x, {0, 2, 1, 3});
     sandy::ir::mid_ir::Value* outputs[] = {out};
     builder.setOutputs(outputs);
@@ -1572,7 +1572,7 @@ TEST(CpuInterpretTest, PermuteAttentionLayout) {
     auto plan = planResult.take();
 
     sandy::engine::TensorMap inputs;
-    inputs["x"] = make_f32_buffer(
+    inputs["0"] = make_f32_buffer(
         "x", sandy::core::Shape({1, 2, 3, 2}), {
             0.0f, 1.0f,
             2.0f, 3.0f,
@@ -1606,8 +1606,8 @@ TEST(CpuInterpretTest, SlidingQueryKeyScore) {
 
     sandy::ir::mid_ir::Graph graph;
     sandy::ir::mid_ir::Builder builder(graph);
-    auto* q = builder.createInput("q", sandy::core::Shape({1, 1, 3, 1}), sandy::core::DType::F32);
-    auto* k = builder.createInput("k", sandy::core::Shape({1, 1, 3, 1}), sandy::core::DType::F32);
+    auto* q = builder.createInput(0, sandy::core::Shape({1, 1, 3, 1}), sandy::core::DType::F32);
+    auto* k = builder.createInput(1, sandy::core::Shape({1, 1, 3, 1}), sandy::core::DType::F32);
     auto* out = builder.createSlidingQueryKeyScore(q, k, 2);
     sandy::ir::mid_ir::Value* outputs[] = {out};
     builder.setOutputs(outputs);
@@ -1620,10 +1620,10 @@ TEST(CpuInterpretTest, SlidingQueryKeyScore) {
     auto plan = planResult.take();
 
     sandy::engine::TensorMap inputs;
-    inputs["q"] = make_f32_buffer("q", sandy::core::Shape({1, 1, 3, 1}), {
+    inputs["0"] = make_f32_buffer("q", sandy::core::Shape({1, 1, 3, 1}), {
         1.0f, 2.0f, 3.0f,
     });
-    inputs["k"] = make_f32_buffer("k", sandy::core::Shape({1, 1, 3, 1}), {
+    inputs["1"] = make_f32_buffer("k", sandy::core::Shape({1, 1, 3, 1}), {
         10.0f, 20.0f, 30.0f,
     });
 
@@ -1657,8 +1657,8 @@ TEST(CpuInterpretTest, SoftmaxAfterSlidingQueryKeyScore) {
 
     sandy::ir::mid_ir::Graph graph;
     sandy::ir::mid_ir::Builder builder(graph);
-    auto* q = builder.createInput("q", sandy::core::Shape({1, 1, 2, 1}), sandy::core::DType::F32);
-    auto* k = builder.createInput("k", sandy::core::Shape({1, 1, 2, 1}), sandy::core::DType::F32);
+    auto* q = builder.createInput(0, sandy::core::Shape({1, 1, 2, 1}), sandy::core::DType::F32);
+    auto* k = builder.createInput(1, sandy::core::Shape({1, 1, 2, 1}), sandy::core::DType::F32);
     auto* scores = builder.createSlidingQueryKeyScore(q, k);
     auto* out = builder.createSoftmax(scores, -1);
     sandy::ir::mid_ir::Value* outputs[] = {out};
@@ -1672,10 +1672,10 @@ TEST(CpuInterpretTest, SoftmaxAfterSlidingQueryKeyScore) {
     auto plan = planResult.take();
 
     sandy::engine::TensorMap inputs;
-    inputs["q"] = make_f32_buffer("q", sandy::core::Shape({1, 1, 2, 1}), {
+    inputs["0"] = make_f32_buffer("q", sandy::core::Shape({1, 1, 2, 1}), {
         1.0f, 1.0f,
     });
-    inputs["k"] = make_f32_buffer("k", sandy::core::Shape({1, 1, 2, 1}), {
+    inputs["1"] = make_f32_buffer("k", sandy::core::Shape({1, 1, 2, 1}), {
         1.0f, 2.0f,
     });
 
@@ -1701,7 +1701,7 @@ TEST(CpuInterpretTest, EmbeddingLoadsRowsFromFullWeightBuffer) {
 
     sandy::ir::mid_ir::Graph graph;
     sandy::ir::mid_ir::Builder builder(graph);
-    auto* ids = builder.createInput("input_ids", sandy::core::Shape({2, 2}), sandy::core::DType::I32);
+    auto* ids = builder.createInput(0, sandy::core::Shape({2, 2}), sandy::core::DType::I32);
     auto* weight = builder.createWeight("embed_tokens.weight", sandy::core::Shape({4, 2}), sandy::core::DType::F32);
     auto* out = builder.createEmbedding(ids, weight);
     sandy::ir::mid_ir::Value* outputs[] = {out};
@@ -1715,7 +1715,7 @@ TEST(CpuInterpretTest, EmbeddingLoadsRowsFromFullWeightBuffer) {
     auto plan = planResult.take();
 
     sandy::engine::TensorMap inputs;
-    inputs["input_ids"] = make_i32_buffer(
+    inputs["0"] = make_i32_buffer(
         "input_ids", sandy::core::Shape({2, 2}), {3, 1, 0, 2});
 
     sandy::engine::TensorMap weights;
@@ -1750,7 +1750,7 @@ TEST(CpuInterpretTest, RoPEReceivesThetaAttr) {
 
     sandy::ir::mid_ir::Graph graph;
     sandy::ir::mid_ir::Builder builder(graph);
-    auto* x = builder.createInput("x", sandy::core::Shape({1, 2, 4}), sandy::core::DType::F32);
+    auto* x = builder.createInput(0, sandy::core::Shape({1, 2, 4}), sandy::core::DType::F32);
     auto* out = builder.createRoPE(x, 10000.0f);
     sandy::ir::mid_ir::Value* outputs[] = {out};
     builder.setOutputs(outputs);
@@ -1763,7 +1763,7 @@ TEST(CpuInterpretTest, RoPEReceivesThetaAttr) {
     auto plan = planResult.take();
 
     sandy::engine::TensorMap inputs;
-    inputs["x"] = make_f32_buffer("x", sandy::core::Shape({1, 2, 4}), {
+    inputs["0"] = make_f32_buffer("x", sandy::core::Shape({1, 2, 4}), {
         1.0f, 2.0f, 3.0f, 4.0f,
         1.0f, 0.0f, 0.0f, 1.0f,
     });
