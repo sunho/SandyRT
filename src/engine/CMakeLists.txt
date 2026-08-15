@@ -1,6 +1,7 @@
 add_library(EngineLib
   Engine.cpp
   CpuInterpreterBackend.cpp
+  InvocPlanner.cpp
 )
 
 target_include_directories(EngineLib
