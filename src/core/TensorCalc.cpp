@@ -163,7 +163,7 @@ size_t broadcast_source_index(
     return sourceIndex;
 }
 
-size_t broadcast_batch_offset(
+size_t matmul_batch_offset(
         size_t batchIndex,
         const Shape& batchShape,
         const Shape& sourceShape,
@@ -181,10 +181,13 @@ size_t broadcast_batch_offset(
 
         int sourceDimIndex = batchDimIndex - rankOffset;
         if (sourceDimIndex < 0) continue;
-        if (sourceShape.dim(sourceDimIndex) != 1) {
-            sourceOffset += coord *
-                static_cast<size_t>(sourceStrides[static_cast<size_t>(sourceDimIndex)]);
-        }
+
+        int64_t sourceDim = sourceShape.dim(sourceDimIndex);
+        if (sourceDim == 1) continue;
+        if (sourceDim != batchDim)
+            coord /= static_cast<size_t>(batchDim / sourceDim);
+        sourceOffset += coord *
+            static_cast<size_t>(sourceStrides[static_cast<size_t>(sourceDimIndex)]);
     }
     return sourceOffset;
 }
@@ -459,7 +462,7 @@ Result<void> matmul(
     auto rhsDims = rhs.desc.shape.dims();
     Shape lhsBatch(std::vector<int64_t>(lhsDims.begin(), lhsDims.end() - 2));
     Shape rhsBatch(std::vector<int64_t>(rhsDims.begin(), rhsDims.end() - 2));
-    auto batchShapeResult = broadcast_shape(lhsBatch, rhsBatch);
+    auto batchShapeResult = matmul_batch_shape(lhsBatch, rhsBatch);
     if (!batchShapeResult) return make_error(batchShapeResult.error());
     auto batchShape = batchShapeResult.take();
 
@@ -496,9 +499,9 @@ Result<void> matmul(
     auto rhsStrides = strides_for(rhs.desc.shape);
 
     for (size_t batch = 0; batch < static_cast<size_t>(batchNumel); batch++) {
-        size_t lhsBatchOffset = broadcast_batch_offset(
+        size_t lhsBatchOffset = matmul_batch_offset(
             batch, batchShape, lhs.desc.shape, lhsStrides);
-        size_t rhsBatchOffset = broadcast_batch_offset(
+        size_t rhsBatchOffset = matmul_batch_offset(
             batch, batchShape, rhs.desc.shape, rhsStrides);
         size_t outBatchOffset = batch * static_cast<size_t>(m * n);
 

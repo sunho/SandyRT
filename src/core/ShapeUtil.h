@@ -6,6 +6,7 @@
 namespace sandy::core {
 
 Result<Shape> broadcast_shape(const Shape& lhs, const Shape& rhs);
+Result<Shape> matmul_batch_shape(const Shape& lhs, const Shape& rhs);
 Result<Shape> infer_reshape_shape(const Shape& inputShape, Shape requestedShape);
 
 } // namespace sandy::core

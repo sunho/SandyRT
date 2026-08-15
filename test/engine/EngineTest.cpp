@@ -307,7 +307,7 @@ Result<TestTensor> matmul_calc(
     auto rhsDims = rhsDesc.shape.dims();
     sandy::core::Shape lhsBatch(std::vector<int64_t>(lhsDims.begin(), lhsDims.end() - 2));
     sandy::core::Shape rhsBatch(std::vector<int64_t>(rhsDims.begin(), rhsDims.end() - 2));
-    auto batch = sandy::core::broadcast_shape(lhsBatch, rhsBatch);
+    auto batch = sandy::core::matmul_batch_shape(lhsBatch, rhsBatch);
     if (!batch) return make_error(batch.error());
     auto outDims = batch.take().dims();
     outDims.push_back(lhsDesc.shape.dim(lhsRank - (transposeLhs ? 1 : 2)));
@@ -661,6 +661,15 @@ TEST(ShapeUtilTest, BroadcastShapeRightAligned) {
     EXPECT_EQ(result.take(), sandy::core::Shape({2, 3, 4}));
 }
 
+TEST(ShapeUtilTest, MatMulBatchShapeAllowsGroupedHeads) {
+    auto result = sandy::core::matmul_batch_shape(
+        sandy::core::Shape({1, 8}),
+        sandy::core::Shape({1, 2}));
+
+    ASSERT_TRUE(result) << result.error();
+    EXPECT_EQ(result.take(), sandy::core::Shape({1, 8}));
+}
+
 TEST(TensorCalcTest, AddF32BroadcastsRightAligned) {
     auto lhs = f32_bytes({
         1.0f, 2.0f, 3.0f,
@@ -874,6 +883,52 @@ TEST(TensorCalcTest, MatMulF32BroadcastsBatchDims) {
     EXPECT_FLOAT_EQ(read_f32(out.data, 9), 390.0f);
     EXPECT_FLOAT_EQ(read_f32(out.data, 10), 540.0f);
     EXPECT_FLOAT_EQ(read_f32(out.data, 11), 690.0f);
+}
+
+TEST(TensorCalcTest, MatMulF32SupportsGroupedBatchHeads) {
+    auto lhs = f32_bytes({
+        1.0f, 0.0f, 0.0f,
+        0.0f, 1.0f, 0.0f,
+
+        0.0f, 0.0f, 1.0f,
+        1.0f, 1.0f, 0.0f,
+
+        1.0f, 2.0f, 0.0f,
+        0.0f, 1.0f, 1.0f,
+
+        2.0f, 0.0f, 1.0f,
+        1.0f, 0.0f, 1.0f,
+    });
+    auto rhs = f32_bytes({
+        10.0f, 100.0f,
+        20.0f, 200.0f,
+        30.0f, 300.0f,
+
+        1.0f, 10.0f,
+        2.0f, 20.0f,
+        3.0f, 30.0f,
+    });
+
+    auto result = matmul_calc(
+        lhs, sandy::core::TensorDesc(sandy::core::Shape({1, 4, 2, 3}), sandy::core::DType::F32),
+        rhs, sandy::core::TensorDesc(sandy::core::Shape({1, 2, 3, 2}), sandy::core::DType::F32));
+
+    ASSERT_TRUE(result) << result.error();
+    auto out = result.take();
+    EXPECT_EQ(out.desc.shape, sandy::core::Shape({1, 4, 2, 2}));
+
+    std::vector<float> expected = {
+        10.0f, 100.0f,
+        20.0f, 200.0f,
+        30.0f, 300.0f,
+        30.0f, 300.0f,
+        5.0f, 50.0f,
+        5.0f, 50.0f,
+        5.0f, 50.0f,
+        4.0f, 40.0f,
+    };
+    for (size_t i = 0; i < expected.size(); i++)
+        EXPECT_FLOAT_EQ(read_f32(out.data, i), expected[i]);
 }
 
 TEST(TensorCalcTest, TransposeF32Requires2D) {

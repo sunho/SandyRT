@@ -260,9 +260,6 @@ BuiltinLowering BuiltinLowering::createDefault() {
             return make_error("kv_attention heads, kv_heads, and head_dim must be positive");
         if (heads % kvHeads != 0)
             return make_error("kv_attention heads must be divisible by kv_heads");
-        if (kvHeads != 1 && kvHeads != heads)
-            return make_error("kv_attention context matmul currently requires kv_heads == 1 or kv_heads == heads");
-
         auto* x = operands[0];
         int rank = x->shape.rank();
         if (rank != 2 && rank != 3)
@@ -369,9 +366,6 @@ BuiltinLowering BuiltinLowering::createDefault() {
             return make_error("attention heads, kv_heads, and head_dim must be positive");
         if (heads % kvHeads != 0)
             return make_error("attention heads must be divisible by kv_heads");
-        if (kvHeads != 1 && kvHeads != heads)
-            return make_error("attention context matmul currently requires kv_heads == 1 or kv_heads == heads");
-
         auto* x = operands[0];
         auto* k = operands[1];
         auto* v = operands[2];

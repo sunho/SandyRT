@@ -238,7 +238,7 @@ public:
         auto rhsDims = rhsShape.dims();
         core::Shape lhsBatch(std::vector<int64_t>(lhsDims.begin(), lhsDims.end() - 2));
         core::Shape rhsBatch(std::vector<int64_t>(rhsDims.begin(), rhsDims.end() - 2));
-        auto batchShape = core::broadcast_shape(lhsBatch, rhsBatch);
+        auto batchShape = core::matmul_batch_shape(lhsBatch, rhsBatch);
         if (!batchShape) {
             fprintf(stderr, "matmul: %s\n", batchShape.error().c_str());
             abort();
@@ -287,7 +287,7 @@ public:
         auto rhsDims = operands[1]->shape.dims();
         core::Shape lhsBatch(std::vector<int64_t>(lhsDims.begin(), lhsDims.end() - 2));
         core::Shape rhsBatch(std::vector<int64_t>(rhsDims.begin(), rhsDims.end() - 2));
-        auto batchShape = core::broadcast_shape(lhsBatch, rhsBatch);
+        auto batchShape = core::matmul_batch_shape(lhsBatch, rhsBatch);
         if (!batchShape) {
             fprintf(stderr, "matmul: %s\n", batchShape.error().c_str());
             abort();
