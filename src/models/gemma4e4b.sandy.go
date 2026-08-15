@@ -38,9 +38,9 @@ func gemma_local_kv_attention(x Node) (Node, Node, Node) {
         k := __matmul(x, __transpose(@k_proj.weight))
         v := __matmul(x, __transpose(@v_proj.weight))
 
-        q = __reshape(q, shape=[-1, 32, 8, 256])
-        k = __reshape(k, shape=[-1, 32, 2, 256])
-        v = __reshape(v, shape=[-1, 32, 2, 256])
+        q = __reshape(q, shape=[-1, -1, 8, 256])
+        k = __reshape(k, shape=[-1, -1, 2, 256])
+        v = __reshape(v, shape=[-1, -1, 2, 256])
 
         q = __permute(q, dims=[0, 2, 1, 3])
         k = __permute(k, dims=[0, 2, 1, 3])
@@ -58,7 +58,7 @@ func gemma_local_kv_attention(x Node) (Node, Node, Node) {
         ctx := __matmul(probs, v)
 
         ctx = __permute(ctx, dims=[0, 2, 1, 3])
-        ctx = __reshape(ctx, shape=[-1, 32, 2048])
+        ctx = __reshape(ctx, shape=[-1, -1, 2048])
 
         out := __matmul(ctx, __transpose(@o_proj.weight))
     }
@@ -71,9 +71,9 @@ func gemma_global_kv_attention(x Node) (Node, Node, Node) {
         k := __matmul(x, __transpose(@k_proj.weight))
         v := __matmul(x, __transpose(@v_proj.weight))
 
-        q = __reshape(q, shape=[-1, 32, 8, 512])
-        k = __reshape(k, shape=[-1, 32, 2, 512])
-        v = __reshape(v, shape=[-1, 32, 2, 512])
+        q = __reshape(q, shape=[-1, -1, 8, 512])
+        k = __reshape(k, shape=[-1, -1, 2, 512])
+        v = __reshape(v, shape=[-1, -1, 2, 512])
 
         q = __permute(q, dims=[0, 2, 1, 3])
         k = __permute(k, dims=[0, 2, 1, 3])
@@ -91,7 +91,7 @@ func gemma_global_kv_attention(x Node) (Node, Node, Node) {
         ctx := __matmul(probs, v)
 
         ctx = __permute(ctx, dims=[0, 2, 1, 3])
-        ctx = __reshape(ctx, shape=[-1, 32, 4096])
+        ctx = __reshape(ctx, shape=[-1, -1, 4096])
 
         out := __matmul(ctx, __transpose(@o_proj.weight))
     }
@@ -101,7 +101,7 @@ func gemma_global_kv_attention(x Node) (Node, Node, Node) {
 func gemma_local_attention(x Node, k Node, v Node) Node {
     weight_scope "self_attn" {
         q := __matmul(x, __transpose(@q_proj.weight))
-        q = __reshape(q, shape=[-1, 32, 8, 256])
+        q = __reshape(q, shape=[-1, -1, 8, 256])
         q = __permute(q, dims=[0, 2, 1, 3])
         q = __rms_norm(q, @q_norm.weight)
         q = __rope(q, rope_theta=10000.0, split_half=1)
@@ -111,7 +111,7 @@ func gemma_local_attention(x Node, k Node, v Node) Node {
         ctx := __matmul(probs, v)
 
         ctx = __permute(ctx, dims=[0, 2, 1, 3])
-        ctx = __reshape(ctx, shape=[-1, 32, 2048])
+        ctx = __reshape(ctx, shape=[-1, -1, 2048])
 
         out := __matmul(ctx, __transpose(@o_proj.weight))
     }
@@ -121,7 +121,7 @@ func gemma_local_attention(x Node, k Node, v Node) Node {
 func gemma_global_attention(x Node, k Node, v Node) Node {
     weight_scope "self_attn" {
         q := __matmul(x, __transpose(@q_proj.weight))
-        q = __reshape(q, shape=[-1, 32, 8, 512])
+        q = __reshape(q, shape=[-1, -1, 8, 512])
         q = __permute(q, dims=[0, 2, 1, 3])
         q = __rms_norm(q, @q_norm.weight)
         q = __rope(q, rope_theta=1000000.0, rotary_dim=128, split_half=1)
@@ -131,7 +131,7 @@ func gemma_global_attention(x Node, k Node, v Node) Node {
         ctx := __matmul(probs, v)
 
         ctx = __permute(ctx, dims=[0, 2, 1, 3])
-        ctx = __reshape(ctx, shape=[-1, 32, 4096])
+        ctx = __reshape(ctx, shape=[-1, -1, 4096])
 
         out := __matmul(ctx, __transpose(@o_proj.weight))
     }

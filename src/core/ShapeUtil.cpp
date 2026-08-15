@@ -78,22 +78,36 @@ Result<Shape> infer_reshape_shape(const Shape& inputShape, Shape requestedShape)
 
     int64_t inputNumel = inputShape.numel();
     if (inputNumel < 0)
-        return make_error("reshape input must have static shape");
+        return requestedShape;
 
     auto dims = requestedShape.dims();
-    int inferIndex = -1;
+    std::vector<int> inferIndices;
     int64_t knownProduct = 1;
     for (int i = 0; i < static_cast<int>(dims.size()); i++) {
         if (dims[static_cast<size_t>(i)] == Shape::kDynamic) {
-            if (inferIndex >= 0)
-                return make_error("reshape may contain at most one -1 dimension");
-            inferIndex = i;
+            inferIndices.push_back(i);
         } else {
             knownProduct *= dims[static_cast<size_t>(i)];
         }
     }
 
-    if (inferIndex >= 0) {
+    if (inferIndices.size() > 1) {
+        bool canResolveLeadingDims =
+            static_cast<int>(inferIndices.size()) <= inputShape.rank();
+        for (int i = 0; canResolveLeadingDims && i < static_cast<int>(inferIndices.size()); i++)
+            canResolveLeadingDims = inferIndices[static_cast<size_t>(i)] == i &&
+                                    inputShape.dim(i) != Shape::kDynamic;
+
+        if (!canResolveLeadingDims)
+            return make_error("reshape may contain at most one -1 dimension");
+
+        for (int i : inferIndices)
+            dims[static_cast<size_t>(i)] = inputShape.dim(i);
+        requestedShape = Shape(std::move(dims));
+        if (requestedShape.numel() != inputNumel)
+            return make_error("reshape cannot infer -1 dimensions");
+    } else if (inferIndices.size() == 1) {
+        int inferIndex = inferIndices[0];
         if (knownProduct == 0 || inputNumel % knownProduct != 0)
             return make_error("reshape cannot infer -1 dimension");
         dims[static_cast<size_t>(inferIndex)] = inputNumel / knownProduct;

@@ -5,6 +5,7 @@ import json
 import mmap
 import os
 import pathlib
+import re
 import struct
 import subprocess
 import sys
@@ -19,8 +20,7 @@ except ImportError:
 
 
 MODEL_ID = "google/gemma-4-E4B-it"
-MAX_SEQ = 32
-PAD_ID = 0
+DEFAULT_MAX_SEQ = 0
 EOS_ID = 1
 HIDDEN = 2560
 PLE_DIM = 256
@@ -373,12 +373,14 @@ def convert_weights(src_dir: pathlib.Path, dst: pathlib.Path, force: bool = Fals
 
 
 def write_input(path: pathlib.Path, ids: list[int], max_seq: int) -> int:
-    real_ids = ids[-max_seq:] or [EOS_ID]
+    if max_seq < 0:
+        raise ValueError("--max-seq must be >= 0")
+    real_ids = ids[-max_seq:] if max_seq > 0 else list(ids)
+    real_ids = real_ids or [EOS_ID]
     token_index = len(real_ids) - 1
-    padded = real_ids + [PAD_ID] * (max_seq - len(real_ids))
-    input_data = require_numpy().asarray([padded], dtype="<i8").tobytes()
+    input_data = require_numpy().asarray([real_ids], dtype="<i8").tobytes()
     write_safetensors(path, [
-        bytes_tensor("input_ids", "I64", [1, max_seq], input_data),
+        bytes_tensor("input_ids", "I64", [1, len(real_ids)], input_data),
     ])
     return token_index
 
@@ -392,6 +394,50 @@ def load_tokenizer(artifacts: pathlib.Path, model_id: str):
         ) from exc
     return AutoTokenizer.from_pretrained(artifacts if artifacts.exists() else model_id)
 
+
+def decode_token_ids(tokenizer, token_ids: list[int]) -> dict[int, str]:
+    decoded: dict[int, str] = {}
+    for token_id in token_ids:
+        try:
+            decoded[token_id] = tokenizer.decode([token_id])
+        except Exception:
+            decoded[token_id] = "<decode-error>"
+    return decoded
+
+
+def print_decoded_runner_tokens(output: str, artifacts: pathlib.Path, model_id: str) -> None:
+    token_ids: set[int] = set()
+    argmax_matches = list(re.finditer(r"argmax\[(\d+)\]:\s+(\d+)\s+\(([^)]+)\)", output))
+    top5_matches = list(re.finditer(r"top5\[(\d+)\]:(.*)", output))
+
+    for match in argmax_matches:
+        token_ids.add(int(match.group(2)))
+    for match in top5_matches:
+        token_ids.update(int(token_id) for token_id in re.findall(r"\s(\d+)\(", match.group(2)))
+
+    if not token_ids:
+        return
+
+    try:
+        tokenizer = load_tokenizer(artifacts, model_id)
+    except Exception as exc:
+        print(f"[decode] skipped: {exc}", file=sys.stderr)
+        return
+
+    decoded = decode_token_ids(tokenizer, sorted(token_ids))
+    print("[decode] output tokens by likelihood:")
+    for match in argmax_matches:
+        row = match.group(1)
+        token_id = int(match.group(2))
+        score = match.group(3)
+        print(f"  argmax_decoded[{row}]: {token_id} {decoded[token_id]!r} ({score})")
+    for match in top5_matches:
+        row = match.group(1)
+        entries = []
+        for token_id, score in re.findall(r"\s(\d+)\(([^)]+)\)", match.group(2)):
+            token_int = int(token_id)
+            entries.append(f"{token_int} {decoded[token_int]!r}({score})")
+        print(f"  top5_decoded[{row}]: " + " ".join(entries))
 
 def encode_prompt(prompt: str, artifacts: pathlib.Path, model_id: str) -> tuple[list[int], str]:
     tokenizer = load_tokenizer(artifacts, model_id)
@@ -455,7 +501,8 @@ def main() -> int:
     parser.add_argument("--sandy-weights", default=None, type=pathlib.Path)
     parser.add_argument("--model", default=root / "src/models/gemma4e4b.sandy.go", type=pathlib.Path)
     parser.add_argument("--runner", default=default_runner(root), type=pathlib.Path)
-    parser.add_argument("--max-seq", default=MAX_SEQ, type=int)
+    parser.add_argument("--max-seq", default=DEFAULT_MAX_SEQ, type=int,
+                        help="Optional truncation cap. 0 keeps the full prompt.")
     parser.add_argument("--ids", type=parse_ids, default=None,
                         help="Comma-separated token ids. Skips tokenizer loading.")
     parser.add_argument("--download", action="store_true",
@@ -467,8 +514,8 @@ def main() -> int:
                         help="Print per-kernel CPU engine timing from cpu_runner.")
     args = parser.parse_args()
 
-    if args.max_seq != MAX_SEQ:
-        print(f"this SandyGo model is fixed to max_seq={MAX_SEQ}", file=sys.stderr)
+    if args.max_seq < 0:
+        print("--max-seq must be >= 0", file=sys.stderr)
         return 1
 
     artifacts = args.artifacts
@@ -491,14 +538,12 @@ def main() -> int:
         ids = args.ids
     else:
         ids, rendered_prompt = encode_prompt(args.prompt, artifacts, args.model_id)
-        if len(ids) > args.max_seq:
+        if args.max_seq > 0 and len(ids) > args.max_seq:
             print(
-                f"chat-formatted prompt is {len(ids)} tokens, but this SandyGo model is fixed "
-                f"to max_seq={args.max_seq}",
+                f"chat-formatted prompt is {len(ids)} tokens; truncating to the last "
+                f"{args.max_seq} tokens",
                 file=sys.stderr,
             )
-            print("use a shorter prompt or regenerate the SandyGo model with a larger max_seq", file=sys.stderr)
-            return 1
     if args.keep_input:
         input_path = artifacts / "input_latest.safetensors"
     else:
@@ -527,7 +572,14 @@ def main() -> int:
         cmd.append("--instrument")
     cmd.extend([str(args.model), str(sandy_weights), str(input_path)])
     print("[run]", " ".join(cmd))
-    return subprocess.call(cmd)
+    result = subprocess.run(cmd, text=True, capture_output=True)
+    if result.stdout:
+        print(result.stdout, end="")
+    if result.stderr:
+        print(result.stderr, end="", file=sys.stderr)
+    if result.returncode == 0:
+        print_decoded_runner_tokens(result.stdout, artifacts, args.model_id)
+    return result.returncode
 
 
 if __name__ == "__main__":

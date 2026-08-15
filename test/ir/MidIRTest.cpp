@@ -271,6 +271,66 @@ TEST_F(MidIRTest, ReshapeInfersNegativeOneDimension) {
     EXPECT_EQ(out->def->attrs.at("shape").intListVal[0], -1);
 }
 
+TEST_F(MidIRTest, ReshapePreservesMultipleDynamicDimensions) {
+    sandy::ir::mid_ir::Graph graph;
+    sandy::ir::mid_ir::Builder builder(graph);
+
+    auto* x = builder.createInput(0, sandy::core::Shape({-1, -1, 2048}), sandy::core::DType::F32);
+    auto* out = builder.createReshape(x, {-1, -1, 8, 256});
+
+    EXPECT_EQ(out->shape, sandy::core::Shape({-1, -1, 8, 256}));
+    EXPECT_EQ(out->dtype, sandy::core::DType::F32);
+    ASSERT_EQ(out->def->attrs.at("shape").intListVal.size(), 4u);
+    EXPECT_EQ(out->def->attrs.at("shape").intListVal[0], -1);
+    EXPECT_EQ(out->def->attrs.at("shape").intListVal[1], -1);
+}
+
+TEST_F(MidIRTest, ReshapeResolvesMultipleLeadingDynamicDimensionsFromStaticInput) {
+    sandy::ir::mid_ir::Graph graph;
+    sandy::ir::mid_ir::Builder builder(graph);
+
+    auto* x = builder.createInput(0, sandy::core::Shape({1, 32, 2048}), sandy::core::DType::F32);
+    auto* q = builder.createReshape(x, {-1, -1, 8, 256});
+
+    EXPECT_EQ(q->shape, sandy::core::Shape({1, 32, 8, 256}));
+
+    auto* flat = builder.createReshape(q, {-1, -1, 2048});
+    EXPECT_EQ(flat->shape, sandy::core::Shape({1, 32, 2048}));
+}
+
+TEST_F(MidIRTest, GemmaAttentionShapeInferenceSupportsDynamicBatchAndSeq) {
+    sandy::ir::mid_ir::Graph graph;
+    sandy::ir::mid_ir::Builder builder(graph);
+
+    auto* qFlat = builder.createInput(0, sandy::core::Shape({-1, -1, 2048}), sandy::core::DType::F32);
+    auto* kFlat = builder.createInput(1, sandy::core::Shape({-1, -1, 512}), sandy::core::DType::F32);
+    auto* vFlat = builder.createInput(2, sandy::core::Shape({-1, -1, 512}), sandy::core::DType::F32);
+
+    auto* q = builder.createPermute(
+        builder.createReshape(qFlat, {-1, -1, 8, 256}),
+        {0, 2, 1, 3});
+    auto* k = builder.createPermute(
+        builder.createReshape(kFlat, {-1, -1, 2, 256}),
+        {0, 2, 1, 3});
+    auto* v = builder.createPermute(
+        builder.createReshape(vFlat, {-1, -1, 2, 256}),
+        {0, 2, 1, 3});
+
+    EXPECT_EQ(q->shape, sandy::core::Shape({-1, 8, -1, 256}));
+    EXPECT_EQ(k->shape, sandy::core::Shape({-1, 2, -1, 256}));
+
+    auto* scores = builder.createSlidingQueryKeyScore(q, k, 512, 1.0f);
+    EXPECT_EQ(scores->shape, sandy::core::Shape({-1, 8, -1, -1}));
+
+    auto* probs = builder.createSoftmax(scores, -1);
+    auto* context = builder.createMatMul(probs, v);
+    EXPECT_EQ(context->shape, sandy::core::Shape({-1, 8, -1, 256}));
+
+    auto* contextSeqMajor = builder.createPermute(context, {0, 2, 1, 3});
+    auto* contextFlat = builder.createReshape(contextSeqMajor, {-1, -1, 2048});
+    EXPECT_EQ(contextFlat->shape, sandy::core::Shape({-1, -1, 2048}));
+}
+
 TEST_F(MidIRTest, PermuteTypeInference) {
     sandy::ir::mid_ir::Graph graph;
     sandy::ir::mid_ir::Builder builder(graph);
