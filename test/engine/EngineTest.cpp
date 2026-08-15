@@ -49,6 +49,31 @@ private:
     std::vector<uint8_t> data_;
 };
 
+struct TestTensor {
+    sandy::core::TensorDesc desc;
+    std::vector<uint8_t> data;
+};
+
+Result<sandy::core::TensorRef> tensor_ref(
+        std::span<const uint8_t> data,
+        sandy::core::TensorDesc desc) {
+    return sandy::core::make_tensor_ref(std::move(desc), data);
+}
+
+Result<sandy::core::MutableTensorRef> mutable_tensor_ref(TestTensor& tensor) {
+    return sandy::core::make_mutable_tensor_ref(tensor.desc, tensor.data);
+}
+
+Result<TestTensor> make_output(sandy::core::TensorDesc desc) {
+    int64_t numel = desc.shape.numel();
+    if (numel < 0)
+        return make_error("test output must have static shape");
+    TestTensor out;
+    out.desc = std::move(desc);
+    out.data.resize(static_cast<size_t>(numel) * sandy::core::dtype_size(out.desc.dtype));
+    return out;
+}
+
 std::shared_ptr<TestTensorBuffer> make_buffer(const std::string& name) {
     return std::make_shared<TestTensorBuffer>(
         sandy::core::TensorDesc(name, sandy::core::Shape({1}), sandy::core::DType::F32),
@@ -70,6 +95,20 @@ std::vector<uint8_t> f32_bytes(const std::vector<float>& values) {
     for (size_t index = 0; index < values.size(); index++) {
         float value = values[index];
         std::memcpy(bytes.data() + index * sizeof(float), &value, sizeof(float));
+    }
+    return bytes;
+}
+
+std::vector<uint8_t> bf16_bytes(std::initializer_list<float> values) {
+    std::vector<uint8_t> bytes(values.size() * sizeof(sandy::core::BFloat16));
+    size_t index = 0;
+    for (float value : values) {
+        auto bf16 = sandy::core::bfloat16_from_float(value);
+        std::memcpy(
+            bytes.data() + index * sizeof(sandy::core::BFloat16),
+            &bf16,
+            sizeof(sandy::core::BFloat16));
+        index++;
     }
     return bytes;
 }
@@ -100,6 +139,15 @@ float read_f32(std::span<const uint8_t> bytes, size_t index) {
     return value;
 }
 
+float read_bf16(std::span<const uint8_t> bytes, size_t index) {
+    sandy::core::BFloat16 value;
+    std::memcpy(
+        &value,
+        bytes.data() + index * sizeof(sandy::core::BFloat16),
+        sizeof(sandy::core::BFloat16));
+    return sandy::core::bfloat16_to_float(value);
+}
+
 std::shared_ptr<TestTensorBuffer> make_f32_buffer(
         const std::string& name,
         sandy::core::Shape shape,
@@ -116,6 +164,292 @@ std::shared_ptr<TestTensorBuffer> make_i32_buffer(
     return std::make_shared<TestTensorBuffer>(
         sandy::core::TensorDesc(name, std::move(shape), sandy::core::DType::I32),
         i32_bytes(values));
+}
+
+Result<TestTensor> linear_calc(
+        std::span<const uint8_t> x,
+        sandy::core::TensorDesc xDesc,
+        std::span<const uint8_t> weight,
+        sandy::core::TensorDesc weightDesc,
+        std::span<const uint8_t> bias,
+        sandy::core::TensorDesc biasDesc) {
+    auto outDims = xDesc.shape.dims();
+    outDims.back() = weightDesc.shape.dim(0);
+    auto out = make_output(sandy::core::TensorDesc(sandy::core::Shape(outDims), xDesc.dtype));
+    if (!out) return make_error(out.error());
+    auto xRef = tensor_ref(x, xDesc);
+    if (!xRef) return make_error(xRef.error());
+    auto weightRef = tensor_ref(weight, weightDesc);
+    if (!weightRef) return make_error(weightRef.error());
+    auto biasRef = tensor_ref(bias, biasDesc);
+    if (!biasRef) return make_error(biasRef.error());
+    auto outRef = mutable_tensor_ref(*out);
+    if (!outRef) return make_error(outRef.error());
+    auto result = sandy::core::linear(*xRef, *weightRef, *biasRef, *outRef);
+    if (!result) return make_error(result.error());
+    return out.take();
+}
+
+Result<TestTensor> unary_calc(
+        std::span<const uint8_t> x,
+        sandy::core::TensorDesc xDesc,
+        Result<void> (*op)(sandy::core::TensorRef, sandy::core::MutableTensorRef)) {
+    auto out = make_output(sandy::core::TensorDesc(xDesc.shape, xDesc.dtype));
+    if (!out) return make_error(out.error());
+    auto xRef = tensor_ref(x, xDesc);
+    if (!xRef) return make_error(xRef.error());
+    auto outRef = mutable_tensor_ref(*out);
+    if (!outRef) return make_error(outRef.error());
+    auto result = op(*xRef, *outRef);
+    if (!result) return make_error(result.error());
+    return out.take();
+}
+
+Result<TestTensor> binary_calc(
+        std::span<const uint8_t> lhs,
+        sandy::core::TensorDesc lhsDesc,
+        std::span<const uint8_t> rhs,
+        sandy::core::TensorDesc rhsDesc,
+        Result<void> (*op)(
+            sandy::core::TensorRef,
+            sandy::core::TensorRef,
+            sandy::core::MutableTensorRef)) {
+    auto shape = sandy::core::broadcast_shape(lhsDesc.shape, rhsDesc.shape);
+    if (!shape) return make_error(shape.error());
+    auto out = make_output(sandy::core::TensorDesc(shape.take(), lhsDesc.dtype));
+    if (!out) return make_error(out.error());
+    auto lhsRef = tensor_ref(lhs, lhsDesc);
+    if (!lhsRef) return make_error(lhsRef.error());
+    auto rhsRef = tensor_ref(rhs, rhsDesc);
+    if (!rhsRef) return make_error(rhsRef.error());
+    auto outRef = mutable_tensor_ref(*out);
+    if (!outRef) return make_error(outRef.error());
+    auto result = op(*lhsRef, *rhsRef, *outRef);
+    if (!result) return make_error(result.error());
+    return out.take();
+}
+
+Result<TestTensor> relu_calc(std::span<const uint8_t> x, sandy::core::TensorDesc xDesc) {
+    return unary_calc(x, std::move(xDesc), sandy::core::relu);
+}
+
+Result<TestTensor> sqrt_calc(std::span<const uint8_t> x, sandy::core::TensorDesc xDesc) {
+    return unary_calc(x, std::move(xDesc), sandy::core::sqrt);
+}
+
+Result<TestTensor> tanh_calc(std::span<const uint8_t> x, sandy::core::TensorDesc xDesc) {
+    return unary_calc(x, std::move(xDesc), sandy::core::tanh);
+}
+
+Result<TestTensor> add_calc(
+        std::span<const uint8_t> lhs,
+        sandy::core::TensorDesc lhsDesc,
+        std::span<const uint8_t> rhs,
+        sandy::core::TensorDesc rhsDesc) {
+    return binary_calc(lhs, std::move(lhsDesc), rhs, std::move(rhsDesc), sandy::core::add);
+}
+
+Result<TestTensor> mul_calc(
+        std::span<const uint8_t> lhs,
+        sandy::core::TensorDesc lhsDesc,
+        std::span<const uint8_t> rhs,
+        sandy::core::TensorDesc rhsDesc) {
+    return binary_calc(lhs, std::move(lhsDesc), rhs, std::move(rhsDesc), sandy::core::mul);
+}
+
+Result<TestTensor> matmul_calc(
+        std::span<const uint8_t> lhs,
+        sandy::core::TensorDesc lhsDesc,
+        std::span<const uint8_t> rhs,
+        sandy::core::TensorDesc rhsDesc) {
+    int lhsRank = lhsDesc.shape.rank();
+    int rhsRank = rhsDesc.shape.rank();
+    auto lhsDims = lhsDesc.shape.dims();
+    auto rhsDims = rhsDesc.shape.dims();
+    sandy::core::Shape lhsBatch(std::vector<int64_t>(lhsDims.begin(), lhsDims.end() - 2));
+    sandy::core::Shape rhsBatch(std::vector<int64_t>(rhsDims.begin(), rhsDims.end() - 2));
+    auto batch = sandy::core::broadcast_shape(lhsBatch, rhsBatch);
+    if (!batch) return make_error(batch.error());
+    auto outDims = batch.take().dims();
+    outDims.push_back(lhsDesc.shape.dim(lhsRank - 2));
+    outDims.push_back(rhsDesc.shape.dim(rhsRank - 1));
+    auto out = make_output(sandy::core::TensorDesc(sandy::core::Shape(outDims), lhsDesc.dtype));
+    if (!out) return make_error(out.error());
+    auto lhsRef = tensor_ref(lhs, lhsDesc);
+    if (!lhsRef) return make_error(lhsRef.error());
+    auto rhsRef = tensor_ref(rhs, rhsDesc);
+    if (!rhsRef) return make_error(rhsRef.error());
+    auto outRef = mutable_tensor_ref(*out);
+    if (!outRef) return make_error(outRef.error());
+    auto result = sandy::core::matmul(*lhsRef, *rhsRef, *outRef);
+    if (!result) return make_error(result.error());
+    return out.take();
+}
+
+Result<TestTensor> transpose_calc(
+        std::span<const uint8_t> x,
+        sandy::core::TensorDesc xDesc) {
+    auto outDims = xDesc.shape.dims();
+    if (outDims.size() >= 2)
+        std::swap(outDims[outDims.size() - 1], outDims[outDims.size() - 2]);
+    auto out = make_output(sandy::core::TensorDesc(sandy::core::Shape(outDims), xDesc.dtype));
+    if (!out) return make_error(out.error());
+    auto xRef = tensor_ref(x, xDesc);
+    if (!xRef) return make_error(xRef.error());
+    auto outRef = mutable_tensor_ref(*out);
+    if (!outRef) return make_error(outRef.error());
+    auto result = sandy::core::transpose(*xRef, *outRef);
+    if (!result) return make_error(result.error());
+    return out.take();
+}
+
+Result<TestTensor> reshape_calc(
+        std::span<const uint8_t> x,
+        sandy::core::TensorDesc xDesc,
+        sandy::core::Shape shape) {
+    auto inferred = sandy::core::infer_reshape_shape(xDesc.shape, std::move(shape));
+    if (!inferred) return make_error(inferred.error());
+    TestTensor out;
+    out.desc = sandy::core::TensorDesc(inferred.take(), xDesc.dtype);
+    out.data.assign(x.begin(), x.end());
+    return out;
+}
+
+Result<TestTensor> permute_calc(
+        std::span<const uint8_t> x,
+        sandy::core::TensorDesc xDesc,
+        std::span<const int64_t> dims) {
+    std::vector<int64_t> outDims;
+    outDims.reserve(dims.size());
+    for (int64_t dim : dims)
+        outDims.push_back(xDesc.shape.dim(static_cast<int>(dim)));
+    auto out = make_output(sandy::core::TensorDesc(sandy::core::Shape(outDims), xDesc.dtype));
+    if (!out) return make_error(out.error());
+    auto xRef = tensor_ref(x, xDesc);
+    if (!xRef) return make_error(xRef.error());
+    auto outRef = mutable_tensor_ref(*out);
+    if (!outRef) return make_error(outRef.error());
+    auto result = sandy::core::permute(*xRef, dims, *outRef);
+    if (!result) return make_error(result.error());
+    return out.take();
+}
+
+Result<TestTensor> sliding_query_key_score_calc(
+        std::span<const uint8_t> q,
+        sandy::core::TensorDesc qDesc,
+        std::span<const uint8_t> k,
+        sandy::core::TensorDesc kDesc,
+        int64_t window) {
+    int rank = qDesc.shape.rank();
+    std::vector<int64_t> outDims;
+    if (rank == 4)
+        outDims.push_back(qDesc.shape.dim(0));
+    outDims.push_back(qDesc.shape.dim(rank - 3));
+    outDims.push_back(qDesc.shape.dim(rank - 2));
+    outDims.push_back(kDesc.shape.dim(rank - 2));
+    auto out = make_output(sandy::core::TensorDesc(sandy::core::Shape(outDims), qDesc.dtype));
+    if (!out) return make_error(out.error());
+    auto qRef = tensor_ref(q, qDesc);
+    if (!qRef) return make_error(qRef.error());
+    auto kRef = tensor_ref(k, kDesc);
+    if (!kRef) return make_error(kRef.error());
+    auto outRef = mutable_tensor_ref(*out);
+    if (!outRef) return make_error(outRef.error());
+    auto result = sandy::core::sliding_query_key_score(*qRef, *kRef, window, *outRef);
+    if (!result) return make_error(result.error());
+    return out.take();
+}
+
+Result<TestTensor> softmax_calc(
+        std::span<const uint8_t> x,
+        sandy::core::TensorDesc xDesc,
+        int64_t dim) {
+    auto out = make_output(sandy::core::TensorDesc(xDesc.shape, xDesc.dtype));
+    if (!out) return make_error(out.error());
+    auto xRef = tensor_ref(x, xDesc);
+    if (!xRef) return make_error(xRef.error());
+    auto outRef = mutable_tensor_ref(*out);
+    if (!outRef) return make_error(outRef.error());
+    auto result = sandy::core::softmax(*xRef, dim, *outRef);
+    if (!result) return make_error(result.error());
+    return out.take();
+}
+
+Result<TestTensor> embedding_calc(
+        std::span<const uint8_t> ids,
+        sandy::core::TensorDesc idsDesc,
+        std::span<const uint8_t> weight,
+        sandy::core::TensorDesc weightDesc) {
+    auto outDims = idsDesc.shape.dims();
+    outDims.push_back(weightDesc.shape.dim(1));
+    auto out = make_output(sandy::core::TensorDesc(sandy::core::Shape(outDims), weightDesc.dtype));
+    if (!out) return make_error(out.error());
+    auto idsRef = tensor_ref(ids, idsDesc);
+    if (!idsRef) return make_error(idsRef.error());
+    auto weightRef = tensor_ref(weight, weightDesc);
+    if (!weightRef) return make_error(weightRef.error());
+    auto outRef = mutable_tensor_ref(*out);
+    if (!outRef) return make_error(outRef.error());
+    auto result = sandy::core::embedding(*idsRef, *weightRef, *outRef);
+    if (!result) return make_error(result.error());
+    return out.take();
+}
+
+Result<TestTensor> rope_calc(
+        std::span<const uint8_t> x,
+        sandy::core::TensorDesc xDesc,
+        float theta) {
+    auto out = make_output(sandy::core::TensorDesc(xDesc.shape, xDesc.dtype));
+    if (!out) return make_error(out.error());
+    auto xRef = tensor_ref(x, xDesc);
+    if (!xRef) return make_error(xRef.error());
+    auto outRef = mutable_tensor_ref(*out);
+    if (!outRef) return make_error(outRef.error());
+    auto result = sandy::core::rope(*xRef, theta, *outRef);
+    if (!result) return make_error(result.error());
+    return out.take();
+}
+
+Result<TestTensor> rms_norm_calc(
+        std::span<const uint8_t> x,
+        sandy::core::TensorDesc xDesc,
+        std::span<const uint8_t> weight,
+        sandy::core::TensorDesc weightDesc,
+        float epsilon) {
+    auto out = make_output(sandy::core::TensorDesc(xDesc.shape, xDesc.dtype));
+    if (!out) return make_error(out.error());
+    auto xRef = tensor_ref(x, xDesc);
+    if (!xRef) return make_error(xRef.error());
+    auto weightRef = tensor_ref(weight, weightDesc);
+    if (!weightRef) return make_error(weightRef.error());
+    auto outRef = mutable_tensor_ref(*out);
+    if (!outRef) return make_error(outRef.error());
+    auto result = sandy::core::rms_norm(*xRef, *weightRef, epsilon, *outRef);
+    if (!result) return make_error(result.error());
+    return out.take();
+}
+
+Result<TestTensor> layer_norm_calc(
+        std::span<const uint8_t> x,
+        sandy::core::TensorDesc xDesc,
+        std::span<const uint8_t> weight,
+        sandy::core::TensorDesc weightDesc,
+        std::span<const uint8_t> bias,
+        sandy::core::TensorDesc biasDesc,
+        float epsilon) {
+    auto out = make_output(sandy::core::TensorDesc(xDesc.shape, xDesc.dtype));
+    if (!out) return make_error(out.error());
+    auto xRef = tensor_ref(x, xDesc);
+    if (!xRef) return make_error(xRef.error());
+    auto weightRef = tensor_ref(weight, weightDesc);
+    if (!weightRef) return make_error(weightRef.error());
+    auto biasRef = tensor_ref(bias, biasDesc);
+    if (!biasRef) return make_error(biasRef.error());
+    auto outRef = mutable_tensor_ref(*out);
+    if (!outRef) return make_error(outRef.error());
+    auto result = sandy::core::layer_norm(*xRef, *weightRef, *biasRef, epsilon, *outRef);
+    if (!result) return make_error(result.error());
+    return out.take();
 }
 
 } // namespace
@@ -189,7 +523,7 @@ TEST(TensorCalcTest, LinearF32) {
     auto w = f32_bytes({3.0f, 4.0f, 5.0f, 6.0f});
     auto b = f32_bytes({7.0f, 8.0f});
 
-    auto result = sandy::core::linear_f32(
+    auto result = linear_calc(
         x, sandy::core::TensorDesc(sandy::core::Shape({1, 2}), sandy::core::DType::F32),
         w, sandy::core::TensorDesc(sandy::core::Shape({2, 2}), sandy::core::DType::F32),
         b, sandy::core::TensorDesc(sandy::core::Shape({2}), sandy::core::DType::F32));
@@ -215,7 +549,7 @@ TEST(TensorCalcTest, LinearF32Rank3FlattensLeadingDims) {
     });
     auto b = f32_bytes({1.0f, 2.0f, 3.0f});
 
-    auto result = sandy::core::linear_f32(
+    auto result = linear_calc(
         x, sandy::core::TensorDesc(sandy::core::Shape({2, 2, 2}), sandy::core::DType::F32),
         w, sandy::core::TensorDesc(sandy::core::Shape({3, 2}), sandy::core::DType::F32),
         b, sandy::core::TensorDesc(sandy::core::Shape({3}), sandy::core::DType::F32));
@@ -234,7 +568,7 @@ TEST(TensorCalcTest, LinearF32Rank3FlattensLeadingDims) {
 TEST(TensorCalcTest, ReLUF32) {
     auto x = f32_bytes({-2.0f, 0.5f, 3.0f});
 
-    auto result = sandy::core::relu_f32(
+    auto result = relu_calc(
         x, sandy::core::TensorDesc(sandy::core::Shape({1, 3}), sandy::core::DType::F32));
 
     ASSERT_TRUE(result) << result.error();
@@ -260,7 +594,7 @@ TEST(TensorCalcTest, AddF32BroadcastsRightAligned) {
     });
     auto rhs = f32_bytes({10.0f, 20.0f, 30.0f});
 
-    auto result = sandy::core::add_f32(
+    auto result = add_calc(
         lhs, sandy::core::TensorDesc(sandy::core::Shape({2, 3}), sandy::core::DType::F32),
         rhs, sandy::core::TensorDesc(sandy::core::Shape({3}), sandy::core::DType::F32));
 
@@ -282,7 +616,7 @@ TEST(TensorCalcTest, MulF32BroadcastsMiddleDim) {
     });
     auto rhs = f32_bytes({10.0f, 20.0f});
 
-    auto result = sandy::core::mul_f32(
+    auto result = mul_calc(
         lhs, sandy::core::TensorDesc(sandy::core::Shape({2, 1, 3}), sandy::core::DType::F32),
         rhs, sandy::core::TensorDesc(sandy::core::Shape({2, 1, 1}), sandy::core::DType::F32));
 
@@ -300,7 +634,7 @@ TEST(TensorCalcTest, MulF32BroadcastsMiddleDim) {
 TEST(TensorCalcTest, SqrtF32) {
     auto x = f32_bytes({1.0f, 4.0f, 9.0f, 16.0f});
 
-    auto result = sandy::core::sqrt_f32(
+    auto result = sqrt_calc(
         x, sandy::core::TensorDesc(sandy::core::Shape({2, 2}), sandy::core::DType::F32));
 
     ASSERT_TRUE(result) << result.error();
@@ -315,7 +649,7 @@ TEST(TensorCalcTest, SqrtF32) {
 TEST(TensorCalcTest, TanhF32) {
     auto x = f32_bytes({-1.0f, 0.0f, 1.0f});
 
-    auto result = sandy::core::tanh_f32(
+    auto result = tanh_calc(
         x, sandy::core::TensorDesc(sandy::core::Shape({3}), sandy::core::DType::F32));
 
     ASSERT_TRUE(result) << result.error();
@@ -324,6 +658,50 @@ TEST(TensorCalcTest, TanhF32) {
     EXPECT_NEAR(read_f32(out.data, 0), std::tanh(-1.0f), 1.0e-6f);
     EXPECT_FLOAT_EQ(read_f32(out.data, 1), 0.0f);
     EXPECT_NEAR(read_f32(out.data, 2), std::tanh(1.0f), 1.0e-6f);
+}
+
+TEST(TensorCalcTest, BFloat16ConvertsThroughFloat) {
+    auto one = sandy::core::bfloat16_from_float(1.0f);
+    EXPECT_EQ(sandy::core::bfloat16_bits(one), 0x3f80);
+    EXPECT_FLOAT_EQ(sandy::core::bfloat16_to_float(one), 1.0f);
+
+    auto third = sandy::core::bfloat16_from_float(1.0f / 3.0f);
+    EXPECT_NEAR(sandy::core::bfloat16_to_float(third), 1.0f / 3.0f, 0.002f);
+}
+
+TEST(TensorCalcTest, BFloat16RefsLoadAndStoreComputeValues) {
+    TestTensor tensor;
+    tensor.desc = sandy::core::TensorDesc(sandy::core::Shape({2}), sandy::core::DType::BF16);
+    tensor.data.resize(2 * sizeof(sandy::core::BFloat16));
+    auto mutableRef = mutable_tensor_ref(tensor);
+    ASSERT_TRUE(mutableRef) << mutableRef.error();
+    mutableRef->store_float(0, 1.0f);
+    mutableRef->store_float(1, 1.0f / 3.0f);
+
+    auto ref = tensor_ref(tensor.data, tensor.desc);
+    ASSERT_TRUE(ref) << ref.error();
+    EXPECT_FLOAT_EQ(ref->load_float(0), 1.0f);
+    EXPECT_NEAR(ref->load_float(1), 1.0f / 3.0f, 0.002f);
+
+    sandy::core::BFloat16 raw = sandy::core::bfloat16_from_bits(0);
+    std::memcpy(&raw, tensor.data.data(), sizeof(raw));
+    EXPECT_EQ(sandy::core::bfloat16_bits(raw), 0x3f80);
+}
+
+TEST(TensorCalcTest, BFloat16ElementwiseUsesTensorRefStorageAccessors) {
+    auto lhs = bf16_bytes({1.0f, 2.0f, 3.0f});
+    auto rhs = bf16_bytes({10.0f, 20.0f, 30.0f});
+
+    auto result = add_calc(
+        lhs, sandy::core::TensorDesc(sandy::core::Shape({3}), sandy::core::DType::BF16),
+        rhs, sandy::core::TensorDesc(sandy::core::Shape({3}), sandy::core::DType::BF16));
+
+    ASSERT_TRUE(result) << result.error();
+    auto out = result.take();
+    EXPECT_EQ(out.desc.dtype, sandy::core::DType::BF16);
+    EXPECT_FLOAT_EQ(read_bf16(out.data, 0), 11.0f);
+    EXPECT_FLOAT_EQ(read_bf16(out.data, 1), 22.0f);
+    EXPECT_FLOAT_EQ(read_bf16(out.data, 2), 33.0f);
 }
 
 TEST(TensorCalcTest, MatMulF32UsesTorchLayout) {
@@ -337,7 +715,7 @@ TEST(TensorCalcTest, MatMulF32UsesTorchLayout) {
         11.0f, 12.0f,
     });
 
-    auto result = sandy::core::matmul_f32(
+    auto result = matmul_calc(
         lhs, sandy::core::TensorDesc(sandy::core::Shape({2, 3}), sandy::core::DType::F32),
         rhs, sandy::core::TensorDesc(sandy::core::Shape({3, 2}), sandy::core::DType::F32));
 
@@ -362,7 +740,7 @@ TEST(TensorCalcTest, MatMulF32BroadcastsBatchDims) {
         40.0f, 50.0f, 60.0f,
     });
 
-    auto result = sandy::core::matmul_f32(
+    auto result = matmul_calc(
         lhs, sandy::core::TensorDesc(sandy::core::Shape({2, 2, 2}), sandy::core::DType::F32),
         rhs, sandy::core::TensorDesc(sandy::core::Shape({1, 2, 3}), sandy::core::DType::F32));
 
@@ -389,7 +767,7 @@ TEST(TensorCalcTest, TransposeF32Requires2D) {
         4.0f, 5.0f, 6.0f,
     });
 
-    auto result = sandy::core::transpose_f32(
+    auto result = transpose_calc(
         x, sandy::core::TensorDesc(sandy::core::Shape({2, 3}), sandy::core::DType::F32));
 
     ASSERT_TRUE(result) << result.error();
@@ -402,7 +780,7 @@ TEST(TensorCalcTest, TransposeF32Requires2D) {
     EXPECT_FLOAT_EQ(read_f32(out.data, 4), 3.0f);
     EXPECT_FLOAT_EQ(read_f32(out.data, 5), 6.0f);
 
-    auto rank3 = sandy::core::transpose_f32(
+    auto rank3 = transpose_calc(
         x, sandy::core::TensorDesc(sandy::core::Shape({1, 2, 3}), sandy::core::DType::F32));
     EXPECT_FALSE(rank3);
     EXPECT_NE(rank3.error().find("rank 2"), std::string::npos);
@@ -415,7 +793,7 @@ TEST(TensorCalcTest, ReshapeF32ChangesShapeOnly) {
         8.0f, 9.0f, 10.0f, 11.0f,
     });
 
-    auto result = sandy::core::reshape_f32(
+    auto result = reshape_calc(
         x, sandy::core::TensorDesc(sandy::core::Shape({2, 6}), sandy::core::DType::F32),
         sandy::core::Shape({2, 3, 2}));
 
@@ -433,7 +811,7 @@ TEST(TensorCalcTest, ReshapeF32InfersNegativeOneDimension) {
         8.0f, 9.0f, 10.0f, 11.0f,
     });
 
-    auto result = sandy::core::reshape_f32(
+    auto result = reshape_calc(
         x, sandy::core::TensorDesc(sandy::core::Shape({2, 6}), sandy::core::DType::F32),
         sandy::core::Shape({-1, 3, 2}));
 
@@ -455,7 +833,7 @@ TEST(TensorCalcTest, PermuteF32ReordersAxes) {
     });
     std::vector<int64_t> dims = {0, 2, 1};
 
-    auto result = sandy::core::permute_f32(
+    auto result = permute_calc(
         x, sandy::core::TensorDesc(sandy::core::Shape({2, 3, 4}), sandy::core::DType::F32),
         dims);
 
@@ -489,7 +867,7 @@ TEST(TensorCalcTest, SlidingQueryKeyScoreF32CausalUnbatched) {
         1.0f, 1.0f,
     });
 
-    auto result = sandy::core::sliding_query_key_score_f32(
+    auto result = sliding_query_key_score_calc(
         q, sandy::core::TensorDesc(sandy::core::Shape({1, 3, 2}), sandy::core::DType::F32),
         k, sandy::core::TensorDesc(sandy::core::Shape({1, 3, 2}), sandy::core::DType::F32),
         0);
@@ -524,7 +902,7 @@ TEST(TensorCalcTest, SlidingQueryKeyScoreF32AppliesSlidingWindow) {
         40.0f,
     });
 
-    auto result = sandy::core::sliding_query_key_score_f32(
+    auto result = sliding_query_key_score_calc(
         q, sandy::core::TensorDesc(sandy::core::Shape({1, 4, 1}), sandy::core::DType::F32),
         k, sandy::core::TensorDesc(sandy::core::Shape({1, 4, 1}), sandy::core::DType::F32),
         2);
@@ -564,7 +942,7 @@ TEST(TensorCalcTest, SlidingQueryKeyScoreF32GroupedQueryBatched) {
         20.0f,
     });
 
-    auto result = sandy::core::sliding_query_key_score_f32(
+    auto result = sliding_query_key_score_calc(
         q, sandy::core::TensorDesc(sandy::core::Shape({1, 2, 1, 2}), sandy::core::DType::F32),
         k, sandy::core::TensorDesc(sandy::core::Shape({1, 1, 2, 1}), sandy::core::DType::F32),
         0);
@@ -576,7 +954,7 @@ TEST(TensorCalcTest, SlidingQueryKeyScoreF32GroupedQueryBatched) {
         10.0f, 1.0f,
         20.0f, 2.0f,
     });
-    result = sandy::core::sliding_query_key_score_f32(
+    result = sliding_query_key_score_calc(
         q, sandy::core::TensorDesc(sandy::core::Shape({1, 2, 1, 2}), sandy::core::DType::F32),
         validK, sandy::core::TensorDesc(sandy::core::Shape({1, 1, 2, 2}), sandy::core::DType::F32),
         0);
@@ -600,7 +978,7 @@ TEST(TensorCalcTest, SoftmaxF32LastDim) {
         -std::numeric_limits<float>::infinity(),
     });
 
-    auto result = sandy::core::softmax_f32(
+    auto result = softmax_calc(
         x, sandy::core::TensorDesc(sandy::core::Shape({3, 2}), sandy::core::DType::F32),
         -1);
 
@@ -624,7 +1002,7 @@ TEST(TensorCalcTest, SoftmaxF32MiddleDim) {
         1.0f, 30.0f,
     });
 
-    auto result = sandy::core::softmax_f32(
+    auto result = softmax_calc(
         x, sandy::core::TensorDesc(sandy::core::Shape({1, 3, 2}), sandy::core::DType::F32),
         1);
 
@@ -653,7 +1031,7 @@ TEST(TensorCalcTest, EmbeddingF32WithI32Ids) {
         7.0f, 8.0f,
     });
 
-    auto result = sandy::core::embedding_f32(
+    auto result = embedding_calc(
         ids, sandy::core::TensorDesc(sandy::core::Shape({3}), sandy::core::DType::I32),
         weight, sandy::core::TensorDesc(sandy::core::Shape({4, 2}), sandy::core::DType::F32));
 
@@ -677,7 +1055,7 @@ TEST(TensorCalcTest, EmbeddingF32WithI64IdsKeepsLeadingDims) {
         7.0f, 8.0f,
     });
 
-    auto result = sandy::core::embedding_f32(
+    auto result = embedding_calc(
         ids, sandy::core::TensorDesc(sandy::core::Shape({2, 2}), sandy::core::DType::I64),
         weight, sandy::core::TensorDesc(sandy::core::Shape({4, 2}), sandy::core::DType::F32));
 
@@ -706,7 +1084,7 @@ TEST(TensorCalcTest, RoPEF32AppliesToLastDimForArbitraryRank) {
     setVector(2, {0.0f, 1.0f, 1.0f, 0.0f});
     setVector(7, {2.0f, 0.0f, 0.0f, 2.0f});
 
-    auto result = sandy::core::rope(
+    auto result = rope_calc(
         f32_bytes(values),
         sandy::core::TensorDesc(sandy::core::Shape({2, 2, 3, 4}), sandy::core::DType::F32),
         10000.0f);
@@ -736,12 +1114,35 @@ TEST(TensorCalcTest, RoPEF32AppliesToLastDimForArbitraryRank) {
     EXPECT_NEAR(read_f32(out.data, 31), 2.0f * std::cos(0.01f), 1.0e-6f);
 }
 
+TEST(TensorCalcTest, RoPEBF16UsesTensorRefStorageAccessors) {
+    auto result = rope_calc(
+        bf16_bytes({
+            1.0f, 2.0f, 3.0f, 4.0f,
+            1.0f, 0.0f, 0.0f, 1.0f,
+        }),
+        sandy::core::TensorDesc(sandy::core::Shape({1, 2, 4}), sandy::core::DType::BF16),
+        10000.0f);
+
+    ASSERT_TRUE(result) << result.error();
+    auto out = result.take();
+    EXPECT_EQ(out.desc.shape, sandy::core::Shape({1, 2, 4}));
+    EXPECT_EQ(out.desc.dtype, sandy::core::DType::BF16);
+    EXPECT_FLOAT_EQ(read_bf16(out.data, 0), 1.0f);
+    EXPECT_FLOAT_EQ(read_bf16(out.data, 1), 2.0f);
+    EXPECT_FLOAT_EQ(read_bf16(out.data, 2), 3.0f);
+    EXPECT_FLOAT_EQ(read_bf16(out.data, 3), 4.0f);
+    EXPECT_NEAR(read_bf16(out.data, 4), std::cos(1.0f), 0.003f);
+    EXPECT_NEAR(read_bf16(out.data, 5), std::sin(1.0f), 0.003f);
+    EXPECT_NEAR(read_bf16(out.data, 6), -std::sin(0.01f), 0.003f);
+    EXPECT_NEAR(read_bf16(out.data, 7), std::cos(0.01f), 0.003f);
+}
+
 TEST(TensorCalcTest, RMSNormF32) {
     auto x = f32_bytes({1.0f, 2.0f, 2.0f, 0.0f, 3.0f, 4.0f});
     auto weight = f32_bytes({1.0f, 10.0f, -1.0f});
     constexpr float eps = 1.0e-6f;
 
-    auto result = sandy::core::rms_norm_f32(
+    auto result = rms_norm_calc(
         x, sandy::core::TensorDesc(sandy::core::Shape({2, 3}), sandy::core::DType::F32),
         weight, sandy::core::TensorDesc(sandy::core::Shape({3}), sandy::core::DType::F32),
         eps);
@@ -770,7 +1171,7 @@ TEST(TensorCalcTest, RMSNormF32Rank3NormalizesLastDim) {
     auto weight = f32_bytes({2.0f, -1.0f});
     constexpr float eps = 1.0e-6f;
 
-    auto result = sandy::core::rms_norm_f32(
+    auto result = rms_norm_calc(
         x, sandy::core::TensorDesc(sandy::core::Shape({2, 2, 2}), sandy::core::DType::F32),
         weight, sandy::core::TensorDesc(sandy::core::Shape({2}), sandy::core::DType::F32),
         eps);
@@ -799,7 +1200,7 @@ TEST(TensorCalcTest, LayerNormF32Rank3NormalizesLastDimWithBias) {
     auto bias = f32_bytes({0.5f, 10.0f});
     constexpr float eps = 1.0e-5f;
 
-    auto result = sandy::core::layer_norm_f32(
+    auto result = layer_norm_calc(
         x, sandy::core::TensorDesc(sandy::core::Shape({2, 2, 2}), sandy::core::DType::F32),
         weight, sandy::core::TensorDesc(sandy::core::Shape({2}), sandy::core::DType::F32),
         bias, sandy::core::TensorDesc(sandy::core::Shape({2}), sandy::core::DType::F32),

@@ -36,6 +36,7 @@ public:
 
     const core::TensorDesc& desc() const override { return desc_; }
     std::span<const uint8_t> data() const override { return data_; }
+    std::span<uint8_t> mutable_data() { return data_; }
 
 private:
     core::TensorDesc desc_;
@@ -46,6 +47,7 @@ class CpuBufferStore {
 public:
     size_t add_external(const BackendBuffer* buffer) {
         buffers_.push_back(buffer);
+        mutableBuffers_.push_back(nullptr);
         return buffers_.size() - 1;
     }
 
@@ -53,6 +55,7 @@ public:
         auto* ptr = buffer.get();
         owned_.push_back(std::move(buffer));
         buffers_.push_back(ptr);
+        mutableBuffers_.push_back(ptr);
         return buffers_.size() - 1;
     }
 
@@ -64,8 +67,17 @@ public:
         return *buffers_[id];
     }
 
+    CpuBackendBuffer& get_mutable(size_t id) {
+        if (id >= mutableBuffers_.size() || mutableBuffers_[id] == nullptr) {
+            fprintf(stderr, "cpu buffer id is not mutable: %zu\n", id);
+            abort();
+        }
+        return *mutableBuffers_[id];
+    }
+
 private:
     std::vector<const BackendBuffer*> buffers_;
+    std::vector<CpuBackendBuffer*> mutableBuffers_;
     std::vector<std::unique_ptr<CpuBackendBuffer>> owned_;
 };
 
@@ -155,19 +167,6 @@ Result<TensorRef> lookup_value(
     return it->second;
 }
 
-std::unique_ptr<CpuBackendBuffer> make_cpu_buffer(core::OwnedTensor tensor) {
-    return std::make_unique<CpuBackendBuffer>(
-        std::move(tensor.desc), std::move(tensor.data));
-}
-
-std::unique_ptr<CpuBackendBuffer> make_constant_buffer(float value) {
-    std::vector<uint8_t> data(sizeof(float));
-    std::memcpy(data.data(), &value, sizeof(float));
-    return std::make_unique<CpuBackendBuffer>(
-        core::TensorDesc(core::Shape({}), core::DType::F32),
-        std::move(data));
-}
-
 Result<void> bind_single_result(
         const ir::mid_ir::Op& op,
         TensorRef ref,
@@ -178,19 +177,61 @@ Result<void> bind_single_result(
     return {};
 }
 
-Result<void> bind_owned_result(
-        const ir::mid_ir::Op& op,
-        core::OwnedTensor tensor,
-        CpuBufferStore& store,
-        ValueMap& values) {
-    auto bufferId = store.add_owned(make_cpu_buffer(std::move(tensor)));
-    return bind_single_result(op, make_ref(bufferId, store.get(bufferId).desc()), values);
+bool op_allocates_result(ir::mid_ir::OpKind kind) {
+    switch (kind) {
+        case ir::mid_ir::OpKind::Input:
+        case ir::mid_ir::OpKind::Weight:
+        case ir::mid_ir::OpKind::Reshape:
+        case ir::mid_ir::OpKind::NUM_KINDS:
+            return false;
+        default:
+            return true;
+    }
 }
 
-Result<core::OwnedTensor> eval_linear(
+Result<core::TensorDesc> single_result_desc(const ir::mid_ir::Op& op) {
+    if (op.results.size() != 1)
+        return make_error("cpu interpreter expects single-result ops");
+    return core::TensorDesc(op.results[0]->shape, op.results[0]->dtype);
+}
+
+Result<core::TensorRef> calc_ref(const CpuBufferStore& store, const TensorRef& ref) {
+    return core::make_tensor_ref(ref.desc, ref_data(store, ref));
+}
+
+Result<core::MutableTensorRef> mutable_calc_ref(CpuBufferStore& store, const TensorRef& ref) {
+    auto& buffer = store.get_mutable(ref.bufferId);
+    return core::make_mutable_tensor_ref(ref.desc, buffer.mutable_data());
+}
+
+Result<void> preallocate_results(
+        const ir::mid_ir::Graph& graph,
+        CpuBufferStore& store,
+        ValueMap& allocations) {
+    for (auto* op : graph.entry()->ops) {
+        if (!op_allocates_result(op->kind))
+            continue;
+
+        auto desc = single_result_desc(*op);
+        if (!desc) return make_error(desc.error());
+
+        int64_t numel = desc->shape.numel();
+        if (numel < 0)
+            return make_error("cpu interpreter result must have static shape");
+
+        std::vector<uint8_t> data(static_cast<size_t>(numel) * core::dtype_size(desc->dtype));
+        auto bufferId = store.add_owned(
+            std::make_unique<CpuBackendBuffer>(desc.take(), std::move(data)));
+        allocations[op->results[0]] = make_ref(bufferId, store.get(bufferId).desc());
+    }
+    return {};
+}
+
+Result<TensorRef> eval_linear(
         const ir::mid_ir::Op& op,
         const ValueMap& values,
-        const CpuBufferStore& store) {
+        const ValueMap& allocations,
+        CpuBufferStore& store) {
     if (op.operands.size() != 3)
         return make_error("linear expects three operands");
 
@@ -201,29 +242,48 @@ Result<core::OwnedTensor> eval_linear(
     auto bias = lookup_value(values, op.operands[2]);
     if (!bias) return make_error(bias.error());
 
-    return core::linear(
-        ref_data(store, *x), x->desc,
-        ref_data(store, *weight), weight->desc,
-        ref_data(store, *bias), bias->desc);
+    auto out = lookup_value(allocations, op.results[0]);
+    if (!out) return make_error(out.error());
+    auto xRef = calc_ref(store, *x);
+    if (!xRef) return make_error(xRef.error());
+    auto weightRef = calc_ref(store, *weight);
+    if (!weightRef) return make_error(weightRef.error());
+    auto biasRef = calc_ref(store, *bias);
+    if (!biasRef) return make_error(biasRef.error());
+    auto outRef = mutable_calc_ref(store, *out);
+    if (!outRef) return make_error(outRef.error());
+    auto result = core::linear(*xRef, *weightRef, *biasRef, *outRef);
+    if (!result) return make_error(result.error());
+    return out.take();
 }
 
-Result<core::OwnedTensor> eval_relu(
+Result<TensorRef> eval_relu(
         const ir::mid_ir::Op& op,
         const ValueMap& values,
-        const CpuBufferStore& store) {
+        const ValueMap& allocations,
+        CpuBufferStore& store) {
     if (op.operands.size() != 1)
         return make_error("relu expects one operand");
 
     auto x = lookup_value(values, op.operands[0]);
     if (!x) return make_error(x.error());
 
-    return core::relu(ref_data(store, *x), x->desc);
+    auto out = lookup_value(allocations, op.results[0]);
+    if (!out) return make_error(out.error());
+    auto xRef = calc_ref(store, *x);
+    if (!xRef) return make_error(xRef.error());
+    auto outRef = mutable_calc_ref(store, *out);
+    if (!outRef) return make_error(outRef.error());
+    auto result = core::relu(*xRef, *outRef);
+    if (!result) return make_error(result.error());
+    return out.take();
 }
 
-Result<core::OwnedTensor> eval_add(
+Result<TensorRef> eval_add(
         const ir::mid_ir::Op& op,
         const ValueMap& values,
-        const CpuBufferStore& store) {
+        const ValueMap& allocations,
+        CpuBufferStore& store) {
     if (op.operands.size() != 2)
         return make_error("add expects two operands");
 
@@ -232,15 +292,24 @@ Result<core::OwnedTensor> eval_add(
     auto rhs = lookup_value(values, op.operands[1]);
     if (!rhs) return make_error(rhs.error());
 
-    return core::add(
-        ref_data(store, *lhs), lhs->desc,
-        ref_data(store, *rhs), rhs->desc);
+    auto out = lookup_value(allocations, op.results[0]);
+    if (!out) return make_error(out.error());
+    auto lhsRef = calc_ref(store, *lhs);
+    if (!lhsRef) return make_error(lhsRef.error());
+    auto rhsRef = calc_ref(store, *rhs);
+    if (!rhsRef) return make_error(rhsRef.error());
+    auto outRef = mutable_calc_ref(store, *out);
+    if (!outRef) return make_error(outRef.error());
+    auto result = core::add(*lhsRef, *rhsRef, *outRef);
+    if (!result) return make_error(result.error());
+    return out.take();
 }
 
-Result<core::OwnedTensor> eval_mul(
+Result<TensorRef> eval_mul(
         const ir::mid_ir::Op& op,
         const ValueMap& values,
-        const CpuBufferStore& store) {
+        const ValueMap& allocations,
+        CpuBufferStore& store) {
     if (op.operands.size() != 2)
         return make_error("mul expects two operands");
 
@@ -249,41 +318,68 @@ Result<core::OwnedTensor> eval_mul(
     auto rhs = lookup_value(values, op.operands[1]);
     if (!rhs) return make_error(rhs.error());
 
-    return core::mul(
-        ref_data(store, *lhs), lhs->desc,
-        ref_data(store, *rhs), rhs->desc);
+    auto out = lookup_value(allocations, op.results[0]);
+    if (!out) return make_error(out.error());
+    auto lhsRef = calc_ref(store, *lhs);
+    if (!lhsRef) return make_error(lhsRef.error());
+    auto rhsRef = calc_ref(store, *rhs);
+    if (!rhsRef) return make_error(rhsRef.error());
+    auto outRef = mutable_calc_ref(store, *out);
+    if (!outRef) return make_error(outRef.error());
+    auto result = core::mul(*lhsRef, *rhsRef, *outRef);
+    if (!result) return make_error(result.error());
+    return out.take();
 }
 
-Result<core::OwnedTensor> eval_sqrt(
+Result<TensorRef> eval_sqrt(
         const ir::mid_ir::Op& op,
         const ValueMap& values,
-        const CpuBufferStore& store) {
+        const ValueMap& allocations,
+        CpuBufferStore& store) {
     if (op.operands.size() != 1)
         return make_error("sqrt expects one operand");
 
     auto x = lookup_value(values, op.operands[0]);
     if (!x) return make_error(x.error());
 
-    return core::sqrt(ref_data(store, *x), x->desc);
+    auto out = lookup_value(allocations, op.results[0]);
+    if (!out) return make_error(out.error());
+    auto xRef = calc_ref(store, *x);
+    if (!xRef) return make_error(xRef.error());
+    auto outRef = mutable_calc_ref(store, *out);
+    if (!outRef) return make_error(outRef.error());
+    auto result = core::sqrt(*xRef, *outRef);
+    if (!result) return make_error(result.error());
+    return out.take();
 }
 
-Result<core::OwnedTensor> eval_tanh(
+Result<TensorRef> eval_tanh(
         const ir::mid_ir::Op& op,
         const ValueMap& values,
-        const CpuBufferStore& store) {
+        const ValueMap& allocations,
+        CpuBufferStore& store) {
     if (op.operands.size() != 1)
         return make_error("tanh expects one operand");
 
     auto x = lookup_value(values, op.operands[0]);
     if (!x) return make_error(x.error());
 
-    return core::tanh(ref_data(store, *x), x->desc);
+    auto out = lookup_value(allocations, op.results[0]);
+    if (!out) return make_error(out.error());
+    auto xRef = calc_ref(store, *x);
+    if (!xRef) return make_error(xRef.error());
+    auto outRef = mutable_calc_ref(store, *out);
+    if (!outRef) return make_error(outRef.error());
+    auto result = core::tanh(*xRef, *outRef);
+    if (!result) return make_error(result.error());
+    return out.take();
 }
 
-Result<core::OwnedTensor> eval_matmul(
+Result<TensorRef> eval_matmul(
         const ir::mid_ir::Op& op,
         const ValueMap& values,
-        const CpuBufferStore& store) {
+        const ValueMap& allocations,
+        CpuBufferStore& store) {
     if (op.operands.size() != 2)
         return make_error("matmul expects two operands");
 
@@ -292,22 +388,39 @@ Result<core::OwnedTensor> eval_matmul(
     auto rhs = lookup_value(values, op.operands[1]);
     if (!rhs) return make_error(rhs.error());
 
-    return core::matmul(
-        ref_data(store, *lhs), lhs->desc,
-        ref_data(store, *rhs), rhs->desc);
+    auto out = lookup_value(allocations, op.results[0]);
+    if (!out) return make_error(out.error());
+    auto lhsRef = calc_ref(store, *lhs);
+    if (!lhsRef) return make_error(lhsRef.error());
+    auto rhsRef = calc_ref(store, *rhs);
+    if (!rhsRef) return make_error(rhsRef.error());
+    auto outRef = mutable_calc_ref(store, *out);
+    if (!outRef) return make_error(outRef.error());
+    auto result = core::matmul(*lhsRef, *rhsRef, *outRef);
+    if (!result) return make_error(result.error());
+    return out.take();
 }
 
-Result<core::OwnedTensor> eval_transpose(
+Result<TensorRef> eval_transpose(
         const ir::mid_ir::Op& op,
         const ValueMap& values,
-        const CpuBufferStore& store) {
+        const ValueMap& allocations,
+        CpuBufferStore& store) {
     if (op.operands.size() != 1)
         return make_error("transpose expects one operand");
 
     auto x = lookup_value(values, op.operands[0]);
     if (!x) return make_error(x.error());
 
-    return core::transpose(ref_data(store, *x), x->desc);
+    auto out = lookup_value(allocations, op.results[0]);
+    if (!out) return make_error(out.error());
+    auto xRef = calc_ref(store, *x);
+    if (!xRef) return make_error(xRef.error());
+    auto outRef = mutable_calc_ref(store, *out);
+    if (!outRef) return make_error(outRef.error());
+    auto result = core::transpose(*xRef, *outRef);
+    if (!result) return make_error(result.error());
+    return out.take();
 }
 
 Result<TensorRef> eval_reshape(
@@ -328,10 +441,11 @@ Result<TensorRef> eval_reshape(
     return make_ref(x->bufferId, std::move(desc));
 }
 
-Result<core::OwnedTensor> eval_permute(
+Result<TensorRef> eval_permute(
         const ir::mid_ir::Op& op,
         const ValueMap& values,
-        const CpuBufferStore& store) {
+        const ValueMap& allocations,
+        CpuBufferStore& store) {
     if (op.operands.size() != 1)
         return make_error("permute expects one operand");
 
@@ -339,13 +453,22 @@ Result<core::OwnedTensor> eval_permute(
     if (!x) return make_error(x.error());
 
     auto dims = attr_int_list(op, "dims");
-    return core::permute(ref_data(store, *x), x->desc, dims);
+    auto out = lookup_value(allocations, op.results[0]);
+    if (!out) return make_error(out.error());
+    auto xRef = calc_ref(store, *x);
+    if (!xRef) return make_error(xRef.error());
+    auto outRef = mutable_calc_ref(store, *out);
+    if (!outRef) return make_error(outRef.error());
+    auto result = core::permute(*xRef, dims, *outRef);
+    if (!result) return make_error(result.error());
+    return out.take();
 }
 
-Result<core::OwnedTensor> eval_sliding_query_key_score(
+Result<TensorRef> eval_sliding_query_key_score(
         const ir::mid_ir::Op& op,
         const ValueMap& values,
-        const CpuBufferStore& store) {
+        const ValueMap& allocations,
+        CpuBufferStore& store) {
     if (op.operands.size() != 2)
         return make_error("sliding_query_key_score expects two operands");
 
@@ -354,29 +477,47 @@ Result<core::OwnedTensor> eval_sliding_query_key_score(
     auto k = lookup_value(values, op.operands[1]);
     if (!k) return make_error(k.error());
 
-    return core::sliding_query_key_score(
-        ref_data(store, *q), q->desc,
-        ref_data(store, *k), k->desc,
-        attr_int_or(op, "window", 0));
+    auto out = lookup_value(allocations, op.results[0]);
+    if (!out) return make_error(out.error());
+    auto qRef = calc_ref(store, *q);
+    if (!qRef) return make_error(qRef.error());
+    auto kRef = calc_ref(store, *k);
+    if (!kRef) return make_error(kRef.error());
+    auto outRef = mutable_calc_ref(store, *out);
+    if (!outRef) return make_error(outRef.error());
+    auto result = core::sliding_query_key_score(
+        *qRef, *kRef, attr_int_or(op, "window", 0), *outRef);
+    if (!result) return make_error(result.error());
+    return out.take();
 }
 
-Result<core::OwnedTensor> eval_softmax(
+Result<TensorRef> eval_softmax(
         const ir::mid_ir::Op& op,
         const ValueMap& values,
-        const CpuBufferStore& store) {
+        const ValueMap& allocations,
+        CpuBufferStore& store) {
     if (op.operands.size() != 1)
         return make_error("softmax expects one operand");
 
     auto x = lookup_value(values, op.operands[0]);
     if (!x) return make_error(x.error());
 
-    return core::softmax(ref_data(store, *x), x->desc, attr_int_or(op, "dim", -1));
+    auto out = lookup_value(allocations, op.results[0]);
+    if (!out) return make_error(out.error());
+    auto xRef = calc_ref(store, *x);
+    if (!xRef) return make_error(xRef.error());
+    auto outRef = mutable_calc_ref(store, *out);
+    if (!outRef) return make_error(outRef.error());
+    auto result = core::softmax(*xRef, attr_int_or(op, "dim", -1), *outRef);
+    if (!result) return make_error(result.error());
+    return out.take();
 }
 
-Result<core::OwnedTensor> eval_embedding(
+Result<TensorRef> eval_embedding(
         const ir::mid_ir::Op& op,
         const ValueMap& values,
-        const CpuBufferStore& store) {
+        const ValueMap& allocations,
+        CpuBufferStore& store) {
     if (op.operands.size() != 2)
         return make_error("embedding expects two operands");
 
@@ -385,30 +526,46 @@ Result<core::OwnedTensor> eval_embedding(
     auto weight = lookup_value(values, op.operands[1]);
     if (!weight) return make_error(weight.error());
 
-    return core::embedding(
-        ref_data(store, *ids), ids->desc,
-        ref_data(store, *weight), weight->desc);
+    auto out = lookup_value(allocations, op.results[0]);
+    if (!out) return make_error(out.error());
+    auto idsRef = calc_ref(store, *ids);
+    if (!idsRef) return make_error(idsRef.error());
+    auto weightRef = calc_ref(store, *weight);
+    if (!weightRef) return make_error(weightRef.error());
+    auto outRef = mutable_calc_ref(store, *out);
+    if (!outRef) return make_error(outRef.error());
+    auto result = core::embedding(*idsRef, *weightRef, *outRef);
+    if (!result) return make_error(result.error());
+    return out.take();
 }
 
-Result<core::OwnedTensor> eval_rope(
+Result<TensorRef> eval_rope(
         const ir::mid_ir::Op& op,
         const ValueMap& values,
-        const CpuBufferStore& store) {
+        const ValueMap& allocations,
+        CpuBufferStore& store) {
     if (op.operands.size() != 1)
         return make_error("rope expects one operand");
 
     auto x = lookup_value(values, op.operands[0]);
     if (!x) return make_error(x.error());
 
-    return core::rope(
-        ref_data(store, *x), x->desc,
-        attr_float_or(op, "rope_theta", 10000.0f));
+    auto out = lookup_value(allocations, op.results[0]);
+    if (!out) return make_error(out.error());
+    auto xRef = calc_ref(store, *x);
+    if (!xRef) return make_error(xRef.error());
+    auto outRef = mutable_calc_ref(store, *out);
+    if (!outRef) return make_error(outRef.error());
+    auto result = core::rope(*xRef, attr_float_or(op, "rope_theta", 10000.0f), *outRef);
+    if (!result) return make_error(result.error());
+    return out.take();
 }
 
-Result<core::OwnedTensor> eval_rms_norm(
+Result<TensorRef> eval_rms_norm(
         const ir::mid_ir::Op& op,
         const ValueMap& values,
-        const CpuBufferStore& store) {
+        const ValueMap& allocations,
+        CpuBufferStore& store) {
     if (op.operands.size() != 2)
         return make_error("rms_norm expects two operands");
 
@@ -417,16 +574,25 @@ Result<core::OwnedTensor> eval_rms_norm(
     auto weight = lookup_value(values, op.operands[1]);
     if (!weight) return make_error(weight.error());
 
-    return core::rms_norm(
-        ref_data(store, *x), x->desc,
-        ref_data(store, *weight), weight->desc,
-        attr_float_or(op, "epsilon", 1.0e-6f));
+    auto out = lookup_value(allocations, op.results[0]);
+    if (!out) return make_error(out.error());
+    auto xRef = calc_ref(store, *x);
+    if (!xRef) return make_error(xRef.error());
+    auto weightRef = calc_ref(store, *weight);
+    if (!weightRef) return make_error(weightRef.error());
+    auto outRef = mutable_calc_ref(store, *out);
+    if (!outRef) return make_error(outRef.error());
+    auto result = core::rms_norm(
+        *xRef, *weightRef, attr_float_or(op, "epsilon", 1.0e-6f), *outRef);
+    if (!result) return make_error(result.error());
+    return out.take();
 }
 
-Result<core::OwnedTensor> eval_layer_norm(
+Result<TensorRef> eval_layer_norm(
         const ir::mid_ir::Op& op,
         const ValueMap& values,
-        const CpuBufferStore& store) {
+        const ValueMap& allocations,
+        CpuBufferStore& store) {
     if (op.operands.size() != 3)
         return make_error("layer_norm expects three operands");
 
@@ -437,11 +603,20 @@ Result<core::OwnedTensor> eval_layer_norm(
     auto bias = lookup_value(values, op.operands[2]);
     if (!bias) return make_error(bias.error());
 
-    return core::layer_norm(
-        ref_data(store, *x), x->desc,
-        ref_data(store, *weight), weight->desc,
-        ref_data(store, *bias), bias->desc,
-        attr_float_or(op, "epsilon", 1.0e-5f));
+    auto out = lookup_value(allocations, op.results[0]);
+    if (!out) return make_error(out.error());
+    auto xRef = calc_ref(store, *x);
+    if (!xRef) return make_error(xRef.error());
+    auto weightRef = calc_ref(store, *weight);
+    if (!weightRef) return make_error(weightRef.error());
+    auto biasRef = calc_ref(store, *bias);
+    if (!biasRef) return make_error(biasRef.error());
+    auto outRef = mutable_calc_ref(store, *out);
+    if (!outRef) return make_error(outRef.error());
+    auto result = core::layer_norm(
+        *xRef, *weightRef, *biasRef, attr_float_or(op, "epsilon", 1.0e-5f), *outRef);
+    if (!result) return make_error(result.error());
+    return out.take();
 }
 
 Result<void> copy_output(BackendBufferMap& outputs,
@@ -462,7 +637,11 @@ Result<BackendRunResult> interpret_graph(
         BackendBufferMap inputs,
         BackendBufferMap weights) {
     ValueMap values;
+    ValueMap allocations;
     CpuBufferStore store;
+
+    auto allocate = preallocate_results(graph, store, allocations);
+    if (!allocate) return make_error(allocate.error());
 
     for (auto* op : graph.entry()->ops) {
         switch (op->kind) {
@@ -487,66 +666,69 @@ Result<BackendRunResult> interpret_graph(
                 break;
             }
             case ir::mid_ir::OpKind::Constant: {
-                auto bufferId = store.add_owned(
-                    make_constant_buffer(attr_float_or(*op, "value", 0.0f)));
+                auto ref = lookup_value(allocations, op->results[0]);
+                if (!ref) return make_error(ref.error());
+                auto outRef = mutable_calc_ref(store, *ref);
+                if (!outRef) return make_error(outRef.error());
+                outRef->store_float(0, attr_float_or(*op, "value", 0.0f));
                 auto bind = bind_single_result(
-                    *op, make_ref(bufferId, store.get(bufferId).desc()), values);
+                    *op, ref.take(), values);
                 if (!bind) return make_error(bind.error());
                 break;
             }
             case ir::mid_ir::OpKind::Linear: {
-                auto tensor = eval_linear(*op, values, store);
+                auto tensor = eval_linear(*op, values, allocations, store);
                 if (!tensor) return make_error(tensor.error());
-                auto bind = bind_owned_result(*op, tensor.take(), store, values);
+                auto bind = bind_single_result(*op, tensor.take(), values);
                 if (!bind) return make_error(bind.error());
                 break;
             }
             case ir::mid_ir::OpKind::ReLU: {
-                auto tensor = eval_relu(*op, values, store);
+                auto tensor = eval_relu(*op, values, allocations, store);
                 if (!tensor) return make_error(tensor.error());
-                auto bind = bind_owned_result(*op, tensor.take(), store, values);
+                auto bind = bind_single_result(*op, tensor.take(), values);
                 if (!bind) return make_error(bind.error());
                 break;
             }
             case ir::mid_ir::OpKind::Add: {
-                auto tensor = eval_add(*op, values, store);
+                auto tensor = eval_add(*op, values, allocations, store);
                 if (!tensor) return make_error(tensor.error());
-                auto bind = bind_owned_result(*op, tensor.take(), store, values);
+                auto bind = bind_single_result(*op, tensor.take(), values);
                 if (!bind) return make_error(bind.error());
                 break;
             }
             case ir::mid_ir::OpKind::Mul: {
-                auto tensor = eval_mul(*op, values, store);
+                auto tensor = eval_mul(*op, values, allocations, store);
                 if (!tensor) return make_error(tensor.error());
-                auto bind = bind_owned_result(*op, tensor.take(), store, values);
+                auto bind = bind_single_result(*op, tensor.take(), values);
                 if (!bind) return make_error(bind.error());
                 break;
             }
             case ir::mid_ir::OpKind::Sqrt: {
-                auto tensor = eval_sqrt(*op, values, store);
+                auto tensor = eval_sqrt(*op, values, allocations, store);
                 if (!tensor) return make_error(tensor.error());
-                auto bind = bind_owned_result(*op, tensor.take(), store, values);
+                auto bind = bind_single_result(*op, tensor.take(), values);
                 if (!bind) return make_error(bind.error());
                 break;
             }
             case ir::mid_ir::OpKind::Tanh: {
-                auto tensor = eval_tanh(*op, values, store);
+                auto tensor = eval_tanh(*op, values, allocations, store);
                 if (!tensor) return make_error(tensor.error());
-                auto bind = bind_owned_result(*op, tensor.take(), store, values);
+                auto bind = bind_single_result(*op, tensor.take(), values);
                 if (!bind) return make_error(bind.error());
                 break;
             }
             case ir::mid_ir::OpKind::MatMul: {
-                auto tensor = eval_matmul(*op, values, store);
+                auto tensor = eval_matmul(*op, values, allocations, store);
                 if (!tensor) return make_error(tensor.error());
-                auto bind = bind_owned_result(*op, tensor.take(), store, values);
+                auto bind = bind_single_result(*op, tensor.take(), values);
                 if (!bind) return make_error(bind.error());
                 break;
             }
             case ir::mid_ir::OpKind::Transpose: {
-                auto tensor = eval_transpose(*op, values, store);
+                auto tensor = eval_transpose(*op, values, allocations, store);
                 if (!tensor) return make_error(tensor.error());
-                auto bind = bind_owned_result(*op, tensor.take(), store, values);
+                auto bind = bind_single_result(*op, tensor.take(), values);
                 if (!bind) return make_error(bind.error());
                 break;
             }
@@ -558,51 +740,51 @@ Result<BackendRunResult> interpret_graph(
                 break;
             }
             case ir::mid_ir::OpKind::Permute: {
-                auto tensor = eval_permute(*op, values, store);
+                auto tensor = eval_permute(*op, values, allocations, store);
                 if (!tensor) return make_error(tensor.error());
-                auto bind = bind_owned_result(*op, tensor.take(), store, values);
+                auto bind = bind_single_result(*op, tensor.take(), values);
                 if (!bind) return make_error(bind.error());
                 break;
             }
             case ir::mid_ir::OpKind::SlidingQueryKeyScore: {
-                auto tensor = eval_sliding_query_key_score(*op, values, store);
+                auto tensor = eval_sliding_query_key_score(*op, values, allocations, store);
                 if (!tensor) return make_error(tensor.error());
-                auto bind = bind_owned_result(*op, tensor.take(), store, values);
+                auto bind = bind_single_result(*op, tensor.take(), values);
                 if (!bind) return make_error(bind.error());
                 break;
             }
             case ir::mid_ir::OpKind::Softmax: {
-                auto tensor = eval_softmax(*op, values, store);
+                auto tensor = eval_softmax(*op, values, allocations, store);
                 if (!tensor) return make_error(tensor.error());
-                auto bind = bind_owned_result(*op, tensor.take(), store, values);
+                auto bind = bind_single_result(*op, tensor.take(), values);
                 if (!bind) return make_error(bind.error());
                 break;
             }
             case ir::mid_ir::OpKind::Embedding: {
-                auto tensor = eval_embedding(*op, values, store);
+                auto tensor = eval_embedding(*op, values, allocations, store);
                 if (!tensor) return make_error(tensor.error());
-                auto bind = bind_owned_result(*op, tensor.take(), store, values);
+                auto bind = bind_single_result(*op, tensor.take(), values);
                 if (!bind) return make_error(bind.error());
                 break;
             }
             case ir::mid_ir::OpKind::RoPE: {
-                auto tensor = eval_rope(*op, values, store);
+                auto tensor = eval_rope(*op, values, allocations, store);
                 if (!tensor) return make_error(tensor.error());
-                auto bind = bind_owned_result(*op, tensor.take(), store, values);
+                auto bind = bind_single_result(*op, tensor.take(), values);
                 if (!bind) return make_error(bind.error());
                 break;
             }
             case ir::mid_ir::OpKind::RMSNorm: {
-                auto tensor = eval_rms_norm(*op, values, store);
+                auto tensor = eval_rms_norm(*op, values, allocations, store);
                 if (!tensor) return make_error(tensor.error());
-                auto bind = bind_owned_result(*op, tensor.take(), store, values);
+                auto bind = bind_single_result(*op, tensor.take(), values);
                 if (!bind) return make_error(bind.error());
                 break;
             }
             case ir::mid_ir::OpKind::LayerNorm: {
-                auto tensor = eval_layer_norm(*op, values, store);
+                auto tensor = eval_layer_norm(*op, values, allocations, store);
                 if (!tensor) return make_error(tensor.error());
-                auto bind = bind_owned_result(*op, tensor.take(), store, values);
+                auto bind = bind_single_result(*op, tensor.take(), values);
                 if (!bind) return make_error(bind.error());
                 break;
             }

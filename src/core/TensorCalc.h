@@ -5,190 +5,65 @@
 
 #include <cstdint>
 #include <span>
-#include <vector>
 
 namespace sandy::core {
 
-struct OwnedTensor {
+struct TensorRef {
+    using LoadFloatFn = float (*)(std::span<const uint8_t>, size_t);
+
     TensorDesc desc;
-    std::vector<uint8_t> data;
+    std::span<const uint8_t> bytes;
+    LoadFloatFn loadFloat = nullptr;
+
+    float load_float(size_t index) const { return loadFloat(bytes, index); }
 };
 
-Result<OwnedTensor> linear(
-    std::span<const uint8_t> x,
-    const TensorDesc& xDesc,
-    std::span<const uint8_t> weight,
-    const TensorDesc& weightDesc,
-    std::span<const uint8_t> bias,
-    const TensorDesc& biasDesc);
+struct MutableTensorRef {
+    using LoadFloatFn = float (*)(std::span<const uint8_t>, size_t);
+    using StoreFloatFn = void (*)(std::span<uint8_t>, size_t, float);
 
-Result<OwnedTensor> linear_f32(
-    std::span<const uint8_t> x,
-    const TensorDesc& xDesc,
-    std::span<const uint8_t> weight,
-    const TensorDesc& weightDesc,
-    std::span<const uint8_t> bias,
-    const TensorDesc& biasDesc);
+    TensorDesc desc;
+    std::span<uint8_t> bytes;
+    LoadFloatFn loadFloat = nullptr;
+    StoreFloatFn storeFloat = nullptr;
 
-Result<OwnedTensor> relu(
-    std::span<const uint8_t> x,
-    const TensorDesc& xDesc);
+    float load_float(size_t index) const { return loadFloat(bytes, index); }
+    void store_float(size_t index, float value) const {
+        storeFloat(bytes, index, value);
+    }
+};
 
-Result<OwnedTensor> relu_f32(
-    std::span<const uint8_t> x,
-    const TensorDesc& xDesc);
+Result<TensorRef> make_tensor_ref(TensorDesc desc, std::span<const uint8_t> bytes);
+Result<MutableTensorRef> make_mutable_tensor_ref(TensorDesc desc, std::span<uint8_t> bytes);
 
-Result<OwnedTensor> add(
-    std::span<const uint8_t> lhs,
-    const TensorDesc& lhsDesc,
-    std::span<const uint8_t> rhs,
-    const TensorDesc& rhsDesc);
+Result<void> linear(
+    TensorRef x,
+    TensorRef weight,
+    TensorRef bias,
+    MutableTensorRef out);
 
-Result<OwnedTensor> add_f32(
-    std::span<const uint8_t> lhs,
-    const TensorDesc& lhsDesc,
-    std::span<const uint8_t> rhs,
-    const TensorDesc& rhsDesc);
-
-Result<OwnedTensor> mul(
-    std::span<const uint8_t> lhs,
-    const TensorDesc& lhsDesc,
-    std::span<const uint8_t> rhs,
-    const TensorDesc& rhsDesc);
-
-Result<OwnedTensor> mul_f32(
-    std::span<const uint8_t> lhs,
-    const TensorDesc& lhsDesc,
-    std::span<const uint8_t> rhs,
-    const TensorDesc& rhsDesc);
-
-Result<OwnedTensor> sqrt(
-    std::span<const uint8_t> x,
-    const TensorDesc& xDesc);
-
-Result<OwnedTensor> sqrt_f32(
-    std::span<const uint8_t> x,
-    const TensorDesc& xDesc);
-
-Result<OwnedTensor> tanh(
-    std::span<const uint8_t> x,
-    const TensorDesc& xDesc);
-
-Result<OwnedTensor> tanh_f32(
-    std::span<const uint8_t> x,
-    const TensorDesc& xDesc);
-
-Result<OwnedTensor> matmul(
-    std::span<const uint8_t> lhs,
-    const TensorDesc& lhsDesc,
-    std::span<const uint8_t> rhs,
-    const TensorDesc& rhsDesc);
-
-Result<OwnedTensor> matmul_f32(
-    std::span<const uint8_t> lhs,
-    const TensorDesc& lhsDesc,
-    std::span<const uint8_t> rhs,
-    const TensorDesc& rhsDesc);
-
-Result<OwnedTensor> transpose(
-    std::span<const uint8_t> x,
-    const TensorDesc& xDesc);
-
-Result<OwnedTensor> transpose_f32(
-    std::span<const uint8_t> x,
-    const TensorDesc& xDesc);
-
-Result<OwnedTensor> reshape(
-    std::span<const uint8_t> x,
-    const TensorDesc& xDesc,
-    Shape shape);
-
-Result<OwnedTensor> reshape_f32(
-    std::span<const uint8_t> x,
-    const TensorDesc& xDesc,
-    Shape shape);
-
-Result<OwnedTensor> permute(
-    std::span<const uint8_t> x,
-    const TensorDesc& xDesc,
-    std::span<const int64_t> dims);
-
-Result<OwnedTensor> permute_f32(
-    std::span<const uint8_t> x,
-    const TensorDesc& xDesc,
-    std::span<const int64_t> dims);
-
-Result<OwnedTensor> sliding_query_key_score(
-    std::span<const uint8_t> q,
-    const TensorDesc& qDesc,
-    std::span<const uint8_t> k,
-    const TensorDesc& kDesc,
-    int64_t window);
-
-Result<OwnedTensor> sliding_query_key_score_f32(
-    std::span<const uint8_t> q,
-    const TensorDesc& qDesc,
-    std::span<const uint8_t> k,
-    const TensorDesc& kDesc,
-    int64_t window);
-
-Result<OwnedTensor> softmax(
-    std::span<const uint8_t> x,
-    const TensorDesc& xDesc,
-    int64_t dim);
-
-Result<OwnedTensor> softmax_f32(
-    std::span<const uint8_t> x,
-    const TensorDesc& xDesc,
-    int64_t dim);
-
-Result<OwnedTensor> embedding(
-    std::span<const uint8_t> ids,
-    const TensorDesc& idsDesc,
-    std::span<const uint8_t> weight,
-    const TensorDesc& weightDesc);
-
-Result<OwnedTensor> embedding_f32(
-    std::span<const uint8_t> ids,
-    const TensorDesc& idsDesc,
-    std::span<const uint8_t> weight,
-    const TensorDesc& weightDesc);
-
-Result<OwnedTensor> rope(
-    std::span<const uint8_t> x,
-    const TensorDesc& xDesc,
-    float theta);
-
-Result<OwnedTensor> rms_norm(
-    std::span<const uint8_t> x,
-    const TensorDesc& xDesc,
-    std::span<const uint8_t> weight,
-    const TensorDesc& weightDesc,
-    float epsilon);
-
-Result<OwnedTensor> rms_norm_f32(
-    std::span<const uint8_t> x,
-    const TensorDesc& xDesc,
-    std::span<const uint8_t> weight,
-    const TensorDesc& weightDesc,
-    float epsilon);
-
-Result<OwnedTensor> layer_norm(
-    std::span<const uint8_t> x,
-    const TensorDesc& xDesc,
-    std::span<const uint8_t> weight,
-    const TensorDesc& weightDesc,
-    std::span<const uint8_t> bias,
-    const TensorDesc& biasDesc,
-    float epsilon);
-
-Result<OwnedTensor> layer_norm_f32(
-    std::span<const uint8_t> x,
-    const TensorDesc& xDesc,
-    std::span<const uint8_t> weight,
-    const TensorDesc& weightDesc,
-    std::span<const uint8_t> bias,
-    const TensorDesc& biasDesc,
-    float epsilon);
+Result<void> relu(TensorRef x, MutableTensorRef out);
+Result<void> add(TensorRef lhs, TensorRef rhs, MutableTensorRef out);
+Result<void> mul(TensorRef lhs, TensorRef rhs, MutableTensorRef out);
+Result<void> sqrt(TensorRef x, MutableTensorRef out);
+Result<void> tanh(TensorRef x, MutableTensorRef out);
+Result<void> matmul(TensorRef lhs, TensorRef rhs, MutableTensorRef out);
+Result<void> transpose(TensorRef x, MutableTensorRef out);
+Result<void> permute(TensorRef x, std::span<const int64_t> dims, MutableTensorRef out);
+Result<void> sliding_query_key_score(
+    TensorRef q,
+    TensorRef k,
+    int64_t window,
+    MutableTensorRef out);
+Result<void> softmax(TensorRef x, int64_t dim, MutableTensorRef out);
+Result<void> embedding(TensorRef ids, TensorRef weight, MutableTensorRef out);
+Result<void> rope(TensorRef x, float theta, MutableTensorRef out);
+Result<void> rms_norm(TensorRef x, TensorRef weight, float epsilon, MutableTensorRef out);
+Result<void> layer_norm(
+    TensorRef x,
+    TensorRef weight,
+    TensorRef bias,
+    float epsilon,
+    MutableTensorRef out);
 
 } // namespace sandy::core

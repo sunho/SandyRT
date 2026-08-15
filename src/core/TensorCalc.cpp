@@ -1,28 +1,69 @@
 #include "TensorCalc.h"
 #include "ShapeUtil.h"
-#include "TensorDispatch.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <limits>
 #include <string>
-#include <type_traits>
 #include <utility>
+#include <vector>
 
 namespace sandy::core {
 
 namespace {
 
-Result<void> require_f32(const TensorDesc& desc, const std::string& name) {
-    if (desc.dtype != DType::F32)
-        return make_error(name + " must be f32");
-    return {};
+float load_f32(std::span<const uint8_t> data, size_t index) {
+    float value = 0.0f;
+    std::memcpy(&value, data.data() + index * sizeof(float), sizeof(float));
+    return value;
 }
 
-Result<void> require_bytes(std::span<const uint8_t> data,
-                           const TensorDesc& desc,
-                           const std::string& name) {
+void store_f32(std::span<uint8_t> data, size_t index, float value) {
+    std::memcpy(data.data() + index * sizeof(float), &value, sizeof(float));
+}
+
+float load_bf16(std::span<const uint8_t> data, size_t index) {
+    BFloat16 value = bfloat16_from_bits(0);
+    std::memcpy(&value, data.data() + index * sizeof(BFloat16), sizeof(BFloat16));
+    return bfloat16_to_float(value);
+}
+
+void store_bf16(std::span<uint8_t> data, size_t index, float value) {
+    BFloat16 storage = bfloat16_from_float(value);
+    std::memcpy(data.data() + index * sizeof(BFloat16), &storage, sizeof(BFloat16));
+}
+
+float unsupported_float_load(std::span<const uint8_t>, size_t) {
+    return 0.0f;
+}
+
+void unsupported_float_store(std::span<uint8_t>, size_t, float) {}
+
+bool is_float_compute_dtype(DType dtype) {
+    return dtype == DType::F32 || dtype == DType::BF16;
+}
+
+TensorRef::LoadFloatFn float_loader_for(DType dtype) {
+    switch (dtype) {
+        case DType::F32: return load_f32;
+        case DType::BF16: return load_bf16;
+        default: return unsupported_float_load;
+    }
+}
+
+MutableTensorRef::StoreFloatFn float_storer_for(DType dtype) {
+    switch (dtype) {
+        case DType::F32: return store_f32;
+        case DType::BF16: return store_bf16;
+        default: return unsupported_float_store;
+    }
+}
+
+Result<void> require_bytes(
+        std::span<const uint8_t> data,
+        const TensorDesc& desc,
+        const std::string& name) {
     auto numel = desc.shape.numel();
     if (numel < 0)
         return make_error(name + " must have static shape");
@@ -34,36 +75,53 @@ Result<void> require_bytes(std::span<const uint8_t> data,
     return {};
 }
 
-template <typename T>
-T read_scalar(std::span<const uint8_t> data, size_t index) {
-    T value{};
-    std::memcpy(&value, data.data() + index * sizeof(T), sizeof(T));
-    return value;
+Result<void> require_float_tensor(const TensorRef& ref, const std::string& name) {
+    if (!is_float_compute_dtype(ref.desc.dtype))
+        return make_error(name + " unsupported dtype");
+    return {};
 }
 
-float read_f32(std::span<const uint8_t> data, size_t index) {
-    return read_scalar<float>(data, index);
+Result<void> require_float_tensor(const MutableTensorRef& ref, const std::string& name) {
+    if (!is_float_compute_dtype(ref.desc.dtype))
+        return make_error(name + " unsupported dtype");
+    return {};
 }
 
-int64_t read_index(std::span<const uint8_t> data, DType dtype, size_t index) {
-    if (dtype == DType::I32) {
+Result<void> require_same_dtype(DType lhs, DType rhs, const std::string& opName) {
+    if (lhs != rhs)
+        return make_error(opName + " operands must have same dtype");
+    return {};
+}
+
+Result<void> require_output(
+        const MutableTensorRef& out,
+        const Shape& shape,
+        DType dtype,
+        const std::string& opName) {
+    if (out.desc.shape != shape)
+        return make_error(opName + " output shape mismatch");
+    if (out.desc.dtype != dtype)
+        return make_error(opName + " output dtype mismatch");
+    return require_float_tensor(out, opName + " output");
+}
+
+int64_t numel_or_error(const Shape& shape, const std::string& name) {
+    int64_t numel = shape.numel();
+    if (numel < 0)
+        return -1;
+    return numel;
+}
+
+int64_t read_index(const TensorRef& ids, size_t index) {
+    if (ids.desc.dtype == DType::I32) {
         int32_t value = 0;
-        std::memcpy(&value, data.data() + index * sizeof(int32_t), sizeof(int32_t));
+        std::memcpy(&value, ids.bytes.data() + index * sizeof(int32_t), sizeof(int32_t));
         return value;
     }
 
     int64_t value = 0;
-    std::memcpy(&value, data.data() + index * sizeof(int64_t), sizeof(int64_t));
+    std::memcpy(&value, ids.bytes.data() + index * sizeof(int64_t), sizeof(int64_t));
     return value;
-}
-
-template <typename T>
-void write_scalar(std::vector<uint8_t>& data, size_t index, T value) {
-    std::memcpy(data.data() + index * sizeof(T), &value, sizeof(T));
-}
-
-void write_f32(std::vector<uint8_t>& data, size_t index, float value) {
-    write_scalar<float>(data, index, value);
 }
 
 std::vector<int64_t> strides_for(const Shape& shape) {
@@ -127,245 +185,183 @@ size_t broadcast_batch_offset(
     return sourceOffset;
 }
 
-using BinaryOp = float (*)(float, float);
 using UnaryOp = float (*)(float);
+using BinaryOp = float (*)(float, float);
 
-template <typename T, typename Fn>
-Result<OwnedTensor> f32_impl_or_unsupported(const char* opName, Fn&& fn) {
-    if constexpr (std::is_same_v<T, float>) {
-        return std::forward<Fn>(fn)();
-    } else {
-        return make_error(std::string(opName) + " dtype specialization not implemented");
-    }
-}
-
-Result<OwnedTensor> unary_elementwise_f32(
-        std::span<const uint8_t> x,
-        const TensorDesc& xDesc,
+Result<void> unary_elementwise(
+        TensorRef x,
+        MutableTensorRef out,
         const std::string& opName,
         UnaryOp op) {
-    auto xDtype = require_f32(xDesc, opName + " input");
-    if (!xDtype) return make_error(xDtype.error());
+    auto inputFloat = require_float_tensor(x, opName + " input");
+    if (!inputFloat) return make_error(inputFloat.error());
+    auto output = require_output(out, x.desc.shape, x.desc.dtype, opName);
+    if (!output) return make_error(output.error());
 
-    auto xBytes = require_bytes(x, xDesc, opName + " input");
-    if (!xBytes) return make_error(xBytes.error());
+    int64_t count = numel_or_error(x.desc.shape, opName + " input");
+    if (count < 0)
+        return make_error(opName + " input must have static shape");
 
-    OwnedTensor out;
-    out.desc = xDesc;
-    out.data.resize(x.size());
+    for (size_t i = 0; i < static_cast<size_t>(count); i++)
+        out.store_float(i, op(x.load_float(i)));
 
-    size_t count = x.size() / sizeof(float);
-    for (size_t i = 0; i < count; i++)
-        write_f32(out.data, i, op(read_f32(x, i)));
-
-    return out;
+    return {};
 }
 
-Result<OwnedTensor> binary_elementwise_f32(
-        std::span<const uint8_t> lhs,
-        const TensorDesc& lhsDesc,
-        std::span<const uint8_t> rhs,
-        const TensorDesc& rhsDesc,
+Result<void> binary_elementwise(
+        TensorRef lhs,
+        TensorRef rhs,
+        MutableTensorRef out,
         const std::string& opName,
         BinaryOp op) {
-    auto lhsDtype = require_f32(lhsDesc, opName + " lhs");
-    if (!lhsDtype) return make_error(lhsDtype.error());
+    auto lhsFloat = require_float_tensor(lhs, opName + " lhs");
+    if (!lhsFloat) return make_error(lhsFloat.error());
+    auto rhsFloat = require_float_tensor(rhs, opName + " rhs");
+    if (!rhsFloat) return make_error(rhsFloat.error());
+    auto same = require_same_dtype(lhs.desc.dtype, rhs.desc.dtype, opName);
+    if (!same) return make_error(same.error());
 
-    auto rhsDtype = require_f32(rhsDesc, opName + " rhs");
-    if (!rhsDtype) return make_error(rhsDtype.error());
-
-    auto lhsBytes = require_bytes(lhs, lhsDesc, opName + " lhs");
-    if (!lhsBytes) return make_error(lhsBytes.error());
-
-    auto rhsBytes = require_bytes(rhs, rhsDesc, opName + " rhs");
-    if (!rhsBytes) return make_error(rhsBytes.error());
-
-    auto shapeResult = broadcast_shape(lhsDesc.shape, rhsDesc.shape);
+    auto shapeResult = broadcast_shape(lhs.desc.shape, rhs.desc.shape);
     if (!shapeResult) return make_error(shapeResult.error());
     auto outShape = shapeResult.take();
+    auto output = require_output(out, outShape, lhs.desc.dtype, opName);
+    if (!output) return make_error(output.error());
 
-    int64_t outNumel = outShape.numel();
+    int64_t outNumel = numel_or_error(outShape, opName + " output");
     if (outNumel < 0)
         return make_error(opName + " output must have static shape");
 
-    auto lhsStrides = strides_for(lhsDesc.shape);
-    auto rhsStrides = strides_for(rhsDesc.shape);
-
-    OwnedTensor out;
-    out.desc = TensorDesc(outShape, DType::F32);
-    out.data.resize(static_cast<size_t>(outNumel) * sizeof(float));
-
+    auto lhsStrides = strides_for(lhs.desc.shape);
+    auto rhsStrides = strides_for(rhs.desc.shape);
     for (size_t i = 0; i < static_cast<size_t>(outNumel); i++) {
-        size_t lhsIndex = broadcast_source_index(i, out.desc.shape, lhsDesc.shape, lhsStrides);
-        size_t rhsIndex = broadcast_source_index(i, out.desc.shape, rhsDesc.shape, rhsStrides);
-        write_f32(out.data, i, op(read_f32(lhs, lhsIndex), read_f32(rhs, rhsIndex)));
+        size_t lhsIndex = broadcast_source_index(i, out.desc.shape, lhs.desc.shape, lhsStrides);
+        size_t rhsIndex = broadcast_source_index(i, out.desc.shape, rhs.desc.shape, rhsStrides);
+        out.store_float(i, op(lhs.load_float(lhsIndex), rhs.load_float(rhsIndex)));
     }
 
-    return out;
+    return {};
 }
 
 } // namespace
 
-Result<OwnedTensor> linear_f32(
-        std::span<const uint8_t> x,
-        const TensorDesc& xDesc,
-        std::span<const uint8_t> weight,
-        const TensorDesc& weightDesc,
-        std::span<const uint8_t> bias,
-        const TensorDesc& biasDesc) {
-    auto xDtype = require_f32(xDesc, "linear input");
-    if (!xDtype) return make_error(xDtype.error());
+Result<TensorRef> make_tensor_ref(TensorDesc desc, std::span<const uint8_t> bytes) {
+    auto byteCheck = require_bytes(bytes, desc, "tensor ref");
+    if (!byteCheck) return make_error(byteCheck.error());
+    return TensorRef{std::move(desc), bytes, float_loader_for(desc.dtype)};
+}
 
-    auto weightDtype = require_f32(weightDesc, "linear weight");
-    if (!weightDtype) return make_error(weightDtype.error());
+Result<MutableTensorRef> make_mutable_tensor_ref(
+        TensorDesc desc,
+        std::span<uint8_t> bytes) {
+    auto byteCheck = require_bytes(bytes, desc, "mutable tensor ref");
+    if (!byteCheck) return make_error(byteCheck.error());
+    return MutableTensorRef{
+        std::move(desc),
+        bytes,
+        float_loader_for(desc.dtype),
+        float_storer_for(desc.dtype)};
+}
 
-    auto biasDtype = require_f32(biasDesc, "linear bias");
-    if (!biasDtype) return make_error(biasDtype.error());
+Result<void> linear(
+        TensorRef x,
+        TensorRef weight,
+        TensorRef bias,
+        MutableTensorRef out) {
+    auto xFloat = require_float_tensor(x, "linear input");
+    if (!xFloat) return make_error(xFloat.error());
+    auto weightFloat = require_float_tensor(weight, "linear weight");
+    if (!weightFloat) return make_error(weightFloat.error());
+    auto biasFloat = require_float_tensor(bias, "linear bias");
+    if (!biasFloat) return make_error(biasFloat.error());
+    if (x.desc.dtype != weight.desc.dtype || x.desc.dtype != bias.desc.dtype)
+        return make_error("linear operands must have same dtype");
 
-    if (xDesc.shape.rank() < 2)
+    if (x.desc.shape.rank() < 2)
         return make_error("linear input must have rank >= 2");
-    if (weightDesc.shape.rank() != 2)
+    if (weight.desc.shape.rank() != 2)
         return make_error("linear weight must have rank 2");
-    if (biasDesc.shape.rank() != 1)
+    if (bias.desc.shape.rank() != 1)
         return make_error("linear bias must have rank 1");
 
-    int xRank = xDesc.shape.rank();
-    int64_t inFeatures = xDesc.shape.dim(xRank - 1);
-    int64_t outFeatures = weightDesc.shape.dim(0);
+    int xRank = x.desc.shape.rank();
+    int64_t inFeatures = x.desc.shape.dim(xRank - 1);
+    int64_t outFeatures = weight.desc.shape.dim(0);
     if (inFeatures < 0 || outFeatures < 0)
         return make_error("linear inputs must have static shape");
-    if (weightDesc.shape.dim(1) != inFeatures)
+    if (weight.desc.shape.dim(1) != inFeatures)
         return make_error("linear weight input dimension mismatch");
-    if (biasDesc.shape.dim(0) != outFeatures)
+    if (bias.desc.shape.dim(0) != outFeatures)
         return make_error("linear bias dimension mismatch");
 
-    auto xBytes = require_bytes(x, xDesc, "linear input");
-    if (!xBytes) return make_error(xBytes.error());
-
-    auto weightBytes = require_bytes(weight, weightDesc, "linear weight");
-    if (!weightBytes) return make_error(weightBytes.error());
-
-    auto biasBytes = require_bytes(bias, biasDesc, "linear bias");
-    if (!biasBytes) return make_error(biasBytes.error());
-
-    auto outDims = xDesc.shape.dims();
+    auto outDims = x.desc.shape.dims();
     outDims.back() = outFeatures;
     Shape outShape(outDims);
-    int64_t outNumel = outShape.numel();
-    if (outNumel < 0)
-        return make_error("linear output must have static shape");
+    auto output = require_output(out, outShape, x.desc.dtype, "linear");
+    if (!output) return make_error(output.error());
 
-    int64_t rows = xDesc.shape.numel() / inFeatures;
-    OwnedTensor out;
-    out.desc = TensorDesc(outShape, DType::F32);
-    out.data.resize(static_cast<size_t>(outNumel) * sizeof(float));
-
+    int64_t rows = x.desc.shape.numel() / inFeatures;
     for (int64_t b = 0; b < rows; b++) {
         for (int64_t o = 0; o < outFeatures; o++) {
-            float acc = read_f32(bias, static_cast<size_t>(o));
+            float acc = bias.load_float(static_cast<size_t>(o));
             for (int64_t i = 0; i < inFeatures; i++) {
-                float xv = read_f32(x, static_cast<size_t>(b * inFeatures + i));
-                float wv = read_f32(weight, static_cast<size_t>(o * inFeatures + i));
+                float xv = x.load_float(static_cast<size_t>(b * inFeatures + i));
+                float wv = weight.load_float(static_cast<size_t>(o * inFeatures + i));
                 acc += xv * wv;
             }
-            write_f32(out.data, static_cast<size_t>(b * outFeatures + o), acc);
+            out.store_float(static_cast<size_t>(b * outFeatures + o), acc);
         }
     }
 
-    return out;
+    return {};
 }
 
-Result<OwnedTensor> relu_f32(
-        std::span<const uint8_t> x,
-        const TensorDesc& xDesc) {
-    auto xDtype = require_f32(xDesc, "relu input");
-    if (!xDtype) return make_error(xDtype.error());
-
-    auto xBytes = require_bytes(x, xDesc, "relu input");
-    if (!xBytes) return make_error(xBytes.error());
-
-    OwnedTensor out;
-    out.desc = xDesc;
-    out.data.resize(x.size());
-
-    size_t count = x.size() / sizeof(float);
-    for (size_t i = 0; i < count; i++)
-        write_f32(out.data, i, std::max(0.0f, read_f32(x, i)));
-
-    return out;
+Result<void> relu(TensorRef x, MutableTensorRef out) {
+    auto op = [](float v) { return std::max(0.0f, v); };
+    return unary_elementwise(x, out, "relu", op);
 }
 
-Result<OwnedTensor> add_f32(
-        std::span<const uint8_t> lhs,
-        const TensorDesc& lhsDesc,
-        std::span<const uint8_t> rhs,
-        const TensorDesc& rhsDesc) {
-    return binary_elementwise_f32(
-        lhs, lhsDesc, rhs, rhsDesc, "add",
-        [](float a, float b) { return a + b; });
+Result<void> add(TensorRef lhs, TensorRef rhs, MutableTensorRef out) {
+    return binary_elementwise(lhs, rhs, out, "add", [](float a, float b) { return a + b; });
 }
 
-Result<OwnedTensor> mul_f32(
-        std::span<const uint8_t> lhs,
-        const TensorDesc& lhsDesc,
-        std::span<const uint8_t> rhs,
-        const TensorDesc& rhsDesc) {
-    return binary_elementwise_f32(
-        lhs, lhsDesc, rhs, rhsDesc, "mul",
-        [](float a, float b) { return a * b; });
+Result<void> mul(TensorRef lhs, TensorRef rhs, MutableTensorRef out) {
+    return binary_elementwise(lhs, rhs, out, "mul", [](float a, float b) { return a * b; });
 }
 
-Result<OwnedTensor> sqrt_f32(
-        std::span<const uint8_t> x,
-        const TensorDesc& xDesc) {
-    return unary_elementwise_f32(
-        x, xDesc, "sqrt",
-        [](float v) { return std::sqrt(v); });
+Result<void> sqrt(TensorRef x, MutableTensorRef out) {
+    return unary_elementwise(x, out, "sqrt", [](float v) { return std::sqrt(v); });
 }
 
-Result<OwnedTensor> tanh_f32(
-        std::span<const uint8_t> x,
-        const TensorDesc& xDesc) {
-    return unary_elementwise_f32(
-        x, xDesc, "tanh",
-        [](float v) { return std::tanh(v); });
+Result<void> tanh(TensorRef x, MutableTensorRef out) {
+    return unary_elementwise(x, out, "tanh", [](float v) { return std::tanh(v); });
 }
 
-Result<OwnedTensor> matmul_f32(
-        std::span<const uint8_t> lhs,
-        const TensorDesc& lhsDesc,
-        std::span<const uint8_t> rhs,
-        const TensorDesc& rhsDesc) {
-    auto lhsDtype = require_f32(lhsDesc, "matmul lhs");
-    if (!lhsDtype) return make_error(lhsDtype.error());
+Result<void> matmul(TensorRef lhs, TensorRef rhs, MutableTensorRef out) {
+    auto lhsFloat = require_float_tensor(lhs, "matmul lhs");
+    if (!lhsFloat) return make_error(lhsFloat.error());
+    auto rhsFloat = require_float_tensor(rhs, "matmul rhs");
+    if (!rhsFloat) return make_error(rhsFloat.error());
+    auto same = require_same_dtype(lhs.desc.dtype, rhs.desc.dtype, "matmul");
+    if (!same) return make_error(same.error());
 
-    auto rhsDtype = require_f32(rhsDesc, "matmul rhs");
-    if (!rhsDtype) return make_error(rhsDtype.error());
-
-    if (lhsDesc.shape.rank() < 2)
+    if (lhs.desc.shape.rank() < 2)
         return make_error("matmul lhs must have rank >= 2");
-    if (rhsDesc.shape.rank() < 2)
+    if (rhs.desc.shape.rank() < 2)
         return make_error("matmul rhs must have rank >= 2");
 
-    int lhsRank = lhsDesc.shape.rank();
-    int rhsRank = rhsDesc.shape.rank();
-    int64_t m = lhsDesc.shape.dim(lhsRank - 2);
-    int64_t lhsK = lhsDesc.shape.dim(lhsRank - 1);
-    int64_t rhsK = rhsDesc.shape.dim(rhsRank - 2);
-    int64_t n = rhsDesc.shape.dim(rhsRank - 1);
+    int lhsRank = lhs.desc.shape.rank();
+    int rhsRank = rhs.desc.shape.rank();
+    int64_t m = lhs.desc.shape.dim(lhsRank - 2);
+    int64_t lhsK = lhs.desc.shape.dim(lhsRank - 1);
+    int64_t rhsK = rhs.desc.shape.dim(rhsRank - 2);
+    int64_t n = rhs.desc.shape.dim(rhsRank - 1);
     if (m < 0 || n < 0 || lhsK < 0 || rhsK < 0)
         return make_error("matmul matrix dimensions must be static");
     if (lhsK != rhsK)
         return make_error("matmul contracting dimension mismatch");
 
-    auto lhsBytes = require_bytes(lhs, lhsDesc, "matmul lhs");
-    if (!lhsBytes) return make_error(lhsBytes.error());
-
-    auto rhsBytes = require_bytes(rhs, rhsDesc, "matmul rhs");
-    if (!rhsBytes) return make_error(rhsBytes.error());
-
-    auto lhsDims = lhsDesc.shape.dims();
-    auto rhsDims = rhsDesc.shape.dims();
+    auto lhsDims = lhs.desc.shape.dims();
+    auto rhsDims = rhs.desc.shape.dims();
     Shape lhsBatch(std::vector<int64_t>(lhsDims.begin(), lhsDims.end() - 2));
     Shape rhsBatch(std::vector<int64_t>(rhsDims.begin(), rhsDims.end() - 2));
     auto batchShapeResult = broadcast_shape(lhsBatch, rhsBatch);
@@ -376,22 +372,21 @@ Result<OwnedTensor> matmul_f32(
     outDims.push_back(m);
     outDims.push_back(n);
     Shape outShape(outDims);
-    int64_t outNumel = outShape.numel();
+    auto output = require_output(out, outShape, lhs.desc.dtype, "matmul");
+    if (!output) return make_error(output.error());
+
     int64_t batchNumel = batchShape.numel();
-    if (outNumel < 0 || batchNumel < 0)
+    if (batchNumel < 0)
         return make_error("matmul output must have static shape");
 
-    auto lhsStrides = strides_for(lhsDesc.shape);
-    auto rhsStrides = strides_for(rhsDesc.shape);
-    OwnedTensor out;
-    out.desc = TensorDesc(outShape, DType::F32);
-    out.data.resize(static_cast<size_t>(outNumel) * sizeof(float));
+    auto lhsStrides = strides_for(lhs.desc.shape);
+    auto rhsStrides = strides_for(rhs.desc.shape);
 
     for (size_t batch = 0; batch < static_cast<size_t>(batchNumel); batch++) {
         size_t lhsBatchOffset = broadcast_batch_offset(
-            batch, batchShape, lhsDesc.shape, lhsStrides);
+            batch, batchShape, lhs.desc.shape, lhsStrides);
         size_t rhsBatchOffset = broadcast_batch_offset(
-            batch, batchShape, rhsDesc.shape, rhsStrides);
+            batch, batchShape, rhs.desc.shape, rhsStrides);
         size_t outBatchOffset = batch * static_cast<size_t>(m * n);
 
         for (int64_t row = 0; row < m; row++) {
@@ -404,82 +399,49 @@ Result<OwnedTensor> matmul_f32(
                     size_t rhsIndex = rhsBatchOffset +
                         static_cast<size_t>(k * rhsStrides[rhsRank - 2] +
                                             col * rhsStrides[rhsRank - 1]);
-                    acc += read_f32(lhs, lhsIndex) * read_f32(rhs, rhsIndex);
+                    acc += lhs.load_float(lhsIndex) * rhs.load_float(rhsIndex);
                 }
-                write_f32(
-                    out.data,
-                    outBatchOffset + static_cast<size_t>(row * n + col),
-                    acc);
+                out.store_float(outBatchOffset + static_cast<size_t>(row * n + col), acc);
             }
         }
     }
 
-    return out;
+    return {};
 }
 
-Result<OwnedTensor> transpose_f32(
-        std::span<const uint8_t> x,
-        const TensorDesc& xDesc) {
-    auto xDtype = require_f32(xDesc, "transpose input");
-    if (!xDtype) return make_error(xDtype.error());
-
-    if (xDesc.shape.rank() != 2)
+Result<void> transpose(TensorRef x, MutableTensorRef out) {
+    auto xFloat = require_float_tensor(x, "transpose input");
+    if (!xFloat) return make_error(xFloat.error());
+    if (x.desc.shape.rank() != 2)
         return make_error("transpose input must have rank 2");
 
-    auto xBytes = require_bytes(x, xDesc, "transpose input");
-    if (!xBytes) return make_error(xBytes.error());
-
-    auto outDims = xDesc.shape.dims();
+    auto outDims = x.desc.shape.dims();
     std::swap(outDims[outDims.size() - 1], outDims[outDims.size() - 2]);
     Shape outShape(outDims);
+    auto output = require_output(out, outShape, x.desc.dtype, "transpose");
+    if (!output) return make_error(output.error());
+
     int64_t outNumel = outShape.numel();
     if (outNumel < 0)
         return make_error("transpose output must have static shape");
 
-    auto inputStrides = strides_for(xDesc.shape);
+    auto inputStrides = strides_for(x.desc.shape);
     auto outputStrides = strides_for(outShape);
-
-    OwnedTensor out;
-    out.desc = TensorDesc(outShape, DType::F32);
-    out.data.resize(static_cast<size_t>(outNumel) * sizeof(float));
-
     for (size_t outIndex = 0; outIndex < static_cast<size_t>(outNumel); outIndex++) {
         size_t row = outIndex / static_cast<size_t>(outputStrides[0]);
         size_t col = outIndex % static_cast<size_t>(outputStrides[0]);
         size_t inputIndex = col * static_cast<size_t>(inputStrides[0]) + row;
-        write_f32(out.data, outIndex, read_f32(x, inputIndex));
+        out.store_float(outIndex, x.load_float(inputIndex));
     }
 
-    return out;
+    return {};
 }
 
-Result<OwnedTensor> reshape_f32(
-        std::span<const uint8_t> x,
-        const TensorDesc& xDesc,
-        Shape shape) {
-    auto xDtype = require_f32(xDesc, "reshape input");
-    if (!xDtype) return make_error(xDtype.error());
+Result<void> permute(TensorRef x, std::span<const int64_t> dims, MutableTensorRef out) {
+    auto xFloat = require_float_tensor(x, "permute input");
+    if (!xFloat) return make_error(xFloat.error());
 
-    auto inferred = infer_reshape_shape(xDesc.shape, std::move(shape));
-    if (!inferred) return make_error(inferred.error());
-
-    auto xBytes = require_bytes(x, xDesc, "reshape input");
-    if (!xBytes) return make_error(xBytes.error());
-
-    OwnedTensor out;
-    out.desc = TensorDesc(inferred.take(), DType::F32);
-    out.data.assign(x.begin(), x.end());
-    return out;
-}
-
-Result<OwnedTensor> permute_f32(
-        std::span<const uint8_t> x,
-        const TensorDesc& xDesc,
-        std::span<const int64_t> dims) {
-    auto xDtype = require_f32(xDesc, "permute input");
-    if (!xDtype) return make_error(xDtype.error());
-
-    int rank = xDesc.shape.rank();
+    int rank = x.desc.shape.rank();
     if (static_cast<int>(dims.size()) != rank)
         return make_error("permute dims size must match input rank");
 
@@ -493,23 +455,19 @@ Result<OwnedTensor> permute_f32(
         if (seen[index])
             return make_error("permute dims must not contain duplicates");
         seen[index] = true;
-        outDims.push_back(xDesc.shape.dim(static_cast<int>(axis)));
+        outDims.push_back(x.desc.shape.dim(static_cast<int>(axis)));
     }
 
-    auto xBytes = require_bytes(x, xDesc, "permute input");
-    if (!xBytes) return make_error(xBytes.error());
-
     Shape outShape(outDims);
+    auto output = require_output(out, outShape, x.desc.dtype, "permute");
+    if (!output) return make_error(output.error());
+
     int64_t outNumel = outShape.numel();
     if (outNumel < 0)
         return make_error("permute output must have static shape");
 
-    auto inputStrides = strides_for(xDesc.shape);
+    auto inputStrides = strides_for(x.desc.shape);
     auto outputStrides = strides_for(outShape);
-
-    OwnedTensor out;
-    out.desc = TensorDesc(outShape, DType::F32);
-    out.data.resize(static_cast<size_t>(outNumel) * sizeof(float));
 
     for (size_t outIndex = 0; outIndex < static_cast<size_t>(outNumel); outIndex++) {
         size_t sourceIndex = 0;
@@ -525,38 +483,38 @@ Result<OwnedTensor> permute_f32(
             sourceIndex += coord *
                 static_cast<size_t>(inputStrides[static_cast<size_t>(inputAxis)]);
         }
-        write_f32(out.data, outIndex, read_f32(x, sourceIndex));
+        out.store_float(outIndex, x.load_float(sourceIndex));
     }
 
-    return out;
+    return {};
 }
 
-Result<OwnedTensor> sliding_query_key_score_f32(
-        std::span<const uint8_t> q,
-        const TensorDesc& qDesc,
-        std::span<const uint8_t> k,
-        const TensorDesc& kDesc,
-        int64_t window) {
-    auto qDtype = require_f32(qDesc, "sliding_query_key_score q");
-    if (!qDtype) return make_error(qDtype.error());
+Result<void> sliding_query_key_score(
+        TensorRef q,
+        TensorRef k,
+        int64_t window,
+        MutableTensorRef out) {
+    auto qFloat = require_float_tensor(q, "sliding_query_key_score q");
+    if (!qFloat) return make_error(qFloat.error());
+    auto kFloat = require_float_tensor(k, "sliding_query_key_score k");
+    if (!kFloat) return make_error(kFloat.error());
+    auto same = require_same_dtype(q.desc.dtype, k.desc.dtype, "sliding_query_key_score");
+    if (!same) return make_error(same.error());
 
-    auto kDtype = require_f32(kDesc, "sliding_query_key_score k");
-    if (!kDtype) return make_error(kDtype.error());
-
-    int rank = qDesc.shape.rank();
-    if ((rank != 3 && rank != 4) || kDesc.shape.rank() != rank)
+    int rank = q.desc.shape.rank();
+    if ((rank != 3 && rank != 4) || k.desc.shape.rank() != rank)
         return make_error("sliding_query_key_score operands must both have rank 3 or rank 4");
     if (window < 0)
         return make_error("sliding_query_key_score window must be >= 0");
 
-    int64_t batch = rank == 4 ? qDesc.shape.dim(0) : 1;
-    int64_t kBatch = rank == 4 ? kDesc.shape.dim(0) : 1;
-    int64_t heads = qDesc.shape.dim(rank - 3);
-    int64_t kvHeads = kDesc.shape.dim(rank - 3);
-    int64_t tq = qDesc.shape.dim(rank - 2);
-    int64_t tk = kDesc.shape.dim(rank - 2);
-    int64_t headDim = qDesc.shape.dim(rank - 1);
-    int64_t kHeadDim = kDesc.shape.dim(rank - 1);
+    int64_t batch = rank == 4 ? q.desc.shape.dim(0) : 1;
+    int64_t kBatch = rank == 4 ? k.desc.shape.dim(0) : 1;
+    int64_t heads = q.desc.shape.dim(rank - 3);
+    int64_t kvHeads = k.desc.shape.dim(rank - 3);
+    int64_t tq = q.desc.shape.dim(rank - 2);
+    int64_t tk = k.desc.shape.dim(rank - 2);
+    int64_t headDim = q.desc.shape.dim(rank - 1);
+    int64_t kHeadDim = k.desc.shape.dim(rank - 1);
     if (batch < 0 || kBatch < 0 || heads < 0 || kvHeads < 0 ||
         tq < 0 || tk < 0 || headDim < 0 || kHeadDim < 0) {
         return make_error("sliding_query_key_score inputs must have static shape");
@@ -568,22 +526,14 @@ Result<OwnedTensor> sliding_query_key_score_f32(
     if (heads <= 0 || kvHeads <= 0 || heads % kvHeads != 0)
         return make_error("sliding_query_key_score heads must be divisible by kv_heads");
 
-    auto qBytes = require_bytes(q, qDesc, "sliding_query_key_score q");
-    if (!qBytes) return make_error(qBytes.error());
-
-    auto kBytes = require_bytes(k, kDesc, "sliding_query_key_score k");
-    if (!kBytes) return make_error(kBytes.error());
-
     std::vector<int64_t> outDims;
     if (rank == 4)
         outDims.push_back(batch);
     outDims.push_back(heads);
     outDims.push_back(tq);
     outDims.push_back(tk);
-
-    OwnedTensor out;
-    out.desc = TensorDesc(Shape(outDims), DType::F32);
-    out.data.resize(static_cast<size_t>(out.desc.shape.numel()) * sizeof(float));
+    auto output = require_output(out, Shape(outDims), q.desc.dtype, "sliding_query_key_score");
+    if (!output) return make_error(output.error());
 
     int64_t headsPerKv = heads / kvHeads;
     float scale = 1.0f / std::sqrt(static_cast<float>(headDim));
@@ -597,16 +547,12 @@ Result<OwnedTensor> sliding_query_key_score_f32(
                 if (window > 0)
                     minKey = std::max<int64_t>(0, qi + 1 - window);
                 for (int64_t ki = 0; ki < tk; ki++) {
-                    size_t outIndex = 0;
-                    if (rank == 4) {
-                        outIndex = static_cast<size_t>(
-                            ((b * heads + h) * tq + qi) * tk + ki);
-                    } else {
-                        outIndex = static_cast<size_t>((h * tq + qi) * tk + ki);
-                    }
+                    size_t outIndex = rank == 4
+                        ? static_cast<size_t>(((b * heads + h) * tq + qi) * tk + ki)
+                        : static_cast<size_t>((h * tq + qi) * tk + ki);
 
                     if (ki > qi || ki < minKey) {
-                        write_f32(out.data, outIndex, masked);
+                        out.store_float(outIndex, masked);
                         continue;
                     }
 
@@ -623,25 +569,24 @@ Result<OwnedTensor> sliding_query_key_score_f32(
                             qIndex = static_cast<size_t>((h * tq + qi) * headDim + d);
                             kIndex = static_cast<size_t>((kh * tk + ki) * headDim + d);
                         }
-                        acc += read_f32(q, qIndex) * read_f32(k, kIndex);
+                        acc += q.load_float(qIndex) * k.load_float(kIndex);
                     }
-                    write_f32(out.data, outIndex, acc * scale);
+                    out.store_float(outIndex, acc * scale);
                 }
             }
         }
     }
 
-    return out;
+    return {};
 }
 
-Result<OwnedTensor> softmax_f32(
-        std::span<const uint8_t> x,
-        const TensorDesc& xDesc,
-        int64_t dim) {
-    auto xDtype = require_f32(xDesc, "softmax input");
-    if (!xDtype) return make_error(xDtype.error());
+Result<void> softmax(TensorRef x, int64_t dim, MutableTensorRef out) {
+    auto xFloat = require_float_tensor(x, "softmax input");
+    if (!xFloat) return make_error(xFloat.error());
+    auto output = require_output(out, x.desc.shape, x.desc.dtype, "softmax");
+    if (!output) return make_error(output.error());
 
-    int rank = xDesc.shape.rank();
+    int rank = x.desc.shape.rank();
     if (rank < 1)
         return make_error("softmax input must have rank >= 1");
     if (dim < -rank || dim >= rank)
@@ -649,25 +594,18 @@ Result<OwnedTensor> softmax_f32(
     if (dim < 0)
         dim += rank;
 
-    int64_t total = xDesc.shape.numel();
+    int64_t total = x.desc.shape.numel();
     if (total < 0)
         return make_error("softmax input must have static shape");
 
-    int64_t axis = xDesc.shape.dim(static_cast<int>(dim));
+    int64_t axis = x.desc.shape.dim(static_cast<int>(dim));
     if (axis < 0)
         return make_error("softmax axis dimension must be static");
 
-    auto xBytes = require_bytes(x, xDesc, "softmax input");
-    if (!xBytes) return make_error(xBytes.error());
-
     int64_t inner = 1;
     for (int i = static_cast<int>(dim) + 1; i < rank; i++)
-        inner *= xDesc.shape.dim(i);
+        inner *= x.desc.shape.dim(i);
     int64_t outer = total / (axis * inner);
-
-    OwnedTensor out;
-    out.desc = xDesc;
-    out.data.resize(x.size());
 
     for (int64_t o = 0; o < outer; o++) {
         for (int64_t i = 0; i < inner; i++) {
@@ -675,13 +613,13 @@ Result<OwnedTensor> softmax_f32(
             float maxValue = -std::numeric_limits<float>::infinity();
             for (int64_t a = 0; a < axis; a++) {
                 size_t index = base + static_cast<size_t>(a * inner);
-                maxValue = std::max(maxValue, read_f32(x, index));
+                maxValue = std::max(maxValue, x.load_float(index));
             }
 
             if (std::isinf(maxValue) && maxValue < 0.0f) {
                 for (int64_t a = 0; a < axis; a++) {
                     size_t index = base + static_cast<size_t>(a * inner);
-                    write_f32(out.data, index, 0.0f);
+                    out.store_float(index, 0.0f);
                 }
                 continue;
             }
@@ -689,107 +627,80 @@ Result<OwnedTensor> softmax_f32(
             double sum = 0.0;
             for (int64_t a = 0; a < axis; a++) {
                 size_t index = base + static_cast<size_t>(a * inner);
-                float value = std::exp(read_f32(x, index) - maxValue);
-                write_f32(out.data, index, value);
-                sum += static_cast<double>(value);
+                sum += static_cast<double>(std::exp(x.load_float(index) - maxValue));
             }
 
             float invSum = 1.0f / static_cast<float>(sum);
             for (int64_t a = 0; a < axis; a++) {
                 size_t index = base + static_cast<size_t>(a * inner);
-                write_f32(out.data, index, read_f32(out.data, index) * invSum);
+                float value = std::exp(x.load_float(index) - maxValue) * invSum;
+                out.store_float(index, value);
             }
         }
     }
 
-    return out;
+    return {};
 }
 
-Result<OwnedTensor> embedding_f32(
-        std::span<const uint8_t> ids,
-        const TensorDesc& idsDesc,
-        std::span<const uint8_t> weight,
-        const TensorDesc& weightDesc) {
-    if (idsDesc.dtype != DType::I32 && idsDesc.dtype != DType::I64)
+Result<void> embedding(TensorRef ids, TensorRef weight, MutableTensorRef out) {
+    if (ids.desc.dtype != DType::I32 && ids.desc.dtype != DType::I64)
         return make_error("embedding ids must be i32 or i64");
+    auto weightFloat = require_float_tensor(weight, "embedding weight");
+    if (!weightFloat) return make_error(weightFloat.error());
 
-    auto weightDtype = require_f32(weightDesc, "embedding weight");
-    if (!weightDtype) return make_error(weightDtype.error());
-
-    if (weightDesc.shape.rank() != 2)
+    if (weight.desc.shape.rank() != 2)
         return make_error("embedding weight must have rank 2");
 
-    int64_t vocab = weightDesc.shape.dim(0);
-    int64_t hidden = weightDesc.shape.dim(1);
+    int64_t vocab = weight.desc.shape.dim(0);
+    int64_t hidden = weight.desc.shape.dim(1);
     if (vocab < 0 || hidden < 0)
         return make_error("embedding weight must have static shape");
 
-    auto idsBytes = require_bytes(ids, idsDesc, "embedding ids");
-    if (!idsBytes) return make_error(idsBytes.error());
-
-    auto weightBytes = require_bytes(weight, weightDesc, "embedding weight");
-    if (!weightBytes) return make_error(weightBytes.error());
-
-    int64_t idsNumel = idsDesc.shape.numel();
+    int64_t idsNumel = ids.desc.shape.numel();
     if (idsNumel < 0)
         return make_error("embedding ids must have static shape");
 
-    auto outDims = idsDesc.shape.dims();
+    auto outDims = ids.desc.shape.dims();
     outDims.push_back(hidden);
-
-    OwnedTensor out;
-    out.desc = TensorDesc(Shape(outDims), DType::F32);
-    out.data.resize(static_cast<size_t>(idsNumel * hidden) * sizeof(float));
+    auto output = require_output(out, Shape(outDims), weight.desc.dtype, "embedding");
+    if (!output) return make_error(output.error());
 
     for (int64_t i = 0; i < idsNumel; i++) {
-        int64_t tokenId = read_index(ids, idsDesc.dtype, static_cast<size_t>(i));
+        int64_t tokenId = read_index(ids, static_cast<size_t>(i));
         if (tokenId < 0 || tokenId >= vocab)
             return make_error("embedding id out of range");
 
         for (int64_t h = 0; h < hidden; h++) {
-            float value = read_f32(
-                weight, static_cast<size_t>(tokenId * hidden + h));
-            write_f32(out.data, static_cast<size_t>(i * hidden + h), value);
+            float value = weight.load_float(static_cast<size_t>(tokenId * hidden + h));
+            out.store_float(static_cast<size_t>(i * hidden + h), value);
         }
     }
 
-    return out;
+    return {};
 }
 
-template <typename T>
-Result<OwnedTensor> rope_impl(
-        std::span<const uint8_t> x,
-        const TensorDesc& xDesc,
-        float theta) {
-    using Traits = detail::ScalarTraits<T>;
-    using Compute = typename Traits::Compute;
+Result<void> rope(TensorRef x, float theta, MutableTensorRef out) {
+    auto xFloat = require_float_tensor(x, "rope input");
+    if (!xFloat) return make_error(xFloat.error());
+    auto output = require_output(out, x.desc.shape, x.desc.dtype, "rope");
+    if (!output) return make_error(output.error());
 
-    if (xDesc.dtype != Traits::dtype)
-        return make_error("rope input dtype mismatch");
-
-    int rank = xDesc.shape.rank();
+    int rank = x.desc.shape.rank();
     if (rank < 2)
         return make_error("rope input must have rank >= 2");
     if (theta <= 0.0f)
         return make_error("rope theta must be > 0");
 
-    int64_t seq = xDesc.shape.dim(rank - 2);
-    int64_t dim = xDesc.shape.dim(rank - 1);
+    int64_t seq = x.desc.shape.dim(rank - 2);
+    int64_t dim = x.desc.shape.dim(rank - 1);
     if (seq < 0 || dim < 0)
         return make_error("rope input must have static sequence and last dimensions");
     if (dim <= 0 || dim % 2 != 0)
         return make_error("rope last dimension must be positive and even");
 
-    int64_t total = xDesc.shape.numel();
+    int64_t total = x.desc.shape.numel();
     if (total < 0)
         return make_error("rope input must have static shape");
-
-    auto xBytes = require_bytes(x, xDesc, "rope input");
-    if (!xBytes) return make_error(xBytes.error());
-
-    OwnedTensor out;
-    out.desc = xDesc;
-    out.data.resize(x.size());
 
     int64_t vectors = total / dim;
     for (int64_t vector = 0; vector < vectors; vector++) {
@@ -802,70 +713,40 @@ Result<OwnedTensor> rope_impl(
             float s = std::sin(angle);
             size_t evenIndex = base + static_cast<size_t>(2 * pair);
             size_t oddIndex = evenIndex + 1;
-            Compute even = Traits::to_compute(read_scalar<T>(x, evenIndex));
-            Compute odd = Traits::to_compute(read_scalar<T>(x, oddIndex));
-            write_scalar<T>(
-                out.data,
-                evenIndex,
-                Traits::from_compute(even * c - odd * s));
-            write_scalar<T>(
-                out.data,
-                oddIndex,
-                Traits::from_compute(even * s + odd * c));
+            float even = x.load_float(evenIndex);
+            float odd = x.load_float(oddIndex);
+            out.store_float(evenIndex, even * c - odd * s);
+            out.store_float(oddIndex, even * s + odd * c);
         }
     }
 
-    return out;
+    return {};
 }
 
-Result<OwnedTensor> rope(
-        std::span<const uint8_t> x,
-        const TensorDesc& xDesc,
-        float theta) {
-    return detail::dispatch_float_dtype<Result<OwnedTensor>>(
-        "rope",
-        xDesc.dtype,
-        [&]<typename T>() -> Result<OwnedTensor> {
-            return rope_impl<T>(x, xDesc, theta);
-        });
-}
+Result<void> rms_norm(TensorRef x, TensorRef weight, float epsilon, MutableTensorRef out) {
+    auto xFloat = require_float_tensor(x, "rms_norm input");
+    if (!xFloat) return make_error(xFloat.error());
+    auto weightFloat = require_float_tensor(weight, "rms_norm weight");
+    if (!weightFloat) return make_error(weightFloat.error());
+    auto same = require_same_dtype(x.desc.dtype, weight.desc.dtype, "rms_norm");
+    if (!same) return make_error(same.error());
 
-Result<OwnedTensor> rms_norm_f32(
-        std::span<const uint8_t> x,
-        const TensorDesc& xDesc,
-        std::span<const uint8_t> weight,
-        const TensorDesc& weightDesc,
-        float epsilon) {
-    auto xDtype = require_f32(xDesc, "rms_norm input");
-    if (!xDtype) return make_error(xDtype.error());
-
-    auto weightDtype = require_f32(weightDesc, "rms_norm weight");
-    if (!weightDtype) return make_error(weightDtype.error());
-
-    if (xDesc.shape.rank() < 1)
+    if (x.desc.shape.rank() < 1)
         return make_error("rms_norm input must have rank >= 1");
-    if (weightDesc.shape.rank() != 1)
+    if (weight.desc.shape.rank() != 1)
         return make_error("rms_norm weight must have rank 1");
 
-    int64_t hidden = xDesc.shape.dim(xDesc.shape.rank() - 1);
+    int64_t hidden = x.desc.shape.dim(x.desc.shape.rank() - 1);
     if (hidden < 0)
         return make_error("rms_norm hidden dimension must be static");
-    if (weightDesc.shape.dim(0) != hidden)
+    if (weight.desc.shape.dim(0) != hidden)
         return make_error("rms_norm weight dimension mismatch");
+    auto output = require_output(out, x.desc.shape, x.desc.dtype, "rms_norm");
+    if (!output) return make_error(output.error());
 
-    auto xBytes = require_bytes(x, xDesc, "rms_norm input");
-    if (!xBytes) return make_error(xBytes.error());
-
-    auto weightBytes = require_bytes(weight, weightDesc, "rms_norm weight");
-    if (!weightBytes) return make_error(weightBytes.error());
-
-    int64_t total = xDesc.shape.numel();
+    int64_t total = x.desc.shape.numel();
     if (total < 0)
         return make_error("rms_norm input must have static shape");
-
-    OwnedTensor out;
-    out.desc = xDesc;
-    out.data.resize(x.size());
 
     size_t rows = static_cast<size_t>(total / hidden);
     size_t cols = static_cast<size_t>(hidden);
@@ -873,332 +754,87 @@ Result<OwnedTensor> rms_norm_f32(
         double squareSum = 0.0;
         size_t rowOffset = row * cols;
         for (size_t col = 0; col < cols; col++) {
-            float xv = read_f32(x, rowOffset + col);
+            float xv = x.load_float(rowOffset + col);
             squareSum += static_cast<double>(xv) * static_cast<double>(xv);
         }
 
         float invRms = 1.0f / std::sqrt(
             static_cast<float>(squareSum / static_cast<double>(cols)) + epsilon);
         for (size_t col = 0; col < cols; col++) {
-            float xv = read_f32(x, rowOffset + col);
-            float wv = read_f32(weight, col);
-            write_f32(out.data, rowOffset + col, xv * invRms * wv);
+            float xv = x.load_float(rowOffset + col);
+            float wv = weight.load_float(col);
+            out.store_float(rowOffset + col, xv * invRms * wv);
         }
     }
 
-    return out;
+    return {};
 }
 
-Result<OwnedTensor> layer_norm_f32(
-        std::span<const uint8_t> x,
-        const TensorDesc& xDesc,
-        std::span<const uint8_t> weight,
-        const TensorDesc& weightDesc,
-        std::span<const uint8_t> bias,
-        const TensorDesc& biasDesc,
-        float epsilon) {
-    auto xDtype = require_f32(xDesc, "layer_norm input");
-    if (!xDtype) return make_error(xDtype.error());
+Result<void> layer_norm(
+        TensorRef x,
+        TensorRef weight,
+        TensorRef bias,
+        float epsilon,
+        MutableTensorRef out) {
+    auto xFloat = require_float_tensor(x, "layer_norm input");
+    if (!xFloat) return make_error(xFloat.error());
+    auto weightFloat = require_float_tensor(weight, "layer_norm weight");
+    if (!weightFloat) return make_error(weightFloat.error());
+    auto biasFloat = require_float_tensor(bias, "layer_norm bias");
+    if (!biasFloat) return make_error(biasFloat.error());
+    if (x.desc.dtype != weight.desc.dtype || x.desc.dtype != bias.desc.dtype)
+        return make_error("layer_norm operands must have same dtype");
 
-    auto weightDtype = require_f32(weightDesc, "layer_norm weight");
-    if (!weightDtype) return make_error(weightDtype.error());
-
-    auto biasDtype = require_f32(biasDesc, "layer_norm bias");
-    if (!biasDtype) return make_error(biasDtype.error());
-
-    int rank = xDesc.shape.rank();
+    int rank = x.desc.shape.rank();
     if (rank < 1)
         return make_error("layer_norm input must have rank >= 1");
-    if (weightDesc.shape.rank() != 1)
+    if (weight.desc.shape.rank() != 1)
         return make_error("layer_norm weight must have rank 1");
-    if (biasDesc.shape.rank() != 1)
+    if (bias.desc.shape.rank() != 1)
         return make_error("layer_norm bias must have rank 1");
 
-    int64_t hidden = xDesc.shape.dim(rank - 1);
+    int64_t hidden = x.desc.shape.dim(rank - 1);
     if (hidden < 0)
         return make_error("layer_norm hidden dimension must be static");
-    if (weightDesc.shape.dim(0) != hidden)
+    if (weight.desc.shape.dim(0) != hidden)
         return make_error("layer_norm weight dimension mismatch");
-    if (biasDesc.shape.dim(0) != hidden)
+    if (bias.desc.shape.dim(0) != hidden)
         return make_error("layer_norm bias dimension mismatch");
+    auto output = require_output(out, x.desc.shape, x.desc.dtype, "layer_norm");
+    if (!output) return make_error(output.error());
 
-    auto xBytes = require_bytes(x, xDesc, "layer_norm input");
-    if (!xBytes) return make_error(xBytes.error());
-
-    auto weightBytes = require_bytes(weight, weightDesc, "layer_norm weight");
-    if (!weightBytes) return make_error(weightBytes.error());
-
-    auto biasBytes = require_bytes(bias, biasDesc, "layer_norm bias");
-    if (!biasBytes) return make_error(biasBytes.error());
-
-    int64_t total = xDesc.shape.numel();
+    int64_t total = x.desc.shape.numel();
     if (total < 0)
         return make_error("layer_norm input must have static shape");
     int64_t rows = total / hidden;
-
-    OwnedTensor out;
-    out.desc = xDesc;
-    out.data.resize(x.size());
 
     for (int64_t row = 0; row < rows; row++) {
         size_t base = static_cast<size_t>(row * hidden);
         double mean = 0.0;
         for (int64_t i = 0; i < hidden; i++)
-            mean += static_cast<double>(read_f32(x, base + static_cast<size_t>(i)));
+            mean += static_cast<double>(x.load_float(base + static_cast<size_t>(i)));
         mean /= static_cast<double>(hidden);
 
         double variance = 0.0;
         for (int64_t i = 0; i < hidden; i++) {
             double centered =
-                static_cast<double>(read_f32(x, base + static_cast<size_t>(i))) - mean;
+                static_cast<double>(x.load_float(base + static_cast<size_t>(i))) - mean;
             variance += centered * centered;
         }
         variance /= static_cast<double>(hidden);
 
         float invStd = 1.0f / std::sqrt(static_cast<float>(variance) + epsilon);
         for (int64_t i = 0; i < hidden; i++) {
-            float centered = read_f32(x, base + static_cast<size_t>(i)) -
+            float centered = x.load_float(base + static_cast<size_t>(i)) -
                 static_cast<float>(mean);
             float value = centered * invStd *
-                read_f32(weight, static_cast<size_t>(i)) +
-                read_f32(bias, static_cast<size_t>(i));
-            write_f32(out.data, base + static_cast<size_t>(i), value);
+                weight.load_float(static_cast<size_t>(i)) +
+                bias.load_float(static_cast<size_t>(i));
+            out.store_float(base + static_cast<size_t>(i), value);
         }
     }
 
-    return out;
-}
-
-Result<OwnedTensor> linear(
-        std::span<const uint8_t> x,
-        const TensorDesc& xDesc,
-        std::span<const uint8_t> weight,
-        const TensorDesc& weightDesc,
-        std::span<const uint8_t> bias,
-        const TensorDesc& biasDesc) {
-    if (xDesc.dtype != weightDesc.dtype || xDesc.dtype != biasDesc.dtype)
-        return make_error("linear operands must have same dtype");
-    return detail::dispatch_float_dtype<Result<OwnedTensor>>(
-        "linear",
-        xDesc.dtype,
-        [&]<typename T>() -> Result<OwnedTensor> {
-            return f32_impl_or_unsupported<T>("linear", [&]() {
-                return linear_f32(x, xDesc, weight, weightDesc, bias, biasDesc);
-            });
-        });
-}
-
-Result<OwnedTensor> relu(
-        std::span<const uint8_t> x,
-        const TensorDesc& xDesc) {
-    return detail::dispatch_float_dtype<Result<OwnedTensor>>(
-        "relu",
-        xDesc.dtype,
-        [&]<typename T>() -> Result<OwnedTensor> {
-            return f32_impl_or_unsupported<T>("relu", [&]() {
-                return relu_f32(x, xDesc);
-            });
-        });
-}
-
-Result<OwnedTensor> add(
-        std::span<const uint8_t> lhs,
-        const TensorDesc& lhsDesc,
-        std::span<const uint8_t> rhs,
-        const TensorDesc& rhsDesc) {
-    return detail::dispatch_same_float_dtype<Result<OwnedTensor>>(
-        "add",
-        lhsDesc.dtype,
-        rhsDesc.dtype,
-        [&]<typename T>() -> Result<OwnedTensor> {
-            return f32_impl_or_unsupported<T>("add", [&]() {
-                return add_f32(lhs, lhsDesc, rhs, rhsDesc);
-            });
-        });
-}
-
-Result<OwnedTensor> mul(
-        std::span<const uint8_t> lhs,
-        const TensorDesc& lhsDesc,
-        std::span<const uint8_t> rhs,
-        const TensorDesc& rhsDesc) {
-    return detail::dispatch_same_float_dtype<Result<OwnedTensor>>(
-        "mul",
-        lhsDesc.dtype,
-        rhsDesc.dtype,
-        [&]<typename T>() -> Result<OwnedTensor> {
-            return f32_impl_or_unsupported<T>("mul", [&]() {
-                return mul_f32(lhs, lhsDesc, rhs, rhsDesc);
-            });
-        });
-}
-
-Result<OwnedTensor> sqrt(
-        std::span<const uint8_t> x,
-        const TensorDesc& xDesc) {
-    return detail::dispatch_float_dtype<Result<OwnedTensor>>(
-        "sqrt",
-        xDesc.dtype,
-        [&]<typename T>() -> Result<OwnedTensor> {
-            return f32_impl_or_unsupported<T>("sqrt", [&]() {
-                return sqrt_f32(x, xDesc);
-            });
-        });
-}
-
-Result<OwnedTensor> tanh(
-        std::span<const uint8_t> x,
-        const TensorDesc& xDesc) {
-    return detail::dispatch_float_dtype<Result<OwnedTensor>>(
-        "tanh",
-        xDesc.dtype,
-        [&]<typename T>() -> Result<OwnedTensor> {
-            return f32_impl_or_unsupported<T>("tanh", [&]() {
-                return tanh_f32(x, xDesc);
-            });
-        });
-}
-
-Result<OwnedTensor> matmul(
-        std::span<const uint8_t> lhs,
-        const TensorDesc& lhsDesc,
-        std::span<const uint8_t> rhs,
-        const TensorDesc& rhsDesc) {
-    return detail::dispatch_same_float_dtype<Result<OwnedTensor>>(
-        "matmul",
-        lhsDesc.dtype,
-        rhsDesc.dtype,
-        [&]<typename T>() -> Result<OwnedTensor> {
-            return f32_impl_or_unsupported<T>("matmul", [&]() {
-                return matmul_f32(lhs, lhsDesc, rhs, rhsDesc);
-            });
-        });
-}
-
-Result<OwnedTensor> transpose(
-        std::span<const uint8_t> x,
-        const TensorDesc& xDesc) {
-    return detail::dispatch_float_dtype<Result<OwnedTensor>>(
-        "transpose",
-        xDesc.dtype,
-        [&]<typename T>() -> Result<OwnedTensor> {
-            return f32_impl_or_unsupported<T>("transpose", [&]() {
-                return transpose_f32(x, xDesc);
-            });
-        });
-}
-
-Result<OwnedTensor> reshape(
-        std::span<const uint8_t> x,
-        const TensorDesc& xDesc,
-        Shape shape) {
-    auto inferred = infer_reshape_shape(xDesc.shape, std::move(shape));
-    if (!inferred) return make_error(inferred.error());
-
-    auto xBytes = require_bytes(x, xDesc, "reshape input");
-    if (!xBytes) return make_error(xBytes.error());
-
-    OwnedTensor out;
-    out.desc = TensorDesc(inferred.take(), xDesc.dtype);
-    out.data.assign(x.begin(), x.end());
-    return out;
-}
-
-Result<OwnedTensor> permute(
-        std::span<const uint8_t> x,
-        const TensorDesc& xDesc,
-        std::span<const int64_t> dims) {
-    return detail::dispatch_float_dtype<Result<OwnedTensor>>(
-        "permute",
-        xDesc.dtype,
-        [&]<typename T>() -> Result<OwnedTensor> {
-            return f32_impl_or_unsupported<T>("permute", [&]() {
-                return permute_f32(x, xDesc, dims);
-            });
-        });
-}
-
-Result<OwnedTensor> sliding_query_key_score(
-        std::span<const uint8_t> q,
-        const TensorDesc& qDesc,
-        std::span<const uint8_t> k,
-        const TensorDesc& kDesc,
-        int64_t window) {
-    return detail::dispatch_same_float_dtype<Result<OwnedTensor>>(
-        "sliding_query_key_score",
-        qDesc.dtype,
-        kDesc.dtype,
-        [&]<typename T>() -> Result<OwnedTensor> {
-            return f32_impl_or_unsupported<T>("sliding_query_key_score", [&]() {
-                return sliding_query_key_score_f32(q, qDesc, k, kDesc, window);
-            });
-        });
-}
-
-Result<OwnedTensor> softmax(
-        std::span<const uint8_t> x,
-        const TensorDesc& xDesc,
-        int64_t dim) {
-    return detail::dispatch_float_dtype<Result<OwnedTensor>>(
-        "softmax",
-        xDesc.dtype,
-        [&]<typename T>() -> Result<OwnedTensor> {
-            return f32_impl_or_unsupported<T>("softmax", [&]() {
-                return softmax_f32(x, xDesc, dim);
-            });
-        });
-}
-
-Result<OwnedTensor> embedding(
-        std::span<const uint8_t> ids,
-        const TensorDesc& idsDesc,
-        std::span<const uint8_t> weight,
-        const TensorDesc& weightDesc) {
-    return detail::dispatch_float_dtype<Result<OwnedTensor>>(
-        "embedding",
-        weightDesc.dtype,
-        [&]<typename T>() -> Result<OwnedTensor> {
-            return f32_impl_or_unsupported<T>("embedding", [&]() {
-                return embedding_f32(ids, idsDesc, weight, weightDesc);
-            });
-        });
-}
-
-Result<OwnedTensor> rms_norm(
-        std::span<const uint8_t> x,
-        const TensorDesc& xDesc,
-        std::span<const uint8_t> weight,
-        const TensorDesc& weightDesc,
-        float epsilon) {
-    return detail::dispatch_same_float_dtype<Result<OwnedTensor>>(
-        "rms_norm",
-        xDesc.dtype,
-        weightDesc.dtype,
-        [&]<typename T>() -> Result<OwnedTensor> {
-            return f32_impl_or_unsupported<T>("rms_norm", [&]() {
-                return rms_norm_f32(x, xDesc, weight, weightDesc, epsilon);
-            });
-        });
-}
-
-Result<OwnedTensor> layer_norm(
-        std::span<const uint8_t> x,
-        const TensorDesc& xDesc,
-        std::span<const uint8_t> weight,
-        const TensorDesc& weightDesc,
-        std::span<const uint8_t> bias,
-        const TensorDesc& biasDesc,
-        float epsilon) {
-    if (xDesc.dtype != weightDesc.dtype || xDesc.dtype != biasDesc.dtype)
-        return make_error("layer_norm operands must have same dtype");
-    return detail::dispatch_float_dtype<Result<OwnedTensor>>(
-        "layer_norm",
-        xDesc.dtype,
-        [&]<typename T>() -> Result<OwnedTensor> {
-            return f32_impl_or_unsupported<T>("layer_norm", [&]() {
-                return layer_norm_f32(x, xDesc, weight, weightDesc, bias, biasDesc, epsilon);
-            });
-        });
+    return {};
 }
 
 } // namespace sandy::core
