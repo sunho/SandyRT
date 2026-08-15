@@ -734,6 +734,58 @@ Result<OwnedTensor> embedding_f32(
     return out;
 }
 
+Result<OwnedTensor> rope_f32(
+        std::span<const uint8_t> x,
+        const TensorDesc& xDesc,
+        float theta) {
+    auto xDtype = require_f32(xDesc, "rope input");
+    if (!xDtype) return make_error(xDtype.error());
+
+    int rank = xDesc.shape.rank();
+    if (rank < 2)
+        return make_error("rope input must have rank >= 2");
+    if (theta <= 0.0f)
+        return make_error("rope theta must be > 0");
+
+    int64_t seq = xDesc.shape.dim(rank - 2);
+    int64_t dim = xDesc.shape.dim(rank - 1);
+    if (seq < 0 || dim < 0)
+        return make_error("rope input must have static sequence and last dimensions");
+    if (dim <= 0 || dim % 2 != 0)
+        return make_error("rope last dimension must be positive and even");
+
+    int64_t total = xDesc.shape.numel();
+    if (total < 0)
+        return make_error("rope input must have static shape");
+
+    auto xBytes = require_bytes(x, xDesc, "rope input");
+    if (!xBytes) return make_error(xBytes.error());
+
+    OwnedTensor out;
+    out.desc = xDesc;
+    out.data.resize(x.size());
+
+    int64_t vectors = total / dim;
+    for (int64_t vector = 0; vector < vectors; vector++) {
+        int64_t position = vector % seq;
+        size_t base = static_cast<size_t>(vector * dim);
+        for (int64_t pair = 0; pair < dim / 2; pair++) {
+            float angle = static_cast<float>(position) /
+                std::pow(theta, static_cast<float>(2 * pair) / static_cast<float>(dim));
+            float c = std::cos(angle);
+            float s = std::sin(angle);
+            size_t evenIndex = base + static_cast<size_t>(2 * pair);
+            size_t oddIndex = evenIndex + 1;
+            float even = read_f32(x, evenIndex);
+            float odd = read_f32(x, oddIndex);
+            write_f32(out.data, evenIndex, even * c - odd * s);
+            write_f32(out.data, oddIndex, even * s + odd * c);
+        }
+    }
+
+    return out;
+}
+
 Result<OwnedTensor> rms_norm_f32(
         std::span<const uint8_t> x,
         const TensorDesc& xDesc,

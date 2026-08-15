@@ -84,6 +84,11 @@ Result<OwnedTensor> embedding_f32(
     std::span<const uint8_t> weight,
     const TensorDesc& weightDesc);
 
+Result<OwnedTensor> rope_f32(
+    std::span<const uint8_t> x,
+    const TensorDesc& xDesc,
+    float theta);
+
 Result<OwnedTensor> rms_norm_f32(
     std::span<const uint8_t> x,
     const TensorDesc& xDesc,

@@ -65,6 +65,15 @@ std::vector<uint8_t> f32_bytes(std::initializer_list<float> values) {
     return bytes;
 }
 
+std::vector<uint8_t> f32_bytes(const std::vector<float>& values) {
+    std::vector<uint8_t> bytes(values.size() * sizeof(float));
+    for (size_t index = 0; index < values.size(); index++) {
+        float value = values[index];
+        std::memcpy(bytes.data() + index * sizeof(float), &value, sizeof(float));
+    }
+    return bytes;
+}
+
 std::vector<uint8_t> i32_bytes(std::initializer_list<int32_t> values) {
     std::vector<uint8_t> bytes(values.size() * sizeof(int32_t));
     size_t index = 0;
@@ -685,6 +694,48 @@ TEST(TensorCalcTest, EmbeddingF32WithI64IdsKeepsLeadingDims) {
     EXPECT_FLOAT_EQ(read_f32(out.data, 7), 6.0f);
 }
 
+TEST(TensorCalcTest, RoPEF32AppliesToLastDimForArbitraryRank) {
+    std::vector<float> values(2 * 2 * 3 * 4, 0.0f);
+    auto setVector = [&](size_t vector, std::initializer_list<float> row) {
+        size_t index = vector * 4;
+        for (float value : row)
+            values[index++] = value;
+    };
+    setVector(0, {1.0f, 2.0f, 3.0f, 4.0f});
+    setVector(1, {1.0f, 0.0f, 0.0f, 1.0f});
+    setVector(2, {0.0f, 1.0f, 1.0f, 0.0f});
+    setVector(7, {2.0f, 0.0f, 0.0f, 2.0f});
+
+    auto result = sandy::core::rope_f32(
+        f32_bytes(values),
+        sandy::core::TensorDesc(sandy::core::Shape({2, 2, 3, 4}), sandy::core::DType::F32),
+        10000.0f);
+
+    ASSERT_TRUE(result) << result.error();
+    auto out = result.take();
+    EXPECT_EQ(out.desc.shape, sandy::core::Shape({2, 2, 3, 4}));
+
+    EXPECT_FLOAT_EQ(read_f32(out.data, 0), 1.0f);
+    EXPECT_FLOAT_EQ(read_f32(out.data, 1), 2.0f);
+    EXPECT_FLOAT_EQ(read_f32(out.data, 2), 3.0f);
+    EXPECT_FLOAT_EQ(read_f32(out.data, 3), 4.0f);
+
+    EXPECT_NEAR(read_f32(out.data, 4), std::cos(1.0f), 1.0e-6f);
+    EXPECT_NEAR(read_f32(out.data, 5), std::sin(1.0f), 1.0e-6f);
+    EXPECT_NEAR(read_f32(out.data, 6), -std::sin(0.01f), 1.0e-6f);
+    EXPECT_NEAR(read_f32(out.data, 7), std::cos(0.01f), 1.0e-6f);
+
+    EXPECT_NEAR(read_f32(out.data, 8), -std::sin(2.0f), 1.0e-6f);
+    EXPECT_NEAR(read_f32(out.data, 9), std::cos(2.0f), 1.0e-6f);
+    EXPECT_NEAR(read_f32(out.data, 10), std::cos(0.02f), 1.0e-6f);
+    EXPECT_NEAR(read_f32(out.data, 11), std::sin(0.02f), 1.0e-6f);
+
+    EXPECT_NEAR(read_f32(out.data, 28), 2.0f * std::cos(1.0f), 1.0e-6f);
+    EXPECT_NEAR(read_f32(out.data, 29), 2.0f * std::sin(1.0f), 1.0e-6f);
+    EXPECT_NEAR(read_f32(out.data, 30), -2.0f * std::sin(0.01f), 1.0e-6f);
+    EXPECT_NEAR(read_f32(out.data, 31), 2.0f * std::cos(0.01f), 1.0e-6f);
+}
+
 TEST(TensorCalcTest, RMSNormF32) {
     auto x = f32_bytes({1.0f, 2.0f, 2.0f, 0.0f, 3.0f, 4.0f});
     auto weight = f32_bytes({1.0f, 10.0f, -1.0f});
@@ -1291,4 +1342,46 @@ TEST(CpuInterpretTest, EmbeddingLoadsRowsFromFullWeightBuffer) {
     EXPECT_FLOAT_EQ(read_f32(it->second->data(), 5), 2.0f);
     EXPECT_FLOAT_EQ(read_f32(it->second->data(), 6), 5.0f);
     EXPECT_FLOAT_EQ(read_f32(it->second->data(), 7), 6.0f);
+}
+
+TEST(CpuInterpretTest, RoPEReceivesThetaAttr) {
+    sandy::ir::mid_ir::register_all_ops();
+
+    sandy::ir::mid_ir::Graph graph;
+    sandy::ir::mid_ir::Builder builder(graph);
+    auto* x = builder.createInput("x", sandy::core::Shape({1, 2, 4}), sandy::core::DType::F32);
+    auto* out = builder.createRoPE(x, 10000.0f);
+    sandy::ir::mid_ir::Value* outputs[] = {out};
+    builder.setOutputs(outputs);
+
+    sandy::engine::Engine engine(
+        std::make_unique<sandy::engine::backend::CpuInterpreterBackend>());
+
+    auto planResult = engine.create_plan(graph);
+    ASSERT_TRUE(planResult) << planResult.error();
+    auto plan = planResult.take();
+
+    sandy::engine::TensorMap inputs;
+    inputs["x"] = make_f32_buffer("x", sandy::core::Shape({1, 2, 4}), {
+        1.0f, 2.0f, 3.0f, 4.0f,
+        1.0f, 0.0f, 0.0f, 1.0f,
+    });
+
+    sandy::engine::TensorMap weights;
+    auto runResult = engine.run(*plan, inputs, weights);
+    ASSERT_TRUE(runResult) << runResult.error();
+    auto outputsMap = runResult.take();
+
+    auto it = outputsMap.find("output0");
+    ASSERT_NE(it, outputsMap.end());
+    ASSERT_NE(it->second, nullptr);
+    EXPECT_EQ(it->second->desc().shape, sandy::core::Shape({1, 2, 4}));
+    EXPECT_FLOAT_EQ(read_f32(it->second->data(), 0), 1.0f);
+    EXPECT_FLOAT_EQ(read_f32(it->second->data(), 1), 2.0f);
+    EXPECT_FLOAT_EQ(read_f32(it->second->data(), 2), 3.0f);
+    EXPECT_FLOAT_EQ(read_f32(it->second->data(), 3), 4.0f);
+    EXPECT_NEAR(read_f32(it->second->data(), 4), std::cos(1.0f), 1.0e-6f);
+    EXPECT_NEAR(read_f32(it->second->data(), 5), std::sin(1.0f), 1.0e-6f);
+    EXPECT_NEAR(read_f32(it->second->data(), 6), -std::sin(0.01f), 1.0e-6f);
+    EXPECT_NEAR(read_f32(it->second->data(), 7), std::cos(0.01f), 1.0e-6f);
 }

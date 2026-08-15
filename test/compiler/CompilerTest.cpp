@@ -410,6 +410,34 @@ TEST(CompilerTest, ProgrammaticSoftmaxMaterializesToMidIROp) {
     EXPECT_EQ(midGraph->outputs()[0]->def->attrs.at("dim").intVal, -1);
 }
 
+TEST(CompilerTest, ProgrammaticRoPEMaterializesToMidIROpWithTheta) {
+    sandy::ir::high_ir::Graph highGraph;
+    auto* x = highGraph.addInput("x");
+    auto rope = highGraph.addBuiltin(
+        "rope",
+        {x},
+        {sandy::ir::high_ir::Attr::fromFloat("rope_theta", 10000.0)},
+        1);
+    highGraph.setOutputs({rope[0]});
+
+    sandy::Compiler compiler;
+    TestWeights weights;
+    sandy::ir::mid_ir::MaterializeOptions options;
+    options.input_tensor_descs["x"] = sandy::core::TensorDesc(
+        sandy::core::Shape({2, 3, 4, 6}), sandy::core::DType::F32);
+
+    auto result = compiler.materialize_mid_ir(highGraph, weights, options);
+    ASSERT_TRUE(result) << result.error();
+    auto midGraph = result.take();
+
+    ASSERT_EQ(midGraph->outputs().size(), 1u);
+    ASSERT_NE(midGraph->outputs()[0], nullptr);
+    ASSERT_NE(midGraph->outputs()[0]->def, nullptr);
+    EXPECT_EQ(midGraph->outputs()[0]->def->kind, sandy::ir::mid_ir::OpKind::RoPE);
+    EXPECT_EQ(midGraph->outputs()[0]->shape, sandy::core::Shape({2, 3, 4, 6}));
+    EXPECT_EQ(midGraph->outputs()[0]->def->attrs.at("rope_theta").floatVal, 10000.0);
+}
+
 TEST(CompilerTest, ProgrammaticKVAttentionMaterializesBatchedHKeyValue) {
     sandy::ir::high_ir::Graph highGraph;
     auto* x = highGraph.addInput("x");
@@ -451,6 +479,57 @@ TEST(CompilerTest, ProgrammaticKVAttentionMaterializesBatchedHKeyValue) {
     EXPECT_EQ(midGraph->outputs()[0]->def->kind, sandy::ir::mid_ir::OpKind::MatMul);
     EXPECT_EQ(midGraph->outputs()[1]->def->kind, sandy::ir::mid_ir::OpKind::Permute);
     EXPECT_EQ(midGraph->outputs()[2]->def->kind, sandy::ir::mid_ir::OpKind::Permute);
+}
+
+TEST(CompilerTest, KVAttentionAppliesRoPEWhenThetaIsProvided) {
+    sandy::ir::high_ir::Graph highGraph;
+    auto* x = highGraph.addInput("x");
+    auto* qWeight = highGraph.addWeight("q.weight");
+    auto* kWeight = highGraph.addWeight("k.weight");
+    auto* vWeight = highGraph.addWeight("v.weight");
+    auto* oWeight = highGraph.addWeight("o.weight");
+    auto results = highGraph.addBuiltin(
+        "kv_attention",
+        {x, qWeight, kWeight, vWeight, oWeight},
+        {
+            sandy::ir::high_ir::Attr::fromInt("heads", 2),
+            sandy::ir::high_ir::Attr::fromInt("kv_heads", 1),
+            sandy::ir::high_ir::Attr::fromInt("head_dim", 2),
+            sandy::ir::high_ir::Attr::fromInt("window", 2),
+            sandy::ir::high_ir::Attr::fromFloat("rope_theta", 10000.0),
+        },
+        3);
+    highGraph.setOutputs(results);
+
+    sandy::Compiler compiler;
+    TestWeights weights;
+    weights.add(sandy::core::TensorDesc("q.weight", sandy::core::Shape({4, 4}), sandy::core::DType::F32));
+    weights.add(sandy::core::TensorDesc("k.weight", sandy::core::Shape({2, 4}), sandy::core::DType::F32));
+    weights.add(sandy::core::TensorDesc("v.weight", sandy::core::Shape({2, 4}), sandy::core::DType::F32));
+    weights.add(sandy::core::TensorDesc("o.weight", sandy::core::Shape({4, 4}), sandy::core::DType::F32));
+
+    sandy::ir::mid_ir::MaterializeOptions options;
+    options.input_tensor_descs["x"] = sandy::core::TensorDesc(
+        sandy::core::Shape({2, 3, 4}), sandy::core::DType::F32);
+
+    auto result = compiler.materialize_mid_ir(highGraph, weights, options);
+    ASSERT_TRUE(result) << result.error();
+    auto midGraph = result.take();
+
+    ASSERT_EQ(midGraph->outputs().size(), 3u);
+    EXPECT_EQ(midGraph->outputs()[0]->shape, sandy::core::Shape({2, 3, 4}));
+    EXPECT_EQ(midGraph->outputs()[1]->shape, sandy::core::Shape({2, 1, 3, 2}));
+    EXPECT_EQ(midGraph->outputs()[2]->shape, sandy::core::Shape({2, 1, 3, 2}));
+    EXPECT_EQ(midGraph->outputs()[1]->def->kind, sandy::ir::mid_ir::OpKind::RoPE);
+    EXPECT_EQ(midGraph->outputs()[1]->def->attrs.at("rope_theta").floatVal, 10000.0);
+    EXPECT_EQ(midGraph->outputs()[2]->def->kind, sandy::ir::mid_ir::OpKind::Permute);
+
+    int ropeCount = 0;
+    for (auto* op : midGraph->entry()->ops) {
+        if (op->kind == sandy::ir::mid_ir::OpKind::RoPE)
+            ropeCount++;
+    }
+    EXPECT_EQ(ropeCount, 2);
 }
 
 TEST(CompilerTest, ProgrammaticKVAttentionMaterializesUnbatchedHKeyValue) {

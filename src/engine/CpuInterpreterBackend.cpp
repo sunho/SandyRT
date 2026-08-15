@@ -390,6 +390,21 @@ Result<core::OwnedTensor> eval_embedding(
         ref_data(store, *weight), weight->desc);
 }
 
+Result<core::OwnedTensor> eval_rope(
+        const ir::mid_ir::Op& op,
+        const ValueMap& values,
+        const CpuBufferStore& store) {
+    if (op.operands.size() != 1)
+        return make_error("rope expects one operand");
+
+    auto x = lookup_value(values, op.operands[0]);
+    if (!x) return make_error(x.error());
+
+    return core::rope_f32(
+        ref_data(store, *x), x->desc,
+        attr_float_or(op, "rope_theta", 10000.0f));
+}
+
 Result<core::OwnedTensor> eval_rms_norm(
         const ir::mid_ir::Op& op,
         const ValueMap& values,
@@ -565,6 +580,13 @@ Result<BackendRunResult> interpret_graph(
             }
             case ir::mid_ir::OpKind::Embedding: {
                 auto tensor = eval_embedding(*op, values, store);
+                if (!tensor) return make_error(tensor.error());
+                auto bind = bind_owned_result(*op, tensor.take(), store, values);
+                if (!bind) return make_error(bind.error());
+                break;
+            }
+            case ir::mid_ir::OpKind::RoPE: {
+                auto tensor = eval_rope(*op, values, store);
                 if (!tensor) return make_error(tensor.error());
                 auto bind = bind_owned_result(*op, tensor.take(), store, values);
                 if (!bind) return make_error(bind.error());

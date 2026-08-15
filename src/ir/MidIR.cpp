@@ -29,6 +29,7 @@ const char* op_kind_name(OpKind kind) {
         case OpKind::SlidingQueryKeyScore: return "sliding_query_key_score";
         case OpKind::Softmax:   return "softmax";
         case OpKind::Embedding: return "embedding";
+        case OpKind::RoPE:      return "rope";
         case OpKind::RMSNorm:   return "rms_norm";
         case OpKind::LayerNorm: return "layer_norm";
         case OpKind::NUM_KINDS: return "?";
@@ -531,6 +532,50 @@ public:
     }
 };
 
+class RoPEOpDef : public OpDef {
+public:
+    OpKind kind() const override { return OpKind::RoPE; }
+    const char* name() const override { return "rope"; }
+    std::vector<ValueType> infer_types(
+        std::span<Value* const> operands,
+        const AttrMap&) const override
+    {
+        return {{operands[0]->shape, operands[0]->dtype}};
+    }
+    void verify(
+        std::span<Value* const> operands,
+        const AttrMap& attrs) const override
+    {
+        if (operands.size() != 1) {
+            fprintf(stderr, "rope expects 1 operand, got %zu\n", operands.size());
+            abort();
+        }
+        if (operands[0]->dtype != core::DType::F32) {
+            fprintf(stderr, "rope input must be f32\n");
+            abort();
+        }
+        if (operands[0]->shape.rank() < 2) {
+            fprintf(stderr, "rope input must have rank >= 2\n");
+            abort();
+        }
+        int64_t dim = operands[0]->shape.dim(operands[0]->shape.rank() - 1);
+        if (dim >= 0 && (dim <= 0 || dim % 2 != 0)) {
+            fprintf(stderr, "rope last dimension must be positive and even\n");
+            abort();
+        }
+
+        auto theta = attrs.find("rope_theta");
+        if (theta != attrs.end() && theta->second.kind != AttrValue::Float) {
+            fprintf(stderr, "rope theta attr must be float\n");
+            abort();
+        }
+        if (theta != attrs.end() && theta->second.floatVal <= 0.0) {
+            fprintf(stderr, "rope theta attr must be > 0\n");
+            abort();
+        }
+    }
+};
+
 class RMSNormOpDef : public OpDef {
 public:
     OpKind kind() const override { return OpKind::RMSNorm; }
@@ -644,6 +689,7 @@ void register_all_ops() {
     static SlidingQueryKeyScoreOpDef sliding_query_key_score_def;
     static SoftmaxOpDef softmax_def;
     static EmbeddingOpDef embedding_def;
+    static RoPEOpDef rope_def;
     static RMSNormOpDef rms_norm_def;
     static LayerNormOpDef layer_norm_def;
 
@@ -661,6 +707,7 @@ void register_all_ops() {
     reg.add(&sliding_query_key_score_def);
     reg.add(&softmax_def);
     reg.add(&embedding_def);
+    reg.add(&rope_def);
     reg.add(&rms_norm_def);
     reg.add(&layer_norm_def);
 }
@@ -896,6 +943,13 @@ Value* Builder::createSoftmax(Value* x, int64_t dim) {
 Value* Builder::createEmbedding(Value* ids, Value* weight) {
     Value* operands[] = {ids, weight};
     return createOp(OpKind::Embedding, operands)[0];
+}
+
+Value* Builder::createRoPE(Value* x, float theta) {
+    Value* operands[] = {x};
+    AttrMap attrs;
+    attrs["rope_theta"] = AttrValue::make_float(theta);
+    return createOp(OpKind::RoPE, operands, attrs)[0];
 }
 
 Value* Builder::createRMSNorm(Value* x, Value* weight, float epsilon) {

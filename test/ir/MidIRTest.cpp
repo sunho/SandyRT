@@ -243,6 +243,19 @@ TEST_F(MidIRTest, EmbeddingTypeInference) {
     EXPECT_EQ(out->def->kind, sandy::ir::mid_ir::OpKind::Embedding);
 }
 
+TEST_F(MidIRTest, RoPETypeInferenceSupportsArbitraryRank) {
+    sandy::ir::mid_ir::Graph graph;
+    sandy::ir::mid_ir::Builder builder(graph);
+
+    auto* x = builder.createInput("x", sandy::core::Shape({2, 3, 4, 5, 6}), sandy::core::DType::F32);
+    auto* out = builder.createRoPE(x, 10000.0f);
+
+    EXPECT_EQ(out->shape, x->shape);
+    EXPECT_EQ(out->dtype, sandy::core::DType::F32);
+    EXPECT_EQ(out->def->kind, sandy::ir::mid_ir::OpKind::RoPE);
+    EXPECT_EQ(out->def->attrs.at("rope_theta").floatVal, 10000.0);
+}
+
 TEST_F(MidIRTest, UseDefChains) {
     sandy::ir::mid_ir::Graph graph;
     sandy::ir::mid_ir::Builder builder(graph);

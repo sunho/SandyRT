@@ -11,6 +11,13 @@ Result<int64_t> get_int_attr(const AttrMap& attrs, const std::string& name) {
     return it->second.intVal;
 }
 
+float get_float_attr_or(const AttrMap& attrs, const std::string& name, float fallback) {
+    auto it = attrs.find(name);
+    if (it == attrs.end() || it->second.kind != AttrValue::Float)
+        return fallback;
+    return static_cast<float>(it->second.floatVal);
+}
+
 int64_t get_int_attr_or(const AttrMap& attrs, const std::string& name, int64_t fallback) {
     auto it = attrs.find(name);
     if (it == attrs.end() || it->second.kind != AttrValue::Int)
@@ -205,6 +212,7 @@ BuiltinLowering BuiltinLowering::createDefault() {
         int64_t headDim = headDimResult.take();
 
         int64_t window = get_int_attr_or(attrs, "window", 0);
+        float ropeTheta = get_float_attr_or(attrs, "rope_theta", 0.0f);
         if (heads <= 0 || kvHeads <= 0 || headDim <= 0)
             return make_error("kv_attention heads, kv_heads, and head_dim must be positive");
         if (heads % kvHeads != 0)
@@ -249,6 +257,10 @@ BuiltinLowering BuiltinLowering::createDefault() {
             v = builder.createPermute(
                 builder.createReshape(vFlat, {batch, seq, kvHeads, headDim}),
                 {0, 2, 1, 3});
+            if (ropeTheta > 0.0f) {
+                q = builder.createRoPE(q, ropeTheta);
+                k = builder.createRoPE(k, ropeTheta);
+            }
 
             auto* scores = builder.createSlidingQueryKeyScore(q, k, window);
             auto* probs = builder.createSoftmax(scores, -1);
@@ -269,6 +281,10 @@ BuiltinLowering BuiltinLowering::createDefault() {
             v = builder.createPermute(
                 builder.createReshape(vFlat, {seq, kvHeads, headDim}),
                 {1, 0, 2});
+            if (ropeTheta > 0.0f) {
+                q = builder.createRoPE(q, ropeTheta);
+                k = builder.createRoPE(k, ropeTheta);
+            }
 
             auto* scores = builder.createSlidingQueryKeyScore(q, k, window);
             auto* probs = builder.createSoftmax(scores, -1);
@@ -290,6 +306,23 @@ BuiltinLowering BuiltinLowering::createDefault() {
         auto resultCount = expect_num_results("embedding", numResults, 1);
         if (!resultCount) return make_error(resultCount.error());
         return std::vector<Value*>{builder.createEmbedding(operands[0], operands[1])};
+    });
+
+    bl.add("rope", [](Builder& builder,
+                       const std::vector<Value*>& operands,
+                       const AttrMap& attrs,
+                       int numResults) -> Result<std::vector<Value*>> {
+        auto resultCount = expect_num_results("rope", numResults, 1);
+        if (!resultCount) return make_error(resultCount.error());
+        if (operands.size() != 1)
+            return make_error("rope expects one operand");
+        float theta = 10000.0f;
+        auto it = attrs.find("theta");
+        if (it == attrs.end())
+            it = attrs.find("rope_theta");
+        if (it != attrs.end() && it->second.kind == AttrValue::Float)
+            theta = static_cast<float>(it->second.floatVal);
+        return std::vector<Value*>{builder.createRoPE(operands[0], theta)};
     });
 
     bl.add("rms_norm", [](Builder& builder,
