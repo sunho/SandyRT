@@ -1,0 +1,470 @@
+%0 = input("input_ids") : node
+%1 = input("position_ids") : node
+%2 = weight("wte.weight") : node
+%3 = builtin("embedding", %0, %2) : node
+%4 = weight("wpe.weight") : node
+%5 = builtin("embedding", %1, %4) : node
+%6 = builtin("add", %3, %5) : node
+%7 = weight("h.0.ln_1.weight") : node
+%8 = weight("h.0.ln_1.bias") : node
+%9 = builtin("layer_norm", %6, %7, %8, epsilon=1e-05) : node
+%10 = weight("h.0.attn.q_proj.weight") : node
+%11 = weight("h.0.attn.q_proj.bias") : node
+%12 = builtin("linear", %9, %10, %11) : node
+%13 = weight("h.0.attn.k_proj.weight") : node
+%14 = weight("h.0.attn.k_proj.bias") : node
+%15 = builtin("linear", %9, %13, %14) : node
+%16 = weight("h.0.attn.v_proj.weight") : node
+%17 = weight("h.0.attn.v_proj.bias") : node
+%18 = builtin("linear", %9, %16, %17) : node
+%19 = builtin("reshape", %12, shape=[-1, 16, 12, 64]) : node
+%20 = builtin("reshape", %15, shape=[-1, 16, 12, 64]) : node
+%21 = builtin("reshape", %18, shape=[-1, 16, 12, 64]) : node
+%22 = builtin("permute", %19, dims=[0, 2, 1, 3]) : node
+%23 = builtin("permute", %20, dims=[0, 2, 1, 3]) : node
+%24 = builtin("permute", %21, dims=[0, 2, 1, 3]) : node
+%25 = builtin("sliding_query_key_score", %22, %23, window=0) : node
+%26 = builtin("softmax", %25, dim=-1) : node
+%27 = builtin("matmul", %26, %24) : node
+%28 = builtin("permute", %27, dims=[0, 2, 1, 3]) : node
+%29 = builtin("reshape", %28, shape=[-1, 16, 768]) : node
+%30 = weight("h.0.attn.c_proj.weight") : node
+%31 = weight("h.0.attn.c_proj.bias") : node
+%32 = builtin("linear", %29, %30, %31) : node
+%33 = builtin("add", %6, %32) : node
+%34 = weight("h.0.ln_2.weight") : node
+%35 = weight("h.0.ln_2.bias") : node
+%36 = builtin("layer_norm", %33, %34, %35, epsilon=1e-05) : node
+%37 = weight("h.0.mlp.c_fc.weight") : node
+%38 = weight("h.0.mlp.c_fc.bias") : node
+%39 = builtin("linear", %36, %37, %38) : node
+%40 = builtin("gelu", %39) : node
+%41 = weight("h.0.mlp.c_proj.weight") : node
+%42 = weight("h.0.mlp.c_proj.bias") : node
+%43 = builtin("linear", %40, %41, %42) : node
+%44 = builtin("add", %33, %43) : node
+%45 = weight("h.1.ln_1.weight") : node
+%46 = weight("h.1.ln_1.bias") : node
+%47 = builtin("layer_norm", %44, %45, %46, epsilon=1e-05) : node
+%48 = weight("h.1.attn.q_proj.weight") : node
+%49 = weight("h.1.attn.q_proj.bias") : node
+%50 = builtin("linear", %47, %48, %49) : node
+%51 = weight("h.1.attn.k_proj.weight") : node
+%52 = weight("h.1.attn.k_proj.bias") : node
+%53 = builtin("linear", %47, %51, %52) : node
+%54 = weight("h.1.attn.v_proj.weight") : node
+%55 = weight("h.1.attn.v_proj.bias") : node
+%56 = builtin("linear", %47, %54, %55) : node
+%57 = builtin("reshape", %50, shape=[-1, 16, 12, 64]) : node
+%58 = builtin("reshape", %53, shape=[-1, 16, 12, 64]) : node
+%59 = builtin("reshape", %56, shape=[-1, 16, 12, 64]) : node
+%60 = builtin("permute", %57, dims=[0, 2, 1, 3]) : node
+%61 = builtin("permute", %58, dims=[0, 2, 1, 3]) : node
+%62 = builtin("permute", %59, dims=[0, 2, 1, 3]) : node
+%63 = builtin("sliding_query_key_score", %60, %61, window=0) : node
+%64 = builtin("softmax", %63, dim=-1) : node
+%65 = builtin("matmul", %64, %62) : node
+%66 = builtin("permute", %65, dims=[0, 2, 1, 3]) : node
+%67 = builtin("reshape", %66, shape=[-1, 16, 768]) : node
+%68 = weight("h.1.attn.c_proj.weight") : node
+%69 = weight("h.1.attn.c_proj.bias") : node
+%70 = builtin("linear", %67, %68, %69) : node
+%71 = builtin("add", %44, %70) : node
+%72 = weight("h.1.ln_2.weight") : node
+%73 = weight("h.1.ln_2.bias") : node
+%74 = builtin("layer_norm", %71, %72, %73, epsilon=1e-05) : node
+%75 = weight("h.1.mlp.c_fc.weight") : node
+%76 = weight("h.1.mlp.c_fc.bias") : node
+%77 = builtin("linear", %74, %75, %76) : node
+%78 = builtin("gelu", %77) : node
+%79 = weight("h.1.mlp.c_proj.weight") : node
+%80 = weight("h.1.mlp.c_proj.bias") : node
+%81 = builtin("linear", %78, %79, %80) : node
+%82 = builtin("add", %71, %81) : node
+%83 = weight("h.2.ln_1.weight") : node
+%84 = weight("h.2.ln_1.bias") : node
+%85 = builtin("layer_norm", %82, %83, %84, epsilon=1e-05) : node
+%86 = weight("h.2.attn.q_proj.weight") : node
+%87 = weight("h.2.attn.q_proj.bias") : node
+%88 = builtin("linear", %85, %86, %87) : node
+%89 = weight("h.2.attn.k_proj.weight") : node
+%90 = weight("h.2.attn.k_proj.bias") : node
+%91 = builtin("linear", %85, %89, %90) : node
+%92 = weight("h.2.attn.v_proj.weight") : node
+%93 = weight("h.2.attn.v_proj.bias") : node
+%94 = builtin("linear", %85, %92, %93) : node
+%95 = builtin("reshape", %88, shape=[-1, 16, 12, 64]) : node
+%96 = builtin("reshape", %91, shape=[-1, 16, 12, 64]) : node
+%97 = builtin("reshape", %94, shape=[-1, 16, 12, 64]) : node
+%98 = builtin("permute", %95, dims=[0, 2, 1, 3]) : node
+%99 = builtin("permute", %96, dims=[0, 2, 1, 3]) : node
+%100 = builtin("permute", %97, dims=[0, 2, 1, 3]) : node
+%101 = builtin("sliding_query_key_score", %98, %99, window=0) : node
+%102 = builtin("softmax", %101, dim=-1) : node
+%103 = builtin("matmul", %102, %100) : node
+%104 = builtin("permute", %103, dims=[0, 2, 1, 3]) : node
+%105 = builtin("reshape", %104, shape=[-1, 16, 768]) : node
+%106 = weight("h.2.attn.c_proj.weight") : node
+%107 = weight("h.2.attn.c_proj.bias") : node
+%108 = builtin("linear", %105, %106, %107) : node
+%109 = builtin("add", %82, %108) : node
+%110 = weight("h.2.ln_2.weight") : node
+%111 = weight("h.2.ln_2.bias") : node
+%112 = builtin("layer_norm", %109, %110, %111, epsilon=1e-05) : node
+%113 = weight("h.2.mlp.c_fc.weight") : node
+%114 = weight("h.2.mlp.c_fc.bias") : node
+%115 = builtin("linear", %112, %113, %114) : node
+%116 = builtin("gelu", %115) : node
+%117 = weight("h.2.mlp.c_proj.weight") : node
+%118 = weight("h.2.mlp.c_proj.bias") : node
+%119 = builtin("linear", %116, %117, %118) : node
+%120 = builtin("add", %109, %119) : node
+%121 = weight("h.3.ln_1.weight") : node
+%122 = weight("h.3.ln_1.bias") : node
+%123 = builtin("layer_norm", %120, %121, %122, epsilon=1e-05) : node
+%124 = weight("h.3.attn.q_proj.weight") : node
+%125 = weight("h.3.attn.q_proj.bias") : node
+%126 = builtin("linear", %123, %124, %125) : node
+%127 = weight("h.3.attn.k_proj.weight") : node
+%128 = weight("h.3.attn.k_proj.bias") : node
+%129 = builtin("linear", %123, %127, %128) : node
+%130 = weight("h.3.attn.v_proj.weight") : node
+%131 = weight("h.3.attn.v_proj.bias") : node
+%132 = builtin("linear", %123, %130, %131) : node
+%133 = builtin("reshape", %126, shape=[-1, 16, 12, 64]) : node
+%134 = builtin("reshape", %129, shape=[-1, 16, 12, 64]) : node
+%135 = builtin("reshape", %132, shape=[-1, 16, 12, 64]) : node
+%136 = builtin("permute", %133, dims=[0, 2, 1, 3]) : node
+%137 = builtin("permute", %134, dims=[0, 2, 1, 3]) : node
+%138 = builtin("permute", %135, dims=[0, 2, 1, 3]) : node
+%139 = builtin("sliding_query_key_score", %136, %137, window=0) : node
+%140 = builtin("softmax", %139, dim=-1) : node
+%141 = builtin("matmul", %140, %138) : node
+%142 = builtin("permute", %141, dims=[0, 2, 1, 3]) : node
+%143 = builtin("reshape", %142, shape=[-1, 16, 768]) : node
+%144 = weight("h.3.attn.c_proj.weight") : node
+%145 = weight("h.3.attn.c_proj.bias") : node
+%146 = builtin("linear", %143, %144, %145) : node
+%147 = builtin("add", %120, %146) : node
+%148 = weight("h.3.ln_2.weight") : node
+%149 = weight("h.3.ln_2.bias") : node
+%150 = builtin("layer_norm", %147, %148, %149, epsilon=1e-05) : node
+%151 = weight("h.3.mlp.c_fc.weight") : node
+%152 = weight("h.3.mlp.c_fc.bias") : node
+%153 = builtin("linear", %150, %151, %152) : node
+%154 = builtin("gelu", %153) : node
+%155 = weight("h.3.mlp.c_proj.weight") : node
+%156 = weight("h.3.mlp.c_proj.bias") : node
+%157 = builtin("linear", %154, %155, %156) : node
+%158 = builtin("add", %147, %157) : node
+%159 = weight("h.4.ln_1.weight") : node
+%160 = weight("h.4.ln_1.bias") : node
+%161 = builtin("layer_norm", %158, %159, %160, epsilon=1e-05) : node
+%162 = weight("h.4.attn.q_proj.weight") : node
+%163 = weight("h.4.attn.q_proj.bias") : node
+%164 = builtin("linear", %161, %162, %163) : node
+%165 = weight("h.4.attn.k_proj.weight") : node
+%166 = weight("h.4.attn.k_proj.bias") : node
+%167 = builtin("linear", %161, %165, %166) : node
+%168 = weight("h.4.attn.v_proj.weight") : node
+%169 = weight("h.4.attn.v_proj.bias") : node
+%170 = builtin("linear", %161, %168, %169) : node
+%171 = builtin("reshape", %164, shape=[-1, 16, 12, 64]) : node
+%172 = builtin("reshape", %167, shape=[-1, 16, 12, 64]) : node
+%173 = builtin("reshape", %170, shape=[-1, 16, 12, 64]) : node
+%174 = builtin("permute", %171, dims=[0, 2, 1, 3]) : node
+%175 = builtin("permute", %172, dims=[0, 2, 1, 3]) : node
+%176 = builtin("permute", %173, dims=[0, 2, 1, 3]) : node
+%177 = builtin("sliding_query_key_score", %174, %175, window=0) : node
+%178 = builtin("softmax", %177, dim=-1) : node
+%179 = builtin("matmul", %178, %176) : node
+%180 = builtin("permute", %179, dims=[0, 2, 1, 3]) : node
+%181 = builtin("reshape", %180, shape=[-1, 16, 768]) : node
+%182 = weight("h.4.attn.c_proj.weight") : node
+%183 = weight("h.4.attn.c_proj.bias") : node
+%184 = builtin("linear", %181, %182, %183) : node
+%185 = builtin("add", %158, %184) : node
+%186 = weight("h.4.ln_2.weight") : node
+%187 = weight("h.4.ln_2.bias") : node
+%188 = builtin("layer_norm", %185, %186, %187, epsilon=1e-05) : node
+%189 = weight("h.4.mlp.c_fc.weight") : node
+%190 = weight("h.4.mlp.c_fc.bias") : node
+%191 = builtin("linear", %188, %189, %190) : node
+%192 = builtin("gelu", %191) : node
+%193 = weight("h.4.mlp.c_proj.weight") : node
+%194 = weight("h.4.mlp.c_proj.bias") : node
+%195 = builtin("linear", %192, %193, %194) : node
+%196 = builtin("add", %185, %195) : node
+%197 = weight("h.5.ln_1.weight") : node
+%198 = weight("h.5.ln_1.bias") : node
+%199 = builtin("layer_norm", %196, %197, %198, epsilon=1e-05) : node
+%200 = weight("h.5.attn.q_proj.weight") : node
+%201 = weight("h.5.attn.q_proj.bias") : node
+%202 = builtin("linear", %199, %200, %201) : node
+%203 = weight("h.5.attn.k_proj.weight") : node
+%204 = weight("h.5.attn.k_proj.bias") : node
+%205 = builtin("linear", %199, %203, %204) : node
+%206 = weight("h.5.attn.v_proj.weight") : node
+%207 = weight("h.5.attn.v_proj.bias") : node
+%208 = builtin("linear", %199, %206, %207) : node
+%209 = builtin("reshape", %202, shape=[-1, 16, 12, 64]) : node
+%210 = builtin("reshape", %205, shape=[-1, 16, 12, 64]) : node
+%211 = builtin("reshape", %208, shape=[-1, 16, 12, 64]) : node
+%212 = builtin("permute", %209, dims=[0, 2, 1, 3]) : node
+%213 = builtin("permute", %210, dims=[0, 2, 1, 3]) : node
+%214 = builtin("permute", %211, dims=[0, 2, 1, 3]) : node
+%215 = builtin("sliding_query_key_score", %212, %213, window=0) : node
+%216 = builtin("softmax", %215, dim=-1) : node
+%217 = builtin("matmul", %216, %214) : node
+%218 = builtin("permute", %217, dims=[0, 2, 1, 3]) : node
+%219 = builtin("reshape", %218, shape=[-1, 16, 768]) : node
+%220 = weight("h.5.attn.c_proj.weight") : node
+%221 = weight("h.5.attn.c_proj.bias") : node
+%222 = builtin("linear", %219, %220, %221) : node
+%223 = builtin("add", %196, %222) : node
+%224 = weight("h.5.ln_2.weight") : node
+%225 = weight("h.5.ln_2.bias") : node
+%226 = builtin("layer_norm", %223, %224, %225, epsilon=1e-05) : node
+%227 = weight("h.5.mlp.c_fc.weight") : node
+%228 = weight("h.5.mlp.c_fc.bias") : node
+%229 = builtin("linear", %226, %227, %228) : node
+%230 = builtin("gelu", %229) : node
+%231 = weight("h.5.mlp.c_proj.weight") : node
+%232 = weight("h.5.mlp.c_proj.bias") : node
+%233 = builtin("linear", %230, %231, %232) : node
+%234 = builtin("add", %223, %233) : node
+%235 = weight("h.6.ln_1.weight") : node
+%236 = weight("h.6.ln_1.bias") : node
+%237 = builtin("layer_norm", %234, %235, %236, epsilon=1e-05) : node
+%238 = weight("h.6.attn.q_proj.weight") : node
+%239 = weight("h.6.attn.q_proj.bias") : node
+%240 = builtin("linear", %237, %238, %239) : node
+%241 = weight("h.6.attn.k_proj.weight") : node
+%242 = weight("h.6.attn.k_proj.bias") : node
+%243 = builtin("linear", %237, %241, %242) : node
+%244 = weight("h.6.attn.v_proj.weight") : node
+%245 = weight("h.6.attn.v_proj.bias") : node
+%246 = builtin("linear", %237, %244, %245) : node
+%247 = builtin("reshape", %240, shape=[-1, 16, 12, 64]) : node
+%248 = builtin("reshape", %243, shape=[-1, 16, 12, 64]) : node
+%249 = builtin("reshape", %246, shape=[-1, 16, 12, 64]) : node
+%250 = builtin("permute", %247, dims=[0, 2, 1, 3]) : node
+%251 = builtin("permute", %248, dims=[0, 2, 1, 3]) : node
+%252 = builtin("permute", %249, dims=[0, 2, 1, 3]) : node
+%253 = builtin("sliding_query_key_score", %250, %251, window=0) : node
+%254 = builtin("softmax", %253, dim=-1) : node
+%255 = builtin("matmul", %254, %252) : node
+%256 = builtin("permute", %255, dims=[0, 2, 1, 3]) : node
+%257 = builtin("reshape", %256, shape=[-1, 16, 768]) : node
+%258 = weight("h.6.attn.c_proj.weight") : node
+%259 = weight("h.6.attn.c_proj.bias") : node
+%260 = builtin("linear", %257, %258, %259) : node
+%261 = builtin("add", %234, %260) : node
+%262 = weight("h.6.ln_2.weight") : node
+%263 = weight("h.6.ln_2.bias") : node
+%264 = builtin("layer_norm", %261, %262, %263, epsilon=1e-05) : node
+%265 = weight("h.6.mlp.c_fc.weight") : node
+%266 = weight("h.6.mlp.c_fc.bias") : node
+%267 = builtin("linear", %264, %265, %266) : node
+%268 = builtin("gelu", %267) : node
+%269 = weight("h.6.mlp.c_proj.weight") : node
+%270 = weight("h.6.mlp.c_proj.bias") : node
+%271 = builtin("linear", %268, %269, %270) : node
+%272 = builtin("add", %261, %271) : node
+%273 = weight("h.7.ln_1.weight") : node
+%274 = weight("h.7.ln_1.bias") : node
+%275 = builtin("layer_norm", %272, %273, %274, epsilon=1e-05) : node
+%276 = weight("h.7.attn.q_proj.weight") : node
+%277 = weight("h.7.attn.q_proj.bias") : node
+%278 = builtin("linear", %275, %276, %277) : node
+%279 = weight("h.7.attn.k_proj.weight") : node
+%280 = weight("h.7.attn.k_proj.bias") : node
+%281 = builtin("linear", %275, %279, %280) : node
+%282 = weight("h.7.attn.v_proj.weight") : node
+%283 = weight("h.7.attn.v_proj.bias") : node
+%284 = builtin("linear", %275, %282, %283) : node
+%285 = builtin("reshape", %278, shape=[-1, 16, 12, 64]) : node
+%286 = builtin("reshape", %281, shape=[-1, 16, 12, 64]) : node
+%287 = builtin("reshape", %284, shape=[-1, 16, 12, 64]) : node
+%288 = builtin("permute", %285, dims=[0, 2, 1, 3]) : node
+%289 = builtin("permute", %286, dims=[0, 2, 1, 3]) : node
+%290 = builtin("permute", %287, dims=[0, 2, 1, 3]) : node
+%291 = builtin("sliding_query_key_score", %288, %289, window=0) : node
+%292 = builtin("softmax", %291, dim=-1) : node
+%293 = builtin("matmul", %292, %290) : node
+%294 = builtin("permute", %293, dims=[0, 2, 1, 3]) : node
+%295 = builtin("reshape", %294, shape=[-1, 16, 768]) : node
+%296 = weight("h.7.attn.c_proj.weight") : node
+%297 = weight("h.7.attn.c_proj.bias") : node
+%298 = builtin("linear", %295, %296, %297) : node
+%299 = builtin("add", %272, %298) : node
+%300 = weight("h.7.ln_2.weight") : node
+%301 = weight("h.7.ln_2.bias") : node
+%302 = builtin("layer_norm", %299, %300, %301, epsilon=1e-05) : node
+%303 = weight("h.7.mlp.c_fc.weight") : node
+%304 = weight("h.7.mlp.c_fc.bias") : node
+%305 = builtin("linear", %302, %303, %304) : node
+%306 = builtin("gelu", %305) : node
+%307 = weight("h.7.mlp.c_proj.weight") : node
+%308 = weight("h.7.mlp.c_proj.bias") : node
+%309 = builtin("linear", %306, %307, %308) : node
+%310 = builtin("add", %299, %309) : node
+%311 = weight("h.8.ln_1.weight") : node
+%312 = weight("h.8.ln_1.bias") : node
+%313 = builtin("layer_norm", %310, %311, %312, epsilon=1e-05) : node
+%314 = weight("h.8.attn.q_proj.weight") : node
+%315 = weight("h.8.attn.q_proj.bias") : node
+%316 = builtin("linear", %313, %314, %315) : node
+%317 = weight("h.8.attn.k_proj.weight") : node
+%318 = weight("h.8.attn.k_proj.bias") : node
+%319 = builtin("linear", %313, %317, %318) : node
+%320 = weight("h.8.attn.v_proj.weight") : node
+%321 = weight("h.8.attn.v_proj.bias") : node
+%322 = builtin("linear", %313, %320, %321) : node
+%323 = builtin("reshape", %316, shape=[-1, 16, 12, 64]) : node
+%324 = builtin("reshape", %319, shape=[-1, 16, 12, 64]) : node
+%325 = builtin("reshape", %322, shape=[-1, 16, 12, 64]) : node
+%326 = builtin("permute", %323, dims=[0, 2, 1, 3]) : node
+%327 = builtin("permute", %324, dims=[0, 2, 1, 3]) : node
+%328 = builtin("permute", %325, dims=[0, 2, 1, 3]) : node
+%329 = builtin("sliding_query_key_score", %326, %327, window=0) : node
+%330 = builtin("softmax", %329, dim=-1) : node
+%331 = builtin("matmul", %330, %328) : node
+%332 = builtin("permute", %331, dims=[0, 2, 1, 3]) : node
+%333 = builtin("reshape", %332, shape=[-1, 16, 768]) : node
+%334 = weight("h.8.attn.c_proj.weight") : node
+%335 = weight("h.8.attn.c_proj.bias") : node
+%336 = builtin("linear", %333, %334, %335) : node
+%337 = builtin("add", %310, %336) : node
+%338 = weight("h.8.ln_2.weight") : node
+%339 = weight("h.8.ln_2.bias") : node
+%340 = builtin("layer_norm", %337, %338, %339, epsilon=1e-05) : node
+%341 = weight("h.8.mlp.c_fc.weight") : node
+%342 = weight("h.8.mlp.c_fc.bias") : node
+%343 = builtin("linear", %340, %341, %342) : node
+%344 = builtin("gelu", %343) : node
+%345 = weight("h.8.mlp.c_proj.weight") : node
+%346 = weight("h.8.mlp.c_proj.bias") : node
+%347 = builtin("linear", %344, %345, %346) : node
+%348 = builtin("add", %337, %347) : node
+%349 = weight("h.9.ln_1.weight") : node
+%350 = weight("h.9.ln_1.bias") : node
+%351 = builtin("layer_norm", %348, %349, %350, epsilon=1e-05) : node
+%352 = weight("h.9.attn.q_proj.weight") : node
+%353 = weight("h.9.attn.q_proj.bias") : node
+%354 = builtin("linear", %351, %352, %353) : node
+%355 = weight("h.9.attn.k_proj.weight") : node
+%356 = weight("h.9.attn.k_proj.bias") : node
+%357 = builtin("linear", %351, %355, %356) : node
+%358 = weight("h.9.attn.v_proj.weight") : node
+%359 = weight("h.9.attn.v_proj.bias") : node
+%360 = builtin("linear", %351, %358, %359) : node
+%361 = builtin("reshape", %354, shape=[-1, 16, 12, 64]) : node
+%362 = builtin("reshape", %357, shape=[-1, 16, 12, 64]) : node
+%363 = builtin("reshape", %360, shape=[-1, 16, 12, 64]) : node
+%364 = builtin("permute", %361, dims=[0, 2, 1, 3]) : node
+%365 = builtin("permute", %362, dims=[0, 2, 1, 3]) : node
+%366 = builtin("permute", %363, dims=[0, 2, 1, 3]) : node
+%367 = builtin("sliding_query_key_score", %364, %365, window=0) : node
+%368 = builtin("softmax", %367, dim=-1) : node
+%369 = builtin("matmul", %368, %366) : node
+%370 = builtin("permute", %369, dims=[0, 2, 1, 3]) : node
+%371 = builtin("reshape", %370, shape=[-1, 16, 768]) : node
+%372 = weight("h.9.attn.c_proj.weight") : node
+%373 = weight("h.9.attn.c_proj.bias") : node
+%374 = builtin("linear", %371, %372, %373) : node
+%375 = builtin("add", %348, %374) : node
+%376 = weight("h.9.ln_2.weight") : node
+%377 = weight("h.9.ln_2.bias") : node
+%378 = builtin("layer_norm", %375, %376, %377, epsilon=1e-05) : node
+%379 = weight("h.9.mlp.c_fc.weight") : node
+%380 = weight("h.9.mlp.c_fc.bias") : node
+%381 = builtin("linear", %378, %379, %380) : node
+%382 = builtin("gelu", %381) : node
+%383 = weight("h.9.mlp.c_proj.weight") : node
+%384 = weight("h.9.mlp.c_proj.bias") : node
+%385 = builtin("linear", %382, %383, %384) : node
+%386 = builtin("add", %375, %385) : node
+%387 = weight("h.10.ln_1.weight") : node
+%388 = weight("h.10.ln_1.bias") : node
+%389 = builtin("layer_norm", %386, %387, %388, epsilon=1e-05) : node
+%390 = weight("h.10.attn.q_proj.weight") : node
+%391 = weight("h.10.attn.q_proj.bias") : node
+%392 = builtin("linear", %389, %390, %391) : node
+%393 = weight("h.10.attn.k_proj.weight") : node
+%394 = weight("h.10.attn.k_proj.bias") : node
+%395 = builtin("linear", %389, %393, %394) : node
+%396 = weight("h.10.attn.v_proj.weight") : node
+%397 = weight("h.10.attn.v_proj.bias") : node
+%398 = builtin("linear", %389, %396, %397) : node
+%399 = builtin("reshape", %392, shape=[-1, 16, 12, 64]) : node
+%400 = builtin("reshape", %395, shape=[-1, 16, 12, 64]) : node
+%401 = builtin("reshape", %398, shape=[-1, 16, 12, 64]) : node
+%402 = builtin("permute", %399, dims=[0, 2, 1, 3]) : node
+%403 = builtin("permute", %400, dims=[0, 2, 1, 3]) : node
+%404 = builtin("permute", %401, dims=[0, 2, 1, 3]) : node
+%405 = builtin("sliding_query_key_score", %402, %403, window=0) : node
+%406 = builtin("softmax", %405, dim=-1) : node
+%407 = builtin("matmul", %406, %404) : node
+%408 = builtin("permute", %407, dims=[0, 2, 1, 3]) : node
+%409 = builtin("reshape", %408, shape=[-1, 16, 768]) : node
+%410 = weight("h.10.attn.c_proj.weight") : node
+%411 = weight("h.10.attn.c_proj.bias") : node
+%412 = builtin("linear", %409, %410, %411) : node
+%413 = builtin("add", %386, %412) : node
+%414 = weight("h.10.ln_2.weight") : node
+%415 = weight("h.10.ln_2.bias") : node
+%416 = builtin("layer_norm", %413, %414, %415, epsilon=1e-05) : node
+%417 = weight("h.10.mlp.c_fc.weight") : node
+%418 = weight("h.10.mlp.c_fc.bias") : node
+%419 = builtin("linear", %416, %417, %418) : node
+%420 = builtin("gelu", %419) : node
+%421 = weight("h.10.mlp.c_proj.weight") : node
+%422 = weight("h.10.mlp.c_proj.bias") : node
+%423 = builtin("linear", %420, %421, %422) : node
+%424 = builtin("add", %413, %423) : node
+%425 = weight("h.11.ln_1.weight") : node
+%426 = weight("h.11.ln_1.bias") : node
+%427 = builtin("layer_norm", %424, %425, %426, epsilon=1e-05) : node
+%428 = weight("h.11.attn.q_proj.weight") : node
+%429 = weight("h.11.attn.q_proj.bias") : node
+%430 = builtin("linear", %427, %428, %429) : node
+%431 = weight("h.11.attn.k_proj.weight") : node
+%432 = weight("h.11.attn.k_proj.bias") : node
+%433 = builtin("linear", %427, %431, %432) : node
+%434 = weight("h.11.attn.v_proj.weight") : node
+%435 = weight("h.11.attn.v_proj.bias") : node
+%436 = builtin("linear", %427, %434, %435) : node
+%437 = builtin("reshape", %430, shape=[-1, 16, 12, 64]) : node
+%438 = builtin("reshape", %433, shape=[-1, 16, 12, 64]) : node
+%439 = builtin("reshape", %436, shape=[-1, 16, 12, 64]) : node
+%440 = builtin("permute", %437, dims=[0, 2, 1, 3]) : node
+%441 = builtin("permute", %438, dims=[0, 2, 1, 3]) : node
+%442 = builtin("permute", %439, dims=[0, 2, 1, 3]) : node
+%443 = builtin("sliding_query_key_score", %440, %441, window=0) : node
+%444 = builtin("softmax", %443, dim=-1) : node
+%445 = builtin("matmul", %444, %442) : node
+%446 = builtin("permute", %445, dims=[0, 2, 1, 3]) : node
+%447 = builtin("reshape", %446, shape=[-1, 16, 768]) : node
+%448 = weight("h.11.attn.c_proj.weight") : node
+%449 = weight("h.11.attn.c_proj.bias") : node
+%450 = builtin("linear", %447, %448, %449) : node
+%451 = builtin("add", %424, %450) : node
+%452 = weight("h.11.ln_2.weight") : node
+%453 = weight("h.11.ln_2.bias") : node
+%454 = builtin("layer_norm", %451, %452, %453, epsilon=1e-05) : node
+%455 = weight("h.11.mlp.c_fc.weight") : node
+%456 = weight("h.11.mlp.c_fc.bias") : node
+%457 = builtin("linear", %454, %455, %456) : node
+%458 = builtin("gelu", %457) : node
+%459 = weight("h.11.mlp.c_proj.weight") : node
+%460 = weight("h.11.mlp.c_proj.bias") : node
+%461 = builtin("linear", %458, %459, %460) : node
+%462 = builtin("add", %451, %461) : node
+%463 = weight("ln_f.weight") : node
+%464 = weight("ln_f.bias") : node
+%465 = builtin("layer_norm", %462, %463, %464, epsilon=1e-05) : node
+%466 = weight("wte.weight") : node
+%467 = builtin("transpose", %466) : node
+%468 = builtin("matmul", %465, %467) : node
+return %468

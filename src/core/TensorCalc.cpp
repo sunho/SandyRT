@@ -438,42 +438,14 @@ Result<OwnedTensor> reshape_f32(
     auto xDtype = require_f32(xDesc, "reshape input");
     if (!xDtype) return make_error(xDtype.error());
 
-    for (int i = 0; i < shape.rank(); i++) {
-        if (shape.dim(i) < Shape::kDynamic)
-            return make_error("reshape dimensions must be >= -1");
-    }
-
-    int64_t inputNumel = xDesc.shape.numel();
-    if (inputNumel < 0)
-        return make_error("reshape input must have static shape");
-
-    auto dims = shape.dims();
-    int inferIndex = -1;
-    int64_t knownProduct = 1;
-    for (int i = 0; i < static_cast<int>(dims.size()); i++) {
-        if (dims[static_cast<size_t>(i)] == Shape::kDynamic) {
-            if (inferIndex >= 0)
-                return make_error("reshape may contain at most one -1 dimension");
-            inferIndex = i;
-        } else {
-            knownProduct *= dims[static_cast<size_t>(i)];
-        }
-    }
-
-    if (inferIndex >= 0) {
-        if (knownProduct == 0 || inputNumel % knownProduct != 0)
-            return make_error("reshape cannot infer -1 dimension");
-        dims[static_cast<size_t>(inferIndex)] = inputNumel / knownProduct;
-        shape = Shape(std::move(dims));
-    } else if (shape.numel() != inputNumel) {
-        return make_error("reshape element count mismatch");
-    }
+    auto inferred = infer_reshape_shape(xDesc.shape, std::move(shape));
+    if (!inferred) return make_error(inferred.error());
 
     auto xBytes = require_bytes(x, xDesc, "reshape input");
     if (!xBytes) return make_error(xBytes.error());
 
     OwnedTensor out;
-    out.desc = TensorDesc(std::move(shape), DType::F32);
+    out.desc = TensorDesc(inferred.take(), DType::F32);
     out.data.assign(x.begin(), x.end());
     return out;
 }
