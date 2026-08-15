@@ -110,19 +110,23 @@ TEST_F(EngineCompileTest, CompileStoresDeviceProgramsInInvocPlan) {
     ASSERT_TRUE(planResult) << planResult.error();
     auto plan = planResult.take();
 
-    ASSERT_EQ(fakePtr->compiledOps.size(), 2u);
-    EXPECT_EQ(fakePtr->compiledOps[0], tanh->def);
-    EXPECT_EQ(fakePtr->compiledOps[1], out->def);
+    ASSERT_EQ(fakePtr->compiledOps.size(), 3u);
+    EXPECT_EQ(fakePtr->compiledOps[0], reshaped->def);
+    EXPECT_EQ(fakePtr->compiledOps[1], tanh->def);
+    EXPECT_EQ(fakePtr->compiledOps[2], out->def);
 
-    ASSERT_EQ(plan->programs.size(), 2u);
+    ASSERT_EQ(plan->programs.size(), 3u);
     EXPECT_EQ(plan->programs[0].id, 0u);
     EXPECT_EQ(plan->programs[0].device, 0u);
     EXPECT_EQ(plan->programs[0].deviceProgram, 100u);
     EXPECT_EQ(plan->programs[1].id, 1u);
     EXPECT_EQ(plan->programs[1].device, 0u);
     EXPECT_EQ(plan->programs[1].deviceProgram, 101u);
+    EXPECT_EQ(plan->programs[2].id, 2u);
+    EXPECT_EQ(plan->programs[2].device, 0u);
+    EXPECT_EQ(plan->programs[2].deviceProgram, 102u);
 
-    EXPECT_EQ(plan->outputs, std::vector<sandy::engine::InvocValueId>({2}));
+    EXPECT_EQ(plan->outputs, std::vector<sandy::engine::InvocValueId>({3}));
     ASSERT_FALSE(plan->instructions.empty());
     EXPECT_EQ(plan->instructions.back().kind, sandy::engine::InvocInstructionKind::StoreOutputs);
 }

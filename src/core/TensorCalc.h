@@ -49,6 +49,7 @@ Result<void> sqrt(TensorRef x, MutableTensorRef out);
 Result<void> tanh(TensorRef x, MutableTensorRef out);
 Result<void> matmul(TensorRef lhs, TensorRef rhs, MutableTensorRef out);
 Result<void> transpose(TensorRef x, MutableTensorRef out);
+Result<void> reshape(TensorRef x, MutableTensorRef out);
 Result<void> permute(TensorRef x, std::span<const int64_t> dims, MutableTensorRef out);
 Result<void> sliding_query_key_score(
     TensorRef q,
@@ -58,6 +59,8 @@ Result<void> sliding_query_key_score(
 Result<void> softmax(TensorRef x, int64_t dim, MutableTensorRef out);
 Result<void> embedding(TensorRef ids, TensorRef weight, MutableTensorRef out);
 Result<void> rope(TensorRef x, float theta, MutableTensorRef out);
+Result<void> rope(TensorRef x, float theta, int64_t rotary_dim, MutableTensorRef out);
+Result<void> rms_norm(TensorRef x, float epsilon, MutableTensorRef out);
 Result<void> rms_norm(TensorRef x, TensorRef weight, float epsilon, MutableTensorRef out);
 Result<void> layer_norm(
     TensorRef x,

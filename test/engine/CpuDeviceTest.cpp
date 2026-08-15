@@ -92,7 +92,7 @@ TEST_F(CpuDeviceTest, LoadReadAndDeallocBuffer) {
     EXPECT_FALSE(readAfterDealloc);
 }
 
-TEST_F(CpuDeviceTest, CompileRejectsReshape) {
+TEST_F(CpuDeviceTest, RunReshapeF32) {
     sandy::ir::mid_ir::Graph graph;
     sandy::ir::mid_ir::Builder builder(graph);
     auto* x = builder.createInput(0, sandy::core::Shape({2, 3}), sandy::core::DType::F32);
@@ -100,8 +100,23 @@ TEST_F(CpuDeviceTest, CompileRejectsReshape) {
 
     sandy::engine::CpuDevice device;
     auto program = device.compile(*out->def);
-    EXPECT_FALSE(program);
-    EXPECT_NE(program.error().find("reshape"), std::string::npos);
+    ASSERT_TRUE(program) << program.error();
+
+    auto xHost = make_f32_buffer("x", sandy::core::Shape({2, 3}), {
+        1.0f, 2.0f, 3.0f,
+        4.0f, 5.0f, 6.0f,
+    });
+    auto xBuffer = device.load(*xHost);
+    ASSERT_TRUE(xBuffer) << xBuffer.error();
+    auto outBuffer = device.alloc(sandy::core::TensorDesc(out->shape, out->dtype));
+    ASSERT_TRUE(outBuffer) << outBuffer.error();
+
+    std::vector<sandy::engine::DeviceBufferId> inputs = {*xBuffer};
+    std::vector<sandy::engine::DeviceBufferId> outputs = {*outBuffer};
+    auto run = device.run(*program, inputs, outputs);
+    ASSERT_TRUE(run) << run.error();
+
+    expect_f32_output(device, *outBuffer, {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f});
 }
 
 TEST_F(CpuDeviceTest, RunAddF32) {

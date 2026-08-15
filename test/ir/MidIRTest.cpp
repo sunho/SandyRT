@@ -57,6 +57,18 @@ TEST_F(MidIRTest, ReLUTypeInference) {
     EXPECT_EQ(out->dtype, x->dtype);
 }
 
+TEST_F(MidIRTest, BinaryElementwiseAllowsScalarDTypeMismatch) {
+    sandy::ir::mid_ir::Graph graph;
+    sandy::ir::mid_ir::Builder builder(graph);
+
+    auto* x = builder.createInput(0, sandy::core::Shape({4, 128}), sandy::core::DType::BF16);
+    auto* scale = builder.createConstantF32(0.5f);
+    auto* out = builder.createMul(x, scale);
+
+    EXPECT_EQ(out->shape, x->shape);
+    EXPECT_EQ(out->dtype, sandy::core::DType::BF16);
+}
+
 TEST_F(MidIRTest, RMSNormTypeInference) {
     sandy::ir::mid_ir::Graph graph;
     sandy::ir::mid_ir::Builder builder(graph);
@@ -68,6 +80,20 @@ TEST_F(MidIRTest, RMSNormTypeInference) {
     EXPECT_EQ(out->shape, x->shape);
     EXPECT_EQ(out->dtype, x->dtype);
     EXPECT_EQ(out->def->kind, sandy::ir::mid_ir::OpKind::RMSNorm);
+}
+
+TEST_F(MidIRTest, RMSNormWithoutScaleTypeInference) {
+    sandy::ir::mid_ir::Graph graph;
+    sandy::ir::mid_ir::Builder builder(graph);
+
+    auto* x = builder.createInput(0, sandy::core::Shape({2, 3}), sandy::core::DType::F32);
+    auto* out = builder.createRMSNorm(x);
+
+    EXPECT_EQ(out->shape, x->shape);
+    EXPECT_EQ(out->dtype, x->dtype);
+    EXPECT_EQ(out->def->kind, sandy::ir::mid_ir::OpKind::RMSNorm);
+    ASSERT_EQ(out->def->operands.size(), 1u);
+    EXPECT_EQ(out->def->operands[0], x);
 }
 
 TEST_F(MidIRTest, LayerNormTypeInference) {
@@ -254,6 +280,20 @@ TEST_F(MidIRTest, RoPETypeInferenceSupportsArbitraryRank) {
     EXPECT_EQ(out->dtype, sandy::core::DType::F32);
     EXPECT_EQ(out->def->kind, sandy::ir::mid_ir::OpKind::RoPE);
     EXPECT_EQ(out->def->attrs.at("rope_theta").floatVal, 10000.0);
+}
+
+TEST_F(MidIRTest, RoPETypeInferenceSupportsPartialRotaryDim) {
+    sandy::ir::mid_ir::Graph graph;
+    sandy::ir::mid_ir::Builder builder(graph);
+
+    auto* x = builder.createInput(0, sandy::core::Shape({2, 3, 4, 8}), sandy::core::DType::F32);
+    auto* out = builder.createRoPE(x, 1000000.0f, 4);
+
+    EXPECT_EQ(out->shape, x->shape);
+    EXPECT_EQ(out->dtype, sandy::core::DType::F32);
+    EXPECT_EQ(out->def->kind, sandy::ir::mid_ir::OpKind::RoPE);
+    EXPECT_EQ(out->def->attrs.at("rope_theta").floatVal, 1000000.0);
+    EXPECT_EQ(out->def->attrs.at("rotary_dim").intVal, 4);
 }
 
 TEST_F(MidIRTest, UseDefChains) {

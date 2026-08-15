@@ -74,6 +74,10 @@ const OpDef* OpRegistry::lookup(OpKind kind) const {
 
 namespace {
 
+bool is_float_compute_dtype(core::DType dtype) {
+    return dtype == core::DType::F32 || dtype == core::DType::BF16;
+}
+
 class ReLUOpDef : public OpDef {
 public:
     OpKind kind() const override { return OpKind::ReLU; }
@@ -138,7 +142,7 @@ public:
             fprintf(stderr, "%s: %s\n", name_, shape.error().c_str());
             abort();
         }
-        return {{shape.take(), operands[0]->dtype}};
+        return {{shape.take(), result_dtype(operands[0], operands[1])}};
     }
     void verify(
         std::span<Value* const> operands,
@@ -149,7 +153,7 @@ public:
                     name_, operands.size());
             abort();
         }
-        if (operands[0]->dtype != operands[1]->dtype) {
+        if (!dtypes_compatible(operands[0], operands[1])) {
             fprintf(stderr, "%s operands must have the same dtype\n", name_);
             abort();
         }
@@ -161,6 +165,22 @@ public:
     }
 
 private:
+    static bool is_scalar(const Value* value) {
+        return value->shape.rank() == 0;
+    }
+
+    static bool dtypes_compatible(const Value* lhs, const Value* rhs) {
+        return lhs->dtype == rhs->dtype || is_scalar(lhs) || is_scalar(rhs);
+    }
+
+    static core::DType result_dtype(const Value* lhs, const Value* rhs) {
+        if (lhs->dtype == rhs->dtype)
+            return lhs->dtype;
+        if (is_scalar(lhs))
+            return rhs->dtype;
+        return lhs->dtype;
+    }
+
     OpKind kind_;
     const char* name_;
 };
@@ -186,8 +206,8 @@ public:
             fprintf(stderr, "%s expects 1 operand, got %zu\n", name_, operands.size());
             abort();
         }
-        if (operands[0]->dtype != core::DType::F32) {
-            fprintf(stderr, "%s operand must be f32\n", name_);
+        if (!is_float_compute_dtype(operands[0]->dtype)) {
+            fprintf(stderr, "%s operand must be a supported floating dtype\n", name_);
             abort();
         }
     }
@@ -404,9 +424,13 @@ public:
                     operands.size());
             abort();
         }
-        if (operands[0]->dtype != core::DType::F32 ||
-            operands[1]->dtype != core::DType::F32) {
-            fprintf(stderr, "sliding_query_key_score operands must be f32\n");
+        if (!is_float_compute_dtype(operands[0]->dtype) ||
+            !is_float_compute_dtype(operands[1]->dtype)) {
+            fprintf(stderr, "sliding_query_key_score operands must be a supported floating dtype\n");
+            abort();
+        }
+        if (operands[0]->dtype != operands[1]->dtype) {
+            fprintf(stderr, "sliding_query_key_score operands must have the same dtype\n");
             abort();
         }
 
@@ -472,8 +496,8 @@ public:
             fprintf(stderr, "softmax expects 1 operand, got %zu\n", operands.size());
             abort();
         }
-        if (operands[0]->dtype != core::DType::F32) {
-            fprintf(stderr, "softmax input must be f32\n");
+        if (!is_float_compute_dtype(operands[0]->dtype)) {
+            fprintf(stderr, "softmax input must be a supported floating dtype\n");
             abort();
         }
         int rank = operands[0]->shape.rank();
@@ -521,8 +545,8 @@ public:
             fprintf(stderr, "embedding ids must be i32 or i64\n");
             abort();
         }
-        if (operands[1]->dtype != core::DType::F32) {
-            fprintf(stderr, "embedding weight must be f32\n");
+        if (!is_float_compute_dtype(operands[1]->dtype)) {
+            fprintf(stderr, "embedding weight must be a supported floating dtype\n");
             abort();
         }
         if (operands[1]->shape.rank() != 2) {
@@ -565,6 +589,22 @@ public:
             fprintf(stderr, "rope last dimension must be positive and even\n");
             abort();
         }
+        auto rotaryDim = attrs.find("rotary_dim");
+        if (rotaryDim != attrs.end() && rotaryDim->second.kind != AttrValue::Int) {
+            fprintf(stderr, "rope rotary_dim attr must be int\n");
+            abort();
+        }
+        if (rotaryDim != attrs.end()) {
+            int64_t value = rotaryDim->second.intVal;
+            if (value <= 0 || value % 2 != 0) {
+                fprintf(stderr, "rope rotary_dim attr must be positive and even\n");
+                abort();
+            }
+            if (dim >= 0 && value > dim) {
+                fprintf(stderr, "rope rotary_dim attr must be <= last dimension\n");
+                abort();
+            }
+        }
 
         auto theta = attrs.find("rope_theta");
         if (theta != attrs.end() && theta->second.kind != AttrValue::Float) {
@@ -592,8 +632,8 @@ public:
         std::span<Value* const> operands,
         const AttrMap& attrs) const override
     {
-        if (operands.size() != 2) {
-            fprintf(stderr, "rms_norm expects 2 operands (x, weight), got %zu\n",
+        if (operands.size() != 1 && operands.size() != 2) {
+            fprintf(stderr, "rms_norm expects 1 or 2 operands (x[, weight]), got %zu\n",
                     operands.size());
             abort();
         }
@@ -606,6 +646,8 @@ public:
             fprintf(stderr, "rms_norm input must have rank >= 1\n");
             abort();
         }
+        if (operands.size() == 1)
+            return;
         if (operands[1]->shape.rank() != 1) {
             fprintf(stderr, "rms_norm weight must have rank 1\n");
             abort();
@@ -947,11 +989,20 @@ Value* Builder::createEmbedding(Value* ids, Value* weight) {
     return createOp(OpKind::Embedding, operands)[0];
 }
 
-Value* Builder::createRoPE(Value* x, float theta) {
+Value* Builder::createRoPE(Value* x, float theta, int64_t rotary_dim) {
     Value* operands[] = {x};
     AttrMap attrs;
     attrs["rope_theta"] = AttrValue::make_float(theta);
+    if (rotary_dim > 0)
+        attrs["rotary_dim"] = AttrValue::make_int(rotary_dim);
     return createOp(OpKind::RoPE, operands, attrs)[0];
+}
+
+Value* Builder::createRMSNorm(Value* x, float epsilon) {
+    Value* operands[] = {x};
+    AttrMap attrs;
+    attrs["epsilon"] = AttrValue::make_float(epsilon);
+    return createOp(OpKind::RMSNorm, operands, attrs)[0];
 }
 
 Value* Builder::createRMSNorm(Value* x, Value* weight, float epsilon) {

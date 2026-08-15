@@ -8,3 +8,4 @@ experiments/mnist/*.safetensors
 experiments/gpt2_small/model.safetensors
 experiments/gpt2_small/sandy_model.safetensors
 experiments/gpt2_small/input_*.safetensors
+experiments/gemma4_e2b/

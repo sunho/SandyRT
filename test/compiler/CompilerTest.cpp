@@ -142,6 +142,38 @@ func main(x Node) Node {
     fs::remove_all(dir, ec);
 }
 
+TEST(CompilerTest, RMSNormBuiltinWithoutScaleMaterializesToMidIROp) {
+    fs::path dir = makeTempDir();
+    writeFile(dir / "main.sandy.go", R"(
+func main(x Node) Node {
+    return __rms_norm(x)
+}
+)");
+
+    sandy::Compiler compiler;
+    auto highGraph = compiler.load_sandygo((dir / "main.sandy.go").string());
+
+    TestWeights weights;
+
+    sandy::ir::mid_ir::MaterializeOptions options;
+    options.input_tensor_descs["x"] = sandy::core::TensorDesc(
+        sandy::core::Shape({2, 3}), sandy::core::DType::F32);
+
+    auto result = compiler.materialize_mid_ir(highGraph, weights, options);
+    ASSERT_TRUE(result) << result.error();
+    auto midGraph = result.take();
+
+    ASSERT_EQ(midGraph->outputs().size(), 1u);
+    ASSERT_NE(midGraph->outputs()[0], nullptr);
+    ASSERT_NE(midGraph->outputs()[0]->def, nullptr);
+    EXPECT_EQ(midGraph->outputs()[0]->def->kind, sandy::ir::mid_ir::OpKind::RMSNorm);
+    EXPECT_EQ(midGraph->outputs()[0]->shape, sandy::core::Shape({2, 3}));
+    ASSERT_EQ(midGraph->outputs()[0]->def->operands.size(), 1u);
+
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
 TEST(CompilerTest, LayerNormBuiltinMaterializesToMidIROp) {
     fs::path dir = makeTempDir();
     writeFile(dir / "main.sandy.go", R"(
@@ -289,6 +321,29 @@ TEST(CompilerTest, SoftcapBuiltinLowersThroughConstantsAndTanh) {
     }
     EXPECT_TRUE(sawConstant);
     EXPECT_TRUE(sawTanh);
+}
+
+TEST(CompilerTest, SoftcapBuiltinAcceptsPositionalConstantCap) {
+    sandy::ir::high_ir::Graph highGraph;
+    auto* x = highGraph.addInput("x");
+    auto* cap = highGraph.addFloatConst(30.0);
+    auto softcap = highGraph.addBuiltin("softcap", {x, cap}, {}, 1);
+    highGraph.setOutputs({softcap[0]});
+
+    sandy::Compiler compiler;
+    TestWeights weights;
+    sandy::ir::mid_ir::MaterializeOptions options;
+    options.input_tensor_descs["x"] = sandy::core::TensorDesc(
+        sandy::core::Shape({2, 3}), sandy::core::DType::BF16);
+
+    auto result = compiler.materialize_mid_ir(highGraph, weights, options);
+    ASSERT_TRUE(result) << result.error();
+    auto midGraph = result.take();
+
+    ASSERT_EQ(midGraph->outputs().size(), 1u);
+    EXPECT_EQ(midGraph->outputs()[0]->shape, sandy::core::Shape({2, 3}));
+    EXPECT_EQ(midGraph->outputs()[0]->dtype, sandy::core::DType::BF16);
+    EXPECT_EQ(midGraph->outputs()[0]->def->kind, sandy::ir::mid_ir::OpKind::Mul);
 }
 
 TEST(CompilerTest, GemmaStyleMatMulWithTransposeMaterializesToMidIROps) {
@@ -478,6 +533,38 @@ TEST(CompilerTest, ProgrammaticRoPEMaterializesToMidIROpWithTheta) {
     EXPECT_EQ(midGraph->outputs()[0]->def->kind, sandy::ir::mid_ir::OpKind::RoPE);
     EXPECT_EQ(midGraph->outputs()[0]->shape, sandy::core::Shape({2, 3, 4, 6}));
     EXPECT_EQ(midGraph->outputs()[0]->def->attrs.at("rope_theta").floatVal, 10000.0);
+}
+
+TEST(CompilerTest, ProgrammaticRoPEMaterializesRotaryDimAttr) {
+    sandy::ir::high_ir::Graph highGraph;
+    auto* x = highGraph.addInput("x");
+    auto rope = highGraph.addBuiltin(
+        "rope",
+        {x},
+        {
+            sandy::ir::high_ir::Attr::fromFloat("rope_theta", 1000000.0),
+            sandy::ir::high_ir::Attr::fromInt("rotary_dim", 128),
+        },
+        1);
+    highGraph.setOutputs({rope[0]});
+
+    sandy::Compiler compiler;
+    TestWeights weights;
+    sandy::ir::mid_ir::MaterializeOptions options;
+    options.input_tensor_descs["x"] = sandy::core::TensorDesc(
+        sandy::core::Shape({2, 8, 16, 512}), sandy::core::DType::F32);
+
+    auto result = compiler.materialize_mid_ir(highGraph, weights, options);
+    ASSERT_TRUE(result) << result.error();
+    auto midGraph = result.take();
+
+    ASSERT_EQ(midGraph->outputs().size(), 1u);
+    ASSERT_NE(midGraph->outputs()[0], nullptr);
+    ASSERT_NE(midGraph->outputs()[0]->def, nullptr);
+    EXPECT_EQ(midGraph->outputs()[0]->def->kind, sandy::ir::mid_ir::OpKind::RoPE);
+    EXPECT_EQ(midGraph->outputs()[0]->shape, sandy::core::Shape({2, 8, 16, 512}));
+    EXPECT_EQ(midGraph->outputs()[0]->def->attrs.at("rope_theta").floatVal, 1000000.0);
+    EXPECT_EQ(midGraph->outputs()[0]->def->attrs.at("rotary_dim").intVal, 128);
 }
 
 TEST(CompilerTest, ProgrammaticKVAttentionMaterializesBatchedHKeyValue) {

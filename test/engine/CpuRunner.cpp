@@ -10,6 +10,7 @@
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -21,6 +22,23 @@ float read_f32(std::span<const uint8_t> data, size_t index) {
     float value = 0.0f;
     std::memcpy(&value, data.data() + index * sizeof(float), sizeof(float));
     return value;
+}
+
+float read_bf16(std::span<const uint8_t> data, size_t index) {
+    sandy::core::BFloat16 value = sandy::core::bfloat16_from_bits(0);
+    std::memcpy(&value, data.data() + index * sizeof(sandy::core::BFloat16), sizeof(value));
+    return sandy::core::bfloat16_to_float(value);
+}
+
+float read_float_value(std::span<const uint8_t> data, sandy::core::DType dtype, size_t index) {
+    switch (dtype) {
+        case sandy::core::DType::F32:
+            return read_f32(data, index);
+        case sandy::core::DType::BF16:
+            return read_bf16(data, index);
+        default:
+            return 0.0f;
+    }
 }
 
 void add_tensors_to_map(const sandy::weight::Weights& tensors,
@@ -240,7 +258,7 @@ void print_tensor(const std::string& name, sandy::core::TensorBuffer& buffer) {
            sandy::core::dtype_name(desc.dtype),
            desc.shape.str().c_str());
 
-    if (desc.dtype != sandy::core::DType::F32) {
+    if (desc.dtype != sandy::core::DType::F32 && desc.dtype != sandy::core::DType::BF16) {
         printf("  raw bytes: %zu\n", access.data().size());
         return;
     }
@@ -251,24 +269,62 @@ void print_tensor(const std::string& name, sandy::core::TensorBuffer& buffer) {
         return;
     }
 
-    printf("  [");
-    for (int64_t i = 0; i < numel; i++) {
-        if (i > 0) printf(", ");
-        printf("%.6g", read_f32(access.data(), static_cast<size_t>(i)));
+    if (numel <= 64) {
+        printf("  [");
+        for (int64_t i = 0; i < numel; i++) {
+            if (i > 0) printf(", ");
+            printf("%.6g", read_float_value(access.data(), desc.dtype, static_cast<size_t>(i)));
+        }
+        printf("]\n");
+    } else {
+        printf("  raw bytes: %zu\n", access.data().size());
     }
-    printf("]\n");
 
     if (numel > 0) {
-        int64_t best = 0;
-        float bestValue = read_f32(access.data(), 0);
-        for (int64_t i = 1; i < numel; i++) {
-            float value = read_f32(access.data(), static_cast<size_t>(i));
-            if (value > bestValue) {
-                best = i;
-                bestValue = value;
-            }
+        int rank = desc.shape.rank();
+        int64_t vocab = rank > 0 ? desc.shape.dim(rank - 1) : numel;
+        if (vocab <= 0) {
+            printf("  dynamic output shape\n");
+            return;
         }
-        printf("  argmax: %lld (%.6g)\n", static_cast<long long>(best), bestValue);
+        int64_t rows = numel / vocab;
+        for (int64_t row = 0; row < rows; row++) {
+            constexpr int64_t kTopK = 5;
+            int64_t topIds[kTopK];
+            float topValues[kTopK];
+            for (int64_t i = 0; i < kTopK; i++) {
+                topIds[i] = -1;
+                topValues[i] = -std::numeric_limits<float>::infinity();
+            }
+
+            size_t rowBase = static_cast<size_t>(row * vocab);
+            for (int64_t i = 0; i < vocab; i++) {
+                float value = read_float_value(
+                    access.data(), desc.dtype, rowBase + static_cast<size_t>(i));
+                for (int64_t slot = 0; slot < kTopK; slot++) {
+                    if (value > topValues[slot]) {
+                        for (int64_t move = kTopK - 1; move > slot; move--) {
+                            topIds[move] = topIds[move - 1];
+                            topValues[move] = topValues[move - 1];
+                        }
+                        topIds[slot] = i;
+                        topValues[slot] = value;
+                        break;
+                    }
+                }
+            }
+            printf("  argmax[%lld]: %lld (%.6g)\n",
+                   static_cast<long long>(row),
+                   static_cast<long long>(topIds[0]),
+                   topValues[0]);
+            printf("  top5[%lld]:", static_cast<long long>(row));
+            for (int64_t i = 0; i < kTopK; i++) {
+                printf(" %lld(%.6g)",
+                       static_cast<long long>(topIds[i]),
+                       topValues[i]);
+            }
+            printf("\n");
+        }
     }
 }
 

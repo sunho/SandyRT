@@ -2,3 +2,6 @@ gemma
 jax
 jaxlib
 PySide6
+numpy
+huggingface_hub
+transformers

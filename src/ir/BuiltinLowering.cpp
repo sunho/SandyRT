@@ -18,6 +18,15 @@ float get_float_attr_or(const AttrMap& attrs, const std::string& name, float fal
     return static_cast<float>(it->second.floatVal);
 }
 
+Result<float> get_constant_float(Value* value, const std::string& name) {
+    if (!value->def || value->def->kind != OpKind::Constant)
+        return make_error(name + " must be a constant");
+    auto it = value->def->attrs.find("value");
+    if (it == value->def->attrs.end() || it->second.kind != AttrValue::Float)
+        return make_error(name + " constant is missing float value");
+    return static_cast<float>(it->second.floatVal);
+}
+
 int64_t get_int_attr_or(const AttrMap& attrs, const std::string& name, int64_t fallback) {
     auto it = attrs.find(name);
     if (it == attrs.end() || it->second.kind != AttrValue::Int)
@@ -134,10 +143,17 @@ BuiltinLowering BuiltinLowering::createDefault() {
                           int numResults) -> Result<std::vector<Value*>> {
         auto resultCount = expect_num_results("softcap", numResults, 1);
         if (!resultCount) return make_error(resultCount.error());
-        if (operands.size() != 1)
-            return make_error("softcap expects one operand");
+        if (operands.size() != 1 && operands.size() != 2)
+            return make_error("softcap expects one or two operands");
 
-        float cap = get_float_attr_or(attrs, "cap", 0.0f);
+        float cap = 0.0f;
+        if (operands.size() == 2) {
+            auto capResult = get_constant_float(operands[1], "softcap cap");
+            if (!capResult) return make_error(capResult.error());
+            cap = capResult.take();
+        } else {
+            cap = get_float_attr_or(attrs, "cap", 0.0f);
+        }
         if (cap <= 0.0f)
             return make_error("softcap cap must be > 0");
 
@@ -428,7 +444,14 @@ BuiltinLowering BuiltinLowering::createDefault() {
             it = attrs.find("rope_theta");
         if (it != attrs.end() && it->second.kind == AttrValue::Float)
             theta = static_cast<float>(it->second.floatVal);
-        return std::vector<Value*>{builder.createRoPE(operands[0], theta)};
+        int64_t rotaryDim = -1;
+        auto rotaryIt = attrs.find("rotary_dim");
+        if (rotaryIt != attrs.end()) {
+            if (rotaryIt->second.kind != AttrValue::Int)
+                return make_error("rope rotary_dim attr must be int");
+            rotaryDim = rotaryIt->second.intVal;
+        }
+        return std::vector<Value*>{builder.createRoPE(operands[0], theta, rotaryDim)};
     });
 
     bl.add("rms_norm", [](Builder& builder,
@@ -442,7 +465,11 @@ BuiltinLowering BuiltinLowering::createDefault() {
         if (it != attrs.end() && it->second.kind == AttrValue::Float) {
             epsilon = static_cast<float>(it->second.floatVal);
         }
-        return std::vector<Value*>{builder.createRMSNorm(operands[0], operands[1], epsilon)};
+        if (operands.size() == 1)
+            return std::vector<Value*>{builder.createRMSNorm(operands[0], epsilon)};
+        if (operands.size() == 2)
+            return std::vector<Value*>{builder.createRMSNorm(operands[0], operands[1], epsilon)};
+        return make_error("rms_norm expects operands (x[, weight])");
     });
 
     bl.add("layer_norm", [](Builder& builder,

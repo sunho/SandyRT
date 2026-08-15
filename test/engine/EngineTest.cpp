@@ -346,10 +346,15 @@ Result<TestTensor> reshape_calc(
         sandy::core::Shape shape) {
     auto inferred = sandy::core::infer_reshape_shape(xDesc.shape, std::move(shape));
     if (!inferred) return make_error(inferred.error());
-    TestTensor out;
-    out.desc = sandy::core::TensorDesc(inferred.take(), xDesc.dtype);
-    out.data.assign(x.begin(), x.end());
-    return out;
+    auto out = make_output(sandy::core::TensorDesc(inferred.take(), xDesc.dtype));
+    if (!out) return make_error(out.error());
+    auto xRef = tensor_ref(x, xDesc);
+    if (!xRef) return make_error(xRef.error());
+    auto outRef = mutable_tensor_ref(*out);
+    if (!outRef) return make_error(outRef.error());
+    auto result = sandy::core::reshape(*xRef, *outRef);
+    if (!result) return make_error(result.error());
+    return out.take();
 }
 
 Result<TestTensor> permute_calc(
@@ -447,6 +452,22 @@ Result<TestTensor> rope_calc(
     return out.take();
 }
 
+Result<TestTensor> rope_calc(
+        std::span<const uint8_t> x,
+        sandy::core::TensorDesc xDesc,
+        float theta,
+        int64_t rotaryDim) {
+    auto out = make_output(sandy::core::TensorDesc(xDesc.shape, xDesc.dtype));
+    if (!out) return make_error(out.error());
+    auto xRef = tensor_ref(x, xDesc);
+    if (!xRef) return make_error(xRef.error());
+    auto outRef = mutable_tensor_ref(*out);
+    if (!outRef) return make_error(outRef.error());
+    auto result = sandy::core::rope(*xRef, theta, rotaryDim, *outRef);
+    if (!result) return make_error(result.error());
+    return out.take();
+}
+
 Result<TestTensor> rms_norm_calc(
         std::span<const uint8_t> x,
         sandy::core::TensorDesc xDesc,
@@ -462,6 +483,21 @@ Result<TestTensor> rms_norm_calc(
     auto outRef = mutable_tensor_ref(*out);
     if (!outRef) return make_error(outRef.error());
     auto result = sandy::core::rms_norm(*xRef, *weightRef, epsilon, *outRef);
+    if (!result) return make_error(result.error());
+    return out.take();
+}
+
+Result<TestTensor> rms_norm_unscaled_calc(
+        std::span<const uint8_t> x,
+        sandy::core::TensorDesc xDesc,
+        float epsilon) {
+    auto out = make_output(sandy::core::TensorDesc(xDesc.shape, xDesc.dtype));
+    if (!out) return make_error(out.error());
+    auto xRef = tensor_ref(x, xDesc);
+    if (!xRef) return make_error(xRef.error());
+    auto outRef = mutable_tensor_ref(*out);
+    if (!outRef) return make_error(outRef.error());
+    auto result = sandy::core::rms_norm(*xRef, epsilon, *outRef);
     if (!result) return make_error(result.error());
     return out.take();
 }
@@ -738,6 +774,22 @@ TEST(TensorCalcTest, BFloat16ElementwiseUsesTensorRefStorageAccessors) {
     EXPECT_FLOAT_EQ(read_bf16(out.data, 0), 11.0f);
     EXPECT_FLOAT_EQ(read_bf16(out.data, 1), 22.0f);
     EXPECT_FLOAT_EQ(read_bf16(out.data, 2), 33.0f);
+}
+
+TEST(TensorCalcTest, BFloat16ElementwiseAcceptsF32Scalar) {
+    auto lhs = bf16_bytes({1.0f, 2.0f, 3.0f});
+    auto rhs = f32_bytes({2.0f});
+
+    auto result = mul_calc(
+        lhs, sandy::core::TensorDesc(sandy::core::Shape({3}), sandy::core::DType::BF16),
+        rhs, sandy::core::TensorDesc(sandy::core::Shape({}), sandy::core::DType::F32));
+
+    ASSERT_TRUE(result) << result.error();
+    auto out = result.take();
+    EXPECT_EQ(out.desc.dtype, sandy::core::DType::BF16);
+    EXPECT_FLOAT_EQ(read_bf16(out.data, 0), 2.0f);
+    EXPECT_FLOAT_EQ(read_bf16(out.data, 1), 4.0f);
+    EXPECT_FLOAT_EQ(read_bf16(out.data, 2), 6.0f);
 }
 
 TEST(TensorCalcTest, MatMulF32UsesTorchLayout) {
@@ -1150,6 +1202,30 @@ TEST(TensorCalcTest, RoPEF32AppliesToLastDimForArbitraryRank) {
     EXPECT_NEAR(read_f32(out.data, 31), 2.0f * std::cos(0.01f), 1.0e-6f);
 }
 
+TEST(TensorCalcTest, RoPEF32AppliesPartialRotaryDimAndCopiesTail) {
+    auto result = rope_calc(
+        f32_bytes({
+            1.0f, 2.0f, 3.0f, 4.0f,
+            1.0f, 0.0f, 5.0f, 6.0f,
+        }),
+        sandy::core::TensorDesc(sandy::core::Shape({1, 2, 4}), sandy::core::DType::F32),
+        10000.0f,
+        2);
+
+    ASSERT_TRUE(result) << result.error();
+    auto out = result.take();
+    EXPECT_EQ(out.desc.shape, sandy::core::Shape({1, 2, 4}));
+
+    EXPECT_FLOAT_EQ(read_f32(out.data, 0), 1.0f);
+    EXPECT_FLOAT_EQ(read_f32(out.data, 1), 2.0f);
+    EXPECT_FLOAT_EQ(read_f32(out.data, 2), 3.0f);
+    EXPECT_FLOAT_EQ(read_f32(out.data, 3), 4.0f);
+    EXPECT_NEAR(read_f32(out.data, 4), std::cos(1.0f), 1.0e-6f);
+    EXPECT_NEAR(read_f32(out.data, 5), std::sin(1.0f), 1.0e-6f);
+    EXPECT_FLOAT_EQ(read_f32(out.data, 6), 5.0f);
+    EXPECT_FLOAT_EQ(read_f32(out.data, 7), 6.0f);
+}
+
 TEST(TensorCalcTest, RoPEBF16UsesTensorRefStorageAccessors) {
     auto result = rope_calc(
         bf16_bytes({
@@ -1223,6 +1299,28 @@ TEST(TensorCalcTest, RMSNormF32Rank3NormalizesLastDim) {
         EXPECT_NEAR(read_f32(out.data, row * 2), a * scale * 2.0f, 1.0e-5f);
         EXPECT_NEAR(read_f32(out.data, row * 2 + 1), b * scale * -1.0f, 1.0e-5f);
     }
+}
+
+TEST(TensorCalcTest, RMSNormF32WithoutScale) {
+    auto x = f32_bytes({1.0f, 2.0f, 2.0f, 0.0f, 3.0f, 4.0f});
+    constexpr float eps = 1.0e-6f;
+
+    auto result = rms_norm_unscaled_calc(
+        x, sandy::core::TensorDesc(sandy::core::Shape({2, 3}), sandy::core::DType::F32),
+        eps);
+
+    ASSERT_TRUE(result) << result.error();
+    auto out = result.take();
+    EXPECT_EQ(out.desc.shape, sandy::core::Shape({2, 3}));
+
+    float row0Scale = 1.0f / std::sqrt(3.0f + eps);
+    float row1Scale = 1.0f / std::sqrt((25.0f / 3.0f) + eps);
+    EXPECT_NEAR(read_f32(out.data, 0), 1.0f * row0Scale, 1.0e-5f);
+    EXPECT_NEAR(read_f32(out.data, 1), 2.0f * row0Scale, 1.0e-5f);
+    EXPECT_NEAR(read_f32(out.data, 2), 2.0f * row0Scale, 1.0e-5f);
+    EXPECT_NEAR(read_f32(out.data, 3), 0.0f, 1.0e-5f);
+    EXPECT_NEAR(read_f32(out.data, 4), 3.0f * row1Scale, 1.0e-5f);
+    EXPECT_NEAR(read_f32(out.data, 5), 4.0f * row1Scale, 1.0e-5f);
 }
 
 TEST(TensorCalcTest, LayerNormF32Rank3NormalizesLastDimWithBias) {
@@ -1376,6 +1474,47 @@ TEST(CpuInterpretTest, RMSNorm) {
     EXPECT_NEAR(read_f32(it->second->data(), 3), 0.0f, 1.0e-5f);
     EXPECT_NEAR(read_f32(it->second->data(), 4), 30.0f * row1Scale, 1.0e-5f);
     EXPECT_NEAR(read_f32(it->second->data(), 5), -4.0f * row1Scale, 1.0e-5f);
+}
+
+TEST(CpuInterpretTest, RMSNormWithoutScale) {
+    sandy::ir::mid_ir::register_all_ops();
+
+    sandy::ir::mid_ir::Graph graph;
+    sandy::ir::mid_ir::Builder builder(graph);
+    auto* x = builder.createInput(0, sandy::core::Shape({2, 3}), sandy::core::DType::F32);
+    auto* out = builder.createRMSNorm(x);
+    sandy::ir::mid_ir::Value* outputs[] = {out};
+    builder.setOutputs(outputs);
+
+    auto engine = make_cpu_engine();
+
+    auto planResult = engine.compile(graph);
+    ASSERT_TRUE(planResult) << planResult.error();
+    auto plan = planResult.take();
+
+    std::vector<sandy::engine::TensorBufferPtr> inputs;
+    inputs.push_back(make_f32_buffer(
+        "x", sandy::core::Shape({2, 3}), {1.0f, 2.0f, 2.0f, 0.0f, 3.0f, 4.0f}));
+
+    sandy::engine::TensorMap weights;
+    auto runResult = engine.run(*plan, inputs, weights);
+    ASSERT_TRUE(runResult) << runResult.error();
+    auto outputsMap = outputs_to_map(runResult.take());
+
+    auto it = outputsMap.find("output0");
+    ASSERT_NE(it, outputsMap.end());
+    ASSERT_NE(it->second, nullptr);
+    EXPECT_EQ(it->second->desc().shape, sandy::core::Shape({2, 3}));
+
+    constexpr float eps = 1.0e-6f;
+    float row0Scale = 1.0f / std::sqrt(3.0f + eps);
+    float row1Scale = 1.0f / std::sqrt((25.0f / 3.0f) + eps);
+    EXPECT_NEAR(read_f32(it->second->data(), 0), 1.0f * row0Scale, 1.0e-5f);
+    EXPECT_NEAR(read_f32(it->second->data(), 1), 2.0f * row0Scale, 1.0e-5f);
+    EXPECT_NEAR(read_f32(it->second->data(), 2), 2.0f * row0Scale, 1.0e-5f);
+    EXPECT_NEAR(read_f32(it->second->data(), 3), 0.0f, 1.0e-5f);
+    EXPECT_NEAR(read_f32(it->second->data(), 4), 3.0f * row1Scale, 1.0e-5f);
+    EXPECT_NEAR(read_f32(it->second->data(), 5), 4.0f * row1Scale, 1.0e-5f);
 }
 
 TEST(CpuInterpretTest, LayerNorm) {
@@ -1808,4 +1947,45 @@ TEST(CpuInterpretTest, RoPEReceivesThetaAttr) {
     EXPECT_NEAR(read_f32(it->second->data(), 5), std::sin(1.0f), 1.0e-6f);
     EXPECT_NEAR(read_f32(it->second->data(), 6), -std::sin(0.01f), 1.0e-6f);
     EXPECT_NEAR(read_f32(it->second->data(), 7), std::cos(0.01f), 1.0e-6f);
+}
+
+TEST(CpuInterpretTest, RoPEReceivesRotaryDimAttr) {
+    sandy::ir::mid_ir::register_all_ops();
+
+    sandy::ir::mid_ir::Graph graph;
+    sandy::ir::mid_ir::Builder builder(graph);
+    auto* x = builder.createInput(0, sandy::core::Shape({1, 2, 4}), sandy::core::DType::F32);
+    auto* out = builder.createRoPE(x, 10000.0f, 2);
+    sandy::ir::mid_ir::Value* outputs[] = {out};
+    builder.setOutputs(outputs);
+
+    auto engine = make_cpu_engine();
+
+    auto planResult = engine.compile(graph);
+    ASSERT_TRUE(planResult) << planResult.error();
+    auto plan = planResult.take();
+
+    std::vector<sandy::engine::TensorBufferPtr> inputs;
+    inputs.push_back(make_f32_buffer("x", sandy::core::Shape({1, 2, 4}), {
+        1.0f, 2.0f, 3.0f, 4.0f,
+        1.0f, 0.0f, 5.0f, 6.0f,
+    }));
+
+    sandy::engine::TensorMap weights;
+    auto runResult = engine.run(*plan, inputs, weights);
+    ASSERT_TRUE(runResult) << runResult.error();
+    auto outputsMap = outputs_to_map(runResult.take());
+
+    auto it = outputsMap.find("output0");
+    ASSERT_NE(it, outputsMap.end());
+    ASSERT_NE(it->second, nullptr);
+    EXPECT_EQ(it->second->desc().shape, sandy::core::Shape({1, 2, 4}));
+    EXPECT_FLOAT_EQ(read_f32(it->second->data(), 0), 1.0f);
+    EXPECT_FLOAT_EQ(read_f32(it->second->data(), 1), 2.0f);
+    EXPECT_FLOAT_EQ(read_f32(it->second->data(), 2), 3.0f);
+    EXPECT_FLOAT_EQ(read_f32(it->second->data(), 3), 4.0f);
+    EXPECT_NEAR(read_f32(it->second->data(), 4), std::cos(1.0f), 1.0e-6f);
+    EXPECT_NEAR(read_f32(it->second->data(), 5), std::sin(1.0f), 1.0e-6f);
+    EXPECT_FLOAT_EQ(read_f32(it->second->data(), 6), 5.0f);
+    EXPECT_FLOAT_EQ(read_f32(it->second->data(), 7), 6.0f);
 }

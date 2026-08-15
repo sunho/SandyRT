@@ -77,15 +77,6 @@ Result<InvocPlanDraft> InvocPlanner::plan(const ir::mid_ir::Graph& graph) {
                 remember_materialized(value, materializedValues);
                 break;
             }
-            case ir::mid_ir::OpKind::Reshape: {
-                if (op->operands.size() != 1 || op->results.size() != 1)
-                    return make_error("reshape op must have one operand and one result");
-                auto operandValue = lookup_value(valueIds, op->operands[0]);
-                if (!operandValue)
-                    return make_error(operandValue.error());
-                valueIds[op->results[0]] = operandValue.take();
-                break;
-            }
             case ir::mid_ir::OpKind::NUM_KINDS:
                 return make_error("invalid MidIR op kind");
             default: {
@@ -173,8 +164,6 @@ Result<InvocPlanDraft> InvocPlanner::plan(const ir::mid_ir::Graph& graph) {
                 maybe_dealloc(weightValue);
                 break;
             }
-            case ir::mid_ir::OpKind::Reshape:
-                break;
             case ir::mid_ir::OpKind::NUM_KINDS:
                 return make_error("invalid MidIR op kind");
             default: {

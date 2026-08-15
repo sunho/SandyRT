@@ -73,8 +73,6 @@ Result<DeviceProgramId> CpuDevice::compile(const ir::mid_ir::Op& op) {
         case ir::mid_ir::OpKind::Input:
         case ir::mid_ir::OpKind::Weight:
             return make_error("cpu device cannot compile data boundary ops");
-        case ir::mid_ir::OpKind::Reshape:
-            return make_error("cpu device cannot compile reshape");
         case ir::mid_ir::OpKind::NUM_KINDS:
             return make_error("cpu device cannot compile invalid op kind");
         default:
@@ -246,6 +244,13 @@ Result<void> CpuDevice::run(
             if (!out) return make_error(out.error());
             return core::transpose(*x, *out);
         }
+        case ir::mid_ir::OpKind::Reshape: {
+            auto x = inputRef(0);
+            if (!x) return make_error(x.error());
+            auto out = outputRef(0);
+            if (!out) return make_error(out.error());
+            return core::reshape(*x, *out);
+        }
         case ir::mid_ir::OpKind::Permute: {
             auto x = inputRef(0);
             if (!x) return make_error(x.error());
@@ -292,17 +297,23 @@ Result<void> CpuDevice::run(
             if (!out) return make_error(out.error());
             auto theta = attr_float_or(program.attrs, "rope_theta", 10000.0f);
             if (!theta) return make_error(theta.error());
-            return core::rope(*x, theta.take(), *out);
+            auto rotaryDim = attr_int_or(program.attrs, "rotary_dim", -1);
+            if (!rotaryDim) return make_error(rotaryDim.error());
+            return core::rope(*x, theta.take(), rotaryDim.take(), *out);
         }
         case ir::mid_ir::OpKind::RMSNorm: {
             auto x = inputRef(0);
             if (!x) return make_error(x.error());
-            auto weight = inputRef(1);
-            if (!weight) return make_error(weight.error());
             auto out = outputRef(0);
             if (!out) return make_error(out.error());
             auto epsilon = attr_float_or(program.attrs, "epsilon", 1.0e-6f);
             if (!epsilon) return make_error(epsilon.error());
+            if (program.inputDescs.size() == 1)
+                return core::rms_norm(*x, epsilon.take(), *out);
+            if (program.inputDescs.size() != 2)
+                return make_error("rms_norm expects 1 or 2 inputs");
+            auto weight = inputRef(1);
+            if (!weight) return make_error(weight.error());
             return core::rms_norm(*x, *weight, epsilon.take(), *out);
         }
         case ir::mid_ir::OpKind::LayerNorm: {
@@ -320,7 +331,6 @@ Result<void> CpuDevice::run(
         }
         case ir::mid_ir::OpKind::Input:
         case ir::mid_ir::OpKind::Weight:
-        case ir::mid_ir::OpKind::Reshape:
         case ir::mid_ir::OpKind::NUM_KINDS:
             return make_error("cpu device cannot run unsupported op kind");
     }

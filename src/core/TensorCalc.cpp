@@ -218,13 +218,18 @@ Result<void> binary_elementwise(
     if (!lhsFloat) return make_error(lhsFloat.error());
     auto rhsFloat = require_float_tensor(rhs, opName + " rhs");
     if (!rhsFloat) return make_error(rhsFloat.error());
-    auto same = require_same_dtype(lhs.desc.dtype, rhs.desc.dtype, opName);
-    if (!same) return make_error(same.error());
+    bool lhsScalar = lhs.desc.shape.rank() == 0;
+    bool rhsScalar = rhs.desc.shape.rank() == 0;
+    if (lhs.desc.dtype != rhs.desc.dtype && !lhsScalar && !rhsScalar)
+        return make_error(opName + " operands must have same dtype");
 
     auto shapeResult = broadcast_shape(lhs.desc.shape, rhs.desc.shape);
     if (!shapeResult) return make_error(shapeResult.error());
     auto outShape = shapeResult.take();
-    auto output = require_output(out, outShape, lhs.desc.dtype, opName);
+    auto outDtype = lhs.desc.dtype == rhs.desc.dtype
+        ? lhs.desc.dtype
+        : (lhsScalar ? rhs.desc.dtype : lhs.desc.dtype);
+    auto output = require_output(out, outShape, outDtype, opName);
     if (!output) return make_error(output.error());
 
     int64_t outNumel = numel_or_error(outShape, opName + " output");
@@ -434,6 +439,23 @@ Result<void> transpose(TensorRef x, MutableTensorRef out) {
         out.store_float(outIndex, x.load_float(inputIndex));
     }
 
+    return {};
+}
+
+Result<void> reshape(TensorRef x, MutableTensorRef out) {
+    if (x.desc.dtype != out.desc.dtype)
+        return make_error("reshape output dtype mismatch");
+
+    int64_t inputNumel = x.desc.shape.numel();
+    int64_t outputNumel = out.desc.shape.numel();
+    if (inputNumel < 0 || outputNumel < 0)
+        return make_error("reshape tensors must have static shape");
+    if (inputNumel != outputNumel)
+        return make_error("reshape element count mismatch");
+    if (x.bytes.size() != out.bytes.size())
+        return make_error("reshape byte size mismatch");
+
+    std::memcpy(out.bytes.data(), x.bytes.data(), x.bytes.size());
     return {};
 }
 
@@ -680,6 +702,10 @@ Result<void> embedding(TensorRef ids, TensorRef weight, MutableTensorRef out) {
 }
 
 Result<void> rope(TensorRef x, float theta, MutableTensorRef out) {
+    return rope(x, theta, -1, out);
+}
+
+Result<void> rope(TensorRef x, float theta, int64_t rotaryDim, MutableTensorRef out) {
     auto xFloat = require_float_tensor(x, "rope input");
     if (!xFloat) return make_error(xFloat.error());
     auto output = require_output(out, x.desc.shape, x.desc.dtype, "rope");
@@ -697,6 +723,12 @@ Result<void> rope(TensorRef x, float theta, MutableTensorRef out) {
         return make_error("rope input must have static sequence and last dimensions");
     if (dim <= 0 || dim % 2 != 0)
         return make_error("rope last dimension must be positive and even");
+    if (rotaryDim < 0)
+        rotaryDim = dim;
+    if (rotaryDim <= 0 || rotaryDim % 2 != 0)
+        return make_error("rope rotary_dim must be positive and even");
+    if (rotaryDim > dim)
+        return make_error("rope rotary_dim must be <= last dimension");
 
     int64_t total = x.desc.shape.numel();
     if (total < 0)
@@ -706,9 +738,9 @@ Result<void> rope(TensorRef x, float theta, MutableTensorRef out) {
     for (int64_t vector = 0; vector < vectors; vector++) {
         int64_t position = vector % seq;
         size_t base = static_cast<size_t>(vector * dim);
-        for (int64_t pair = 0; pair < dim / 2; pair++) {
+        for (int64_t pair = 0; pair < rotaryDim / 2; pair++) {
             float angle = static_cast<float>(position) /
-                std::pow(theta, static_cast<float>(2 * pair) / static_cast<float>(dim));
+                std::pow(theta, static_cast<float>(2 * pair) / static_cast<float>(rotaryDim));
             float c = std::cos(angle);
             float s = std::sin(angle);
             size_t evenIndex = base + static_cast<size_t>(2 * pair);
@@ -718,28 +750,34 @@ Result<void> rope(TensorRef x, float theta, MutableTensorRef out) {
             out.store_float(evenIndex, even * c - odd * s);
             out.store_float(oddIndex, even * s + odd * c);
         }
+        for (int64_t i = rotaryDim; i < dim; i++) {
+            size_t index = base + static_cast<size_t>(i);
+            out.store_float(index, x.load_float(index));
+        }
     }
 
     return {};
 }
 
-Result<void> rms_norm(TensorRef x, TensorRef weight, float epsilon, MutableTensorRef out) {
+Result<void> rms_norm_impl(TensorRef x, const TensorRef* weight, float epsilon, MutableTensorRef out) {
     auto xFloat = require_float_tensor(x, "rms_norm input");
     if (!xFloat) return make_error(xFloat.error());
-    auto weightFloat = require_float_tensor(weight, "rms_norm weight");
-    if (!weightFloat) return make_error(weightFloat.error());
-    auto same = require_same_dtype(x.desc.dtype, weight.desc.dtype, "rms_norm");
-    if (!same) return make_error(same.error());
+    if (weight) {
+        auto weightFloat = require_float_tensor(*weight, "rms_norm weight");
+        if (!weightFloat) return make_error(weightFloat.error());
+        auto same = require_same_dtype(x.desc.dtype, weight->desc.dtype, "rms_norm");
+        if (!same) return make_error(same.error());
+    }
 
     if (x.desc.shape.rank() < 1)
         return make_error("rms_norm input must have rank >= 1");
-    if (weight.desc.shape.rank() != 1)
+    if (weight && weight->desc.shape.rank() != 1)
         return make_error("rms_norm weight must have rank 1");
 
     int64_t hidden = x.desc.shape.dim(x.desc.shape.rank() - 1);
     if (hidden < 0)
         return make_error("rms_norm hidden dimension must be static");
-    if (weight.desc.shape.dim(0) != hidden)
+    if (weight && weight->desc.shape.dim(0) != hidden)
         return make_error("rms_norm weight dimension mismatch");
     auto output = require_output(out, x.desc.shape, x.desc.dtype, "rms_norm");
     if (!output) return make_error(output.error());
@@ -762,12 +800,20 @@ Result<void> rms_norm(TensorRef x, TensorRef weight, float epsilon, MutableTenso
             static_cast<float>(squareSum / static_cast<double>(cols)) + epsilon);
         for (size_t col = 0; col < cols; col++) {
             float xv = x.load_float(rowOffset + col);
-            float wv = weight.load_float(col);
+            float wv = weight ? weight->load_float(col) : 1.0f;
             out.store_float(rowOffset + col, xv * invRms * wv);
         }
     }
 
     return {};
+}
+
+Result<void> rms_norm(TensorRef x, float epsilon, MutableTensorRef out) {
+    return rms_norm_impl(x, nullptr, epsilon, out);
+}
+
+Result<void> rms_norm(TensorRef x, TensorRef weight, float epsilon, MutableTensorRef out) {
+    return rms_norm_impl(x, &weight, epsilon, out);
 }
 
 Result<void> layer_norm(
