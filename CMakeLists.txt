@@ -53,4 +53,20 @@ else()
     CXX_STANDARD 20
     CXX_STANDARD_REQUIRED ON
   )
+
+  add_executable(multi_gemma4_runner
+    test/engine/MultiGemmaRunner.cpp
+  )
+
+  target_link_libraries(multi_gemma4_runner
+    PRIVATE
+    SandyCompilerLib
+    EngineLib
+    WeightLib
+  )
+
+  set_target_properties(multi_gemma4_runner PROPERTIES
+    CXX_STANDARD 20
+    CXX_STANDARD_REQUIRED ON
+  )
 endif()
