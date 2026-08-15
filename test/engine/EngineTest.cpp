@@ -706,7 +706,7 @@ TEST(TensorCalcTest, RoPEF32AppliesToLastDimForArbitraryRank) {
     setVector(2, {0.0f, 1.0f, 1.0f, 0.0f});
     setVector(7, {2.0f, 0.0f, 0.0f, 2.0f});
 
-    auto result = sandy::core::rope_f32(
+    auto result = sandy::core::rope(
         f32_bytes(values),
         sandy::core::TensorDesc(sandy::core::Shape({2, 2, 3, 4}), sandy::core::DType::F32),
         10000.0f);

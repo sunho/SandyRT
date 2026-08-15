@@ -550,8 +550,10 @@ public:
             fprintf(stderr, "rope expects 1 operand, got %zu\n", operands.size());
             abort();
         }
-        if (operands[0]->dtype != core::DType::F32) {
-            fprintf(stderr, "rope input must be f32\n");
+        if (operands[0]->dtype != core::DType::F32 &&
+            operands[0]->dtype != core::DType::F16 &&
+            operands[0]->dtype != core::DType::BF16) {
+            fprintf(stderr, "rope input must be a floating dtype\n");
             abort();
         }
         if (operands[0]->shape.rank() < 2) {

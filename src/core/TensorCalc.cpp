@@ -1,11 +1,14 @@
 #include "TensorCalc.h"
 #include "ShapeUtil.h"
+#include "TensorDispatch.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <limits>
 #include <string>
+#include <type_traits>
+#include <utility>
 
 namespace sandy::core {
 
@@ -31,10 +34,15 @@ Result<void> require_bytes(std::span<const uint8_t> data,
     return {};
 }
 
-float read_f32(std::span<const uint8_t> data, size_t index) {
-    float value = 0.0f;
-    std::memcpy(&value, data.data() + index * sizeof(float), sizeof(float));
+template <typename T>
+T read_scalar(std::span<const uint8_t> data, size_t index) {
+    T value{};
+    std::memcpy(&value, data.data() + index * sizeof(T), sizeof(T));
     return value;
+}
+
+float read_f32(std::span<const uint8_t> data, size_t index) {
+    return read_scalar<float>(data, index);
 }
 
 int64_t read_index(std::span<const uint8_t> data, DType dtype, size_t index) {
@@ -49,8 +57,13 @@ int64_t read_index(std::span<const uint8_t> data, DType dtype, size_t index) {
     return value;
 }
 
+template <typename T>
+void write_scalar(std::vector<uint8_t>& data, size_t index, T value) {
+    std::memcpy(data.data() + index * sizeof(T), &value, sizeof(T));
+}
+
 void write_f32(std::vector<uint8_t>& data, size_t index, float value) {
-    std::memcpy(data.data() + index * sizeof(float), &value, sizeof(float));
+    write_scalar<float>(data, index, value);
 }
 
 std::vector<int64_t> strides_for(const Shape& shape) {
@@ -116,6 +129,15 @@ size_t broadcast_batch_offset(
 
 using BinaryOp = float (*)(float, float);
 using UnaryOp = float (*)(float);
+
+template <typename T, typename Fn>
+Result<OwnedTensor> f32_impl_or_unsupported(const char* opName, Fn&& fn) {
+    if constexpr (std::is_same_v<T, float>) {
+        return std::forward<Fn>(fn)();
+    } else {
+        return make_error(std::string(opName) + " dtype specialization not implemented");
+    }
+}
 
 Result<OwnedTensor> unary_elementwise_f32(
         std::span<const uint8_t> x,
@@ -734,12 +756,16 @@ Result<OwnedTensor> embedding_f32(
     return out;
 }
 
-Result<OwnedTensor> rope_f32(
+template <typename T>
+Result<OwnedTensor> rope_impl(
         std::span<const uint8_t> x,
         const TensorDesc& xDesc,
         float theta) {
-    auto xDtype = require_f32(xDesc, "rope input");
-    if (!xDtype) return make_error(xDtype.error());
+    using Traits = detail::ScalarTraits<T>;
+    using Compute = typename Traits::Compute;
+
+    if (xDesc.dtype != Traits::dtype)
+        return make_error("rope input dtype mismatch");
 
     int rank = xDesc.shape.rank();
     if (rank < 2)
@@ -776,14 +802,32 @@ Result<OwnedTensor> rope_f32(
             float s = std::sin(angle);
             size_t evenIndex = base + static_cast<size_t>(2 * pair);
             size_t oddIndex = evenIndex + 1;
-            float even = read_f32(x, evenIndex);
-            float odd = read_f32(x, oddIndex);
-            write_f32(out.data, evenIndex, even * c - odd * s);
-            write_f32(out.data, oddIndex, even * s + odd * c);
+            Compute even = Traits::to_compute(read_scalar<T>(x, evenIndex));
+            Compute odd = Traits::to_compute(read_scalar<T>(x, oddIndex));
+            write_scalar<T>(
+                out.data,
+                evenIndex,
+                Traits::from_compute(even * c - odd * s));
+            write_scalar<T>(
+                out.data,
+                oddIndex,
+                Traits::from_compute(even * s + odd * c));
         }
     }
 
     return out;
+}
+
+Result<OwnedTensor> rope(
+        std::span<const uint8_t> x,
+        const TensorDesc& xDesc,
+        float theta) {
+    return detail::dispatch_float_dtype<Result<OwnedTensor>>(
+        "rope",
+        xDesc.dtype,
+        [&]<typename T>() -> Result<OwnedTensor> {
+            return rope_impl<T>(x, xDesc, theta);
+        });
 }
 
 Result<OwnedTensor> rms_norm_f32(
@@ -923,6 +967,238 @@ Result<OwnedTensor> layer_norm_f32(
     }
 
     return out;
+}
+
+Result<OwnedTensor> linear(
+        std::span<const uint8_t> x,
+        const TensorDesc& xDesc,
+        std::span<const uint8_t> weight,
+        const TensorDesc& weightDesc,
+        std::span<const uint8_t> bias,
+        const TensorDesc& biasDesc) {
+    if (xDesc.dtype != weightDesc.dtype || xDesc.dtype != biasDesc.dtype)
+        return make_error("linear operands must have same dtype");
+    return detail::dispatch_float_dtype<Result<OwnedTensor>>(
+        "linear",
+        xDesc.dtype,
+        [&]<typename T>() -> Result<OwnedTensor> {
+            return f32_impl_or_unsupported<T>("linear", [&]() {
+                return linear_f32(x, xDesc, weight, weightDesc, bias, biasDesc);
+            });
+        });
+}
+
+Result<OwnedTensor> relu(
+        std::span<const uint8_t> x,
+        const TensorDesc& xDesc) {
+    return detail::dispatch_float_dtype<Result<OwnedTensor>>(
+        "relu",
+        xDesc.dtype,
+        [&]<typename T>() -> Result<OwnedTensor> {
+            return f32_impl_or_unsupported<T>("relu", [&]() {
+                return relu_f32(x, xDesc);
+            });
+        });
+}
+
+Result<OwnedTensor> add(
+        std::span<const uint8_t> lhs,
+        const TensorDesc& lhsDesc,
+        std::span<const uint8_t> rhs,
+        const TensorDesc& rhsDesc) {
+    return detail::dispatch_same_float_dtype<Result<OwnedTensor>>(
+        "add",
+        lhsDesc.dtype,
+        rhsDesc.dtype,
+        [&]<typename T>() -> Result<OwnedTensor> {
+            return f32_impl_or_unsupported<T>("add", [&]() {
+                return add_f32(lhs, lhsDesc, rhs, rhsDesc);
+            });
+        });
+}
+
+Result<OwnedTensor> mul(
+        std::span<const uint8_t> lhs,
+        const TensorDesc& lhsDesc,
+        std::span<const uint8_t> rhs,
+        const TensorDesc& rhsDesc) {
+    return detail::dispatch_same_float_dtype<Result<OwnedTensor>>(
+        "mul",
+        lhsDesc.dtype,
+        rhsDesc.dtype,
+        [&]<typename T>() -> Result<OwnedTensor> {
+            return f32_impl_or_unsupported<T>("mul", [&]() {
+                return mul_f32(lhs, lhsDesc, rhs, rhsDesc);
+            });
+        });
+}
+
+Result<OwnedTensor> sqrt(
+        std::span<const uint8_t> x,
+        const TensorDesc& xDesc) {
+    return detail::dispatch_float_dtype<Result<OwnedTensor>>(
+        "sqrt",
+        xDesc.dtype,
+        [&]<typename T>() -> Result<OwnedTensor> {
+            return f32_impl_or_unsupported<T>("sqrt", [&]() {
+                return sqrt_f32(x, xDesc);
+            });
+        });
+}
+
+Result<OwnedTensor> tanh(
+        std::span<const uint8_t> x,
+        const TensorDesc& xDesc) {
+    return detail::dispatch_float_dtype<Result<OwnedTensor>>(
+        "tanh",
+        xDesc.dtype,
+        [&]<typename T>() -> Result<OwnedTensor> {
+            return f32_impl_or_unsupported<T>("tanh", [&]() {
+                return tanh_f32(x, xDesc);
+            });
+        });
+}
+
+Result<OwnedTensor> matmul(
+        std::span<const uint8_t> lhs,
+        const TensorDesc& lhsDesc,
+        std::span<const uint8_t> rhs,
+        const TensorDesc& rhsDesc) {
+    return detail::dispatch_same_float_dtype<Result<OwnedTensor>>(
+        "matmul",
+        lhsDesc.dtype,
+        rhsDesc.dtype,
+        [&]<typename T>() -> Result<OwnedTensor> {
+            return f32_impl_or_unsupported<T>("matmul", [&]() {
+                return matmul_f32(lhs, lhsDesc, rhs, rhsDesc);
+            });
+        });
+}
+
+Result<OwnedTensor> transpose(
+        std::span<const uint8_t> x,
+        const TensorDesc& xDesc) {
+    return detail::dispatch_float_dtype<Result<OwnedTensor>>(
+        "transpose",
+        xDesc.dtype,
+        [&]<typename T>() -> Result<OwnedTensor> {
+            return f32_impl_or_unsupported<T>("transpose", [&]() {
+                return transpose_f32(x, xDesc);
+            });
+        });
+}
+
+Result<OwnedTensor> reshape(
+        std::span<const uint8_t> x,
+        const TensorDesc& xDesc,
+        Shape shape) {
+    auto inferred = infer_reshape_shape(xDesc.shape, std::move(shape));
+    if (!inferred) return make_error(inferred.error());
+
+    auto xBytes = require_bytes(x, xDesc, "reshape input");
+    if (!xBytes) return make_error(xBytes.error());
+
+    OwnedTensor out;
+    out.desc = TensorDesc(inferred.take(), xDesc.dtype);
+    out.data.assign(x.begin(), x.end());
+    return out;
+}
+
+Result<OwnedTensor> permute(
+        std::span<const uint8_t> x,
+        const TensorDesc& xDesc,
+        std::span<const int64_t> dims) {
+    return detail::dispatch_float_dtype<Result<OwnedTensor>>(
+        "permute",
+        xDesc.dtype,
+        [&]<typename T>() -> Result<OwnedTensor> {
+            return f32_impl_or_unsupported<T>("permute", [&]() {
+                return permute_f32(x, xDesc, dims);
+            });
+        });
+}
+
+Result<OwnedTensor> sliding_query_key_score(
+        std::span<const uint8_t> q,
+        const TensorDesc& qDesc,
+        std::span<const uint8_t> k,
+        const TensorDesc& kDesc,
+        int64_t window) {
+    return detail::dispatch_same_float_dtype<Result<OwnedTensor>>(
+        "sliding_query_key_score",
+        qDesc.dtype,
+        kDesc.dtype,
+        [&]<typename T>() -> Result<OwnedTensor> {
+            return f32_impl_or_unsupported<T>("sliding_query_key_score", [&]() {
+                return sliding_query_key_score_f32(q, qDesc, k, kDesc, window);
+            });
+        });
+}
+
+Result<OwnedTensor> softmax(
+        std::span<const uint8_t> x,
+        const TensorDesc& xDesc,
+        int64_t dim) {
+    return detail::dispatch_float_dtype<Result<OwnedTensor>>(
+        "softmax",
+        xDesc.dtype,
+        [&]<typename T>() -> Result<OwnedTensor> {
+            return f32_impl_or_unsupported<T>("softmax", [&]() {
+                return softmax_f32(x, xDesc, dim);
+            });
+        });
+}
+
+Result<OwnedTensor> embedding(
+        std::span<const uint8_t> ids,
+        const TensorDesc& idsDesc,
+        std::span<const uint8_t> weight,
+        const TensorDesc& weightDesc) {
+    return detail::dispatch_float_dtype<Result<OwnedTensor>>(
+        "embedding",
+        weightDesc.dtype,
+        [&]<typename T>() -> Result<OwnedTensor> {
+            return f32_impl_or_unsupported<T>("embedding", [&]() {
+                return embedding_f32(ids, idsDesc, weight, weightDesc);
+            });
+        });
+}
+
+Result<OwnedTensor> rms_norm(
+        std::span<const uint8_t> x,
+        const TensorDesc& xDesc,
+        std::span<const uint8_t> weight,
+        const TensorDesc& weightDesc,
+        float epsilon) {
+    return detail::dispatch_same_float_dtype<Result<OwnedTensor>>(
+        "rms_norm",
+        xDesc.dtype,
+        weightDesc.dtype,
+        [&]<typename T>() -> Result<OwnedTensor> {
+            return f32_impl_or_unsupported<T>("rms_norm", [&]() {
+                return rms_norm_f32(x, xDesc, weight, weightDesc, epsilon);
+            });
+        });
+}
+
+Result<OwnedTensor> layer_norm(
+        std::span<const uint8_t> x,
+        const TensorDesc& xDesc,
+        std::span<const uint8_t> weight,
+        const TensorDesc& weightDesc,
+        std::span<const uint8_t> bias,
+        const TensorDesc& biasDesc,
+        float epsilon) {
+    if (xDesc.dtype != weightDesc.dtype || xDesc.dtype != biasDesc.dtype)
+        return make_error("layer_norm operands must have same dtype");
+    return detail::dispatch_float_dtype<Result<OwnedTensor>>(
+        "layer_norm",
+        xDesc.dtype,
+        [&]<typename T>() -> Result<OwnedTensor> {
+            return f32_impl_or_unsupported<T>("layer_norm", [&]() {
+                return layer_norm_f32(x, xDesc, weight, weightDesc, bias, biasDesc, epsilon);
+            });
+        });
 }
 
 } // namespace sandy::core

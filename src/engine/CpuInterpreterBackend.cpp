@@ -201,7 +201,7 @@ Result<core::OwnedTensor> eval_linear(
     auto bias = lookup_value(values, op.operands[2]);
     if (!bias) return make_error(bias.error());
 
-    return core::linear_f32(
+    return core::linear(
         ref_data(store, *x), x->desc,
         ref_data(store, *weight), weight->desc,
         ref_data(store, *bias), bias->desc);
@@ -217,7 +217,7 @@ Result<core::OwnedTensor> eval_relu(
     auto x = lookup_value(values, op.operands[0]);
     if (!x) return make_error(x.error());
 
-    return core::relu_f32(ref_data(store, *x), x->desc);
+    return core::relu(ref_data(store, *x), x->desc);
 }
 
 Result<core::OwnedTensor> eval_add(
@@ -232,7 +232,7 @@ Result<core::OwnedTensor> eval_add(
     auto rhs = lookup_value(values, op.operands[1]);
     if (!rhs) return make_error(rhs.error());
 
-    return core::add_f32(
+    return core::add(
         ref_data(store, *lhs), lhs->desc,
         ref_data(store, *rhs), rhs->desc);
 }
@@ -249,7 +249,7 @@ Result<core::OwnedTensor> eval_mul(
     auto rhs = lookup_value(values, op.operands[1]);
     if (!rhs) return make_error(rhs.error());
 
-    return core::mul_f32(
+    return core::mul(
         ref_data(store, *lhs), lhs->desc,
         ref_data(store, *rhs), rhs->desc);
 }
@@ -264,7 +264,7 @@ Result<core::OwnedTensor> eval_sqrt(
     auto x = lookup_value(values, op.operands[0]);
     if (!x) return make_error(x.error());
 
-    return core::sqrt_f32(ref_data(store, *x), x->desc);
+    return core::sqrt(ref_data(store, *x), x->desc);
 }
 
 Result<core::OwnedTensor> eval_tanh(
@@ -277,7 +277,7 @@ Result<core::OwnedTensor> eval_tanh(
     auto x = lookup_value(values, op.operands[0]);
     if (!x) return make_error(x.error());
 
-    return core::tanh_f32(ref_data(store, *x), x->desc);
+    return core::tanh(ref_data(store, *x), x->desc);
 }
 
 Result<core::OwnedTensor> eval_matmul(
@@ -292,7 +292,7 @@ Result<core::OwnedTensor> eval_matmul(
     auto rhs = lookup_value(values, op.operands[1]);
     if (!rhs) return make_error(rhs.error());
 
-    return core::matmul_f32(
+    return core::matmul(
         ref_data(store, *lhs), lhs->desc,
         ref_data(store, *rhs), rhs->desc);
 }
@@ -307,7 +307,7 @@ Result<core::OwnedTensor> eval_transpose(
     auto x = lookup_value(values, op.operands[0]);
     if (!x) return make_error(x.error());
 
-    return core::transpose_f32(ref_data(store, *x), x->desc);
+    return core::transpose(ref_data(store, *x), x->desc);
 }
 
 Result<TensorRef> eval_reshape(
@@ -339,7 +339,7 @@ Result<core::OwnedTensor> eval_permute(
     if (!x) return make_error(x.error());
 
     auto dims = attr_int_list(op, "dims");
-    return core::permute_f32(ref_data(store, *x), x->desc, dims);
+    return core::permute(ref_data(store, *x), x->desc, dims);
 }
 
 Result<core::OwnedTensor> eval_sliding_query_key_score(
@@ -354,7 +354,7 @@ Result<core::OwnedTensor> eval_sliding_query_key_score(
     auto k = lookup_value(values, op.operands[1]);
     if (!k) return make_error(k.error());
 
-    return core::sliding_query_key_score_f32(
+    return core::sliding_query_key_score(
         ref_data(store, *q), q->desc,
         ref_data(store, *k), k->desc,
         attr_int_or(op, "window", 0));
@@ -370,7 +370,7 @@ Result<core::OwnedTensor> eval_softmax(
     auto x = lookup_value(values, op.operands[0]);
     if (!x) return make_error(x.error());
 
-    return core::softmax_f32(ref_data(store, *x), x->desc, attr_int_or(op, "dim", -1));
+    return core::softmax(ref_data(store, *x), x->desc, attr_int_or(op, "dim", -1));
 }
 
 Result<core::OwnedTensor> eval_embedding(
@@ -385,7 +385,7 @@ Result<core::OwnedTensor> eval_embedding(
     auto weight = lookup_value(values, op.operands[1]);
     if (!weight) return make_error(weight.error());
 
-    return core::embedding_f32(
+    return core::embedding(
         ref_data(store, *ids), ids->desc,
         ref_data(store, *weight), weight->desc);
 }
@@ -400,7 +400,7 @@ Result<core::OwnedTensor> eval_rope(
     auto x = lookup_value(values, op.operands[0]);
     if (!x) return make_error(x.error());
 
-    return core::rope_f32(
+    return core::rope(
         ref_data(store, *x), x->desc,
         attr_float_or(op, "rope_theta", 10000.0f));
 }
@@ -417,7 +417,7 @@ Result<core::OwnedTensor> eval_rms_norm(
     auto weight = lookup_value(values, op.operands[1]);
     if (!weight) return make_error(weight.error());
 
-    return core::rms_norm_f32(
+    return core::rms_norm(
         ref_data(store, *x), x->desc,
         ref_data(store, *weight), weight->desc,
         attr_float_or(op, "epsilon", 1.0e-6f));
@@ -437,7 +437,7 @@ Result<core::OwnedTensor> eval_layer_norm(
     auto bias = lookup_value(values, op.operands[2]);
     if (!bias) return make_error(bias.error());
 
-    return core::layer_norm_f32(
+    return core::layer_norm(
         ref_data(store, *x), x->desc,
         ref_data(store, *weight), weight->desc,
         ref_data(store, *bias), bias->desc,
