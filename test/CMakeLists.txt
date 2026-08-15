@@ -104,6 +104,7 @@ gtest_discover_tests(compiler_tests)
 add_executable(engine_tests
   engine/EngineTest.cpp
   engine/EngineCompileTest.cpp
+  engine/CpuDeviceTest.cpp
 )
 
 target_link_libraries(engine_tests
