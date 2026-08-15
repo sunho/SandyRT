@@ -139,6 +139,7 @@ Result<InvocPlanDraft> InvocPlanner::plan(const ir::mid_ir::Graph& graph) {
     }
 
     std::unordered_set<InvocValueId> outputValues;
+    std::vector<core::TensorDesc> outputDescs;
     for (auto* output : graph.outputs()) {
         auto value = lookup_value(valueIds, output);
         if (!value)
@@ -146,6 +147,7 @@ Result<InvocPlanDraft> InvocPlanner::plan(const ir::mid_ir::Graph& graph) {
         auto outputValue = value.take();
         draft.outputs.push_back(outputValue);
         outputValues.insert(outputValue);
+        outputDescs.emplace_back(output->shape, output->dtype);
     }
 
     for (auto value : materializedOrder) {
@@ -161,6 +163,7 @@ Result<InvocPlanDraft> InvocPlanner::plan(const ir::mid_ir::Graph& graph) {
         draft.instructions.push_back(InvocInstruction::store_outputs({
             defaultDevice_,
             draft.outputs,
+            std::move(outputDescs),
         }));
     }
 

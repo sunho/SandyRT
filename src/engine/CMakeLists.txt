@@ -1,7 +1,6 @@
 add_library(EngineLib
   Engine.cpp
   CpuDevice.cpp
-  CpuInterpreterBackend.cpp
   InvocPlanner.cpp
 )
 

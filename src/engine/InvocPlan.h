@@ -57,6 +57,7 @@ struct InvocRunKernel {
 struct InvocStoreOutputs {
     InvocDeviceId device = 0;
     std::vector<InvocValueId> values;
+    std::vector<core::TensorDesc> descs;
 };
 
 using InvocInstructionPayload = std::variant<

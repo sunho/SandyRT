@@ -1,4 +1,4 @@
-#include "CpuInterpreterBackend.h"
+#include "CpuDevice.h"
 #include "Engine.h"
 #include "MidIR.h"
 #include "ShapeUtil.h"
@@ -15,6 +15,8 @@
 #include <limits>
 #include <memory>
 #include <span>
+#include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -53,6 +55,41 @@ struct TestTensor {
     sandy::core::TensorDesc desc;
     std::vector<uint8_t> data;
 };
+
+class CapturedTensor {
+public:
+    CapturedTensor(sandy::core::TensorDesc desc, std::vector<uint8_t> data)
+        : desc_(std::move(desc)), data_(std::move(data)) {}
+
+    const sandy::core::TensorDesc& desc() const { return desc_; }
+    std::span<const uint8_t> data() const { return data_; }
+
+private:
+    sandy::core::TensorDesc desc_;
+    std::vector<uint8_t> data_;
+};
+
+sandy::engine::Engine make_cpu_engine() {
+    std::vector<std::unique_ptr<sandy::engine::Device>> devices;
+    devices.push_back(std::make_unique<sandy::engine::CpuDevice>());
+    return sandy::engine::Engine(std::move(devices));
+}
+
+std::unordered_map<std::string, std::shared_ptr<CapturedTensor>> outputs_to_map(
+        const std::vector<sandy::engine::TensorBufferPtr>& outputs) {
+    std::unordered_map<std::string, std::shared_ptr<CapturedTensor>> map;
+    for (size_t index = 0; index < outputs.size(); index++) {
+        auto accessResult = outputs[index]->access();
+        if (!accessResult)
+            return {};
+        auto access = accessResult.take();
+        auto data = access.data();
+        map["output" + std::to_string(index)] = std::make_shared<CapturedTensor>(
+            access.desc(),
+            std::vector<uint8_t>(data.begin(), data.end()));
+    }
+    return map;
+}
 
 Result<sandy::core::TensorRef> tensor_ref(
         std::span<const uint8_t> data,
@@ -488,7 +525,7 @@ TEST(TensorBufferTest, AccessMountsAndUnmounts) {
     EXPECT_EQ(buffer->unloadCount, 1);
 }
 
-TEST(EngineTest, CreatePlanAndRunWithDummyCpuInterpreter) {
+TEST(EngineTest, CompileAndRunWithCpuDevice) {
     sandy::ir::mid_ir::register_all_ops();
 
     sandy::ir::mid_ir::Graph graph;
@@ -500,15 +537,14 @@ TEST(EngineTest, CreatePlanAndRunWithDummyCpuInterpreter) {
     sandy::ir::mid_ir::Value* outputs[] = {out};
     builder.setOutputs(outputs);
 
-    sandy::engine::Engine engine(
-        std::make_unique<sandy::engine::backend::CpuInterpreterBackend>());
+    auto engine = make_cpu_engine();
 
-    auto planResult = engine.create_plan(graph);
+    auto planResult = engine.compile(graph);
     ASSERT_TRUE(planResult) << planResult.error();
     auto plan = planResult.take();
 
-    sandy::engine::TensorMap inputs;
-    inputs["0"] = make_f32_buffer("x", sandy::core::Shape({1, 1}), {1.0f});
+    std::vector<sandy::engine::TensorBufferPtr> inputs;
+    inputs.push_back(make_f32_buffer("x", sandy::core::Shape({1, 1}), {1.0f}));
 
     sandy::engine::TensorMap weights;
     weights["w"] = make_f32_buffer("w", sandy::core::Shape({1, 1}), {2.0f});
@@ -1233,15 +1269,14 @@ TEST(CpuInterpretTest, EngineRunReturnsOutput0) {
     sandy::ir::mid_ir::Value* outputs[] = {out};
     builder.setOutputs(outputs);
 
-    sandy::engine::Engine engine(
-        std::make_unique<sandy::engine::backend::CpuInterpreterBackend>());
+    auto engine = make_cpu_engine();
 
-    auto planResult = engine.create_plan(graph);
+    auto planResult = engine.compile(graph);
     ASSERT_TRUE(planResult) << planResult.error();
     auto plan = planResult.take();
 
-    sandy::engine::TensorMap inputs;
-    inputs["0"] = make_f32_buffer("x", sandy::core::Shape({1, 2}), {1.0f, 2.0f});
+    std::vector<sandy::engine::TensorBufferPtr> inputs;
+    inputs.push_back(make_f32_buffer("x", sandy::core::Shape({1, 2}), {1.0f, 2.0f}));
 
     sandy::engine::TensorMap weights;
     weights["w"] = make_f32_buffer("w", sandy::core::Shape({2, 2}), {3.0f, 4.0f, 5.0f, 6.0f});
@@ -1249,7 +1284,7 @@ TEST(CpuInterpretTest, EngineRunReturnsOutput0) {
 
     auto runResult = engine.run(*plan, inputs, weights);
     ASSERT_TRUE(runResult) << runResult.error();
-    auto outputsMap = runResult.take();
+    auto outputsMap = outputs_to_map(runResult.take());
 
     auto it = outputsMap.find("output0");
     ASSERT_NE(it, outputsMap.end());
@@ -1271,16 +1306,15 @@ TEST(CpuInterpretTest, LinearRank3) {
     sandy::ir::mid_ir::Value* outputs[] = {out};
     builder.setOutputs(outputs);
 
-    sandy::engine::Engine engine(
-        std::make_unique<sandy::engine::backend::CpuInterpreterBackend>());
+    auto engine = make_cpu_engine();
 
-    auto planResult = engine.create_plan(graph);
+    auto planResult = engine.compile(graph);
     ASSERT_TRUE(planResult) << planResult.error();
     auto plan = planResult.take();
 
-    sandy::engine::TensorMap inputs;
-    inputs["0"] = make_f32_buffer(
-        "x", sandy::core::Shape({2, 2, 2}), {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f});
+    std::vector<sandy::engine::TensorBufferPtr> inputs;
+    inputs.push_back(make_f32_buffer(
+        "x", sandy::core::Shape({2, 2, 2}), {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f}));
 
     sandy::engine::TensorMap weights;
     weights["w"] = make_f32_buffer(
@@ -1289,7 +1323,7 @@ TEST(CpuInterpretTest, LinearRank3) {
 
     auto runResult = engine.run(*plan, inputs, weights);
     ASSERT_TRUE(runResult) << runResult.error();
-    auto outputsMap = runResult.take();
+    auto outputsMap = outputs_to_map(runResult.take());
 
     auto it = outputsMap.find("output0");
     ASSERT_NE(it, outputsMap.end());
@@ -1310,16 +1344,15 @@ TEST(CpuInterpretTest, RMSNorm) {
     sandy::ir::mid_ir::Value* outputs[] = {out};
     builder.setOutputs(outputs);
 
-    sandy::engine::Engine engine(
-        std::make_unique<sandy::engine::backend::CpuInterpreterBackend>());
+    auto engine = make_cpu_engine();
 
-    auto planResult = engine.create_plan(graph);
+    auto planResult = engine.compile(graph);
     ASSERT_TRUE(planResult) << planResult.error();
     auto plan = planResult.take();
 
-    sandy::engine::TensorMap inputs;
-    inputs["0"] = make_f32_buffer(
-        "x", sandy::core::Shape({2, 3}), {1.0f, 2.0f, 2.0f, 0.0f, 3.0f, 4.0f});
+    std::vector<sandy::engine::TensorBufferPtr> inputs;
+    inputs.push_back(make_f32_buffer(
+        "x", sandy::core::Shape({2, 3}), {1.0f, 2.0f, 2.0f, 0.0f, 3.0f, 4.0f}));
 
     sandy::engine::TensorMap weights;
     weights["norm.weight"] = make_f32_buffer(
@@ -1327,7 +1360,7 @@ TEST(CpuInterpretTest, RMSNorm) {
 
     auto runResult = engine.run(*plan, inputs, weights);
     ASSERT_TRUE(runResult) << runResult.error();
-    auto outputsMap = runResult.take();
+    auto outputsMap = outputs_to_map(runResult.take());
 
     auto it = outputsMap.find("output0");
     ASSERT_NE(it, outputsMap.end());
@@ -1357,15 +1390,14 @@ TEST(CpuInterpretTest, LayerNorm) {
     sandy::ir::mid_ir::Value* outputs[] = {out};
     builder.setOutputs(outputs);
 
-    sandy::engine::Engine engine(
-        std::make_unique<sandy::engine::backend::CpuInterpreterBackend>());
+    auto engine = make_cpu_engine();
 
-    auto planResult = engine.create_plan(graph);
+    auto planResult = engine.compile(graph);
     ASSERT_TRUE(planResult) << planResult.error();
     auto plan = planResult.take();
 
-    sandy::engine::TensorMap inputs;
-    inputs["0"] = make_f32_buffer("x", sandy::core::Shape({1, 2, 2}), {1.0f, 2.0f, 3.0f, 5.0f});
+    std::vector<sandy::engine::TensorBufferPtr> inputs;
+    inputs.push_back(make_f32_buffer("x", sandy::core::Shape({1, 2, 2}), {1.0f, 2.0f, 3.0f, 5.0f}));
 
     sandy::engine::TensorMap weights;
     weights["ln.weight"] = make_f32_buffer("ln.weight", sandy::core::Shape({2}), {2.0f, -1.0f});
@@ -1373,7 +1405,7 @@ TEST(CpuInterpretTest, LayerNorm) {
 
     auto runResult = engine.run(*plan, inputs, weights);
     ASSERT_TRUE(runResult) << runResult.error();
-    auto outputsMap = runResult.take();
+    auto outputsMap = outputs_to_map(runResult.take());
 
     auto it = outputsMap.find("output0");
     ASSERT_NE(it, outputsMap.end());
@@ -1399,16 +1431,15 @@ TEST(CpuInterpretTest, AddMulSqrt) {
     sandy::ir::mid_ir::Value* outputs[] = {out};
     builder.setOutputs(outputs);
 
-    sandy::engine::Engine engine(
-        std::make_unique<sandy::engine::backend::CpuInterpreterBackend>());
+    auto engine = make_cpu_engine();
 
-    auto planResult = engine.create_plan(graph);
+    auto planResult = engine.compile(graph);
     ASSERT_TRUE(planResult) << planResult.error();
     auto plan = planResult.take();
 
-    sandy::engine::TensorMap inputs;
-    inputs["0"] = make_f32_buffer(
-        "x", sandy::core::Shape({2, 3}), {1.0f, 4.0f, 9.0f, 16.0f, 25.0f, 36.0f});
+    std::vector<sandy::engine::TensorBufferPtr> inputs;
+    inputs.push_back(make_f32_buffer(
+        "x", sandy::core::Shape({2, 3}), {1.0f, 4.0f, 9.0f, 16.0f, 25.0f, 36.0f}));
 
     sandy::engine::TensorMap weights;
     weights["bias"] = make_f32_buffer("bias", sandy::core::Shape({3}), {0.0f, 5.0f, 7.0f});
@@ -1416,7 +1447,7 @@ TEST(CpuInterpretTest, AddMulSqrt) {
 
     auto runResult = engine.run(*plan, inputs, weights);
     ASSERT_TRUE(runResult) << runResult.error();
-    auto outputsMap = runResult.take();
+    auto outputsMap = outputs_to_map(runResult.take());
 
     auto it = outputsMap.find("output0");
     ASSERT_NE(it, outputsMap.end());
@@ -1442,21 +1473,20 @@ TEST(CpuInterpretTest, ConstantBroadcastAndTanh) {
     sandy::ir::mid_ir::Value* outputs[] = {out};
     builder.setOutputs(outputs);
 
-    sandy::engine::Engine engine(
-        std::make_unique<sandy::engine::backend::CpuInterpreterBackend>());
+    auto engine = make_cpu_engine();
 
-    auto planResult = engine.create_plan(graph);
+    auto planResult = engine.compile(graph);
     ASSERT_TRUE(planResult) << planResult.error();
     auto plan = planResult.take();
 
-    sandy::engine::TensorMap inputs;
-    inputs["0"] = make_f32_buffer("x", sandy::core::Shape({3}), {-2.0f, -1.0f, 0.0f});
+    std::vector<sandy::engine::TensorBufferPtr> inputs;
+    inputs.push_back(make_f32_buffer("x", sandy::core::Shape({3}), {-2.0f, -1.0f, 0.0f}));
 
     sandy::engine::TensorMap weights;
 
     auto runResult = engine.run(*plan, inputs, weights);
     ASSERT_TRUE(runResult) << runResult.error();
-    auto outputsMap = runResult.take();
+    auto outputsMap = outputs_to_map(runResult.take());
 
     auto it = outputsMap.find("output0");
     ASSERT_NE(it, outputsMap.end());
@@ -1479,16 +1509,15 @@ TEST(CpuInterpretTest, GemmaStyleMatMulWithTransposedWeight) {
     sandy::ir::mid_ir::Value* outputs[] = {logits};
     builder.setOutputs(outputs);
 
-    sandy::engine::Engine engine(
-        std::make_unique<sandy::engine::backend::CpuInterpreterBackend>());
+    auto engine = make_cpu_engine();
 
-    auto planResult = engine.create_plan(graph);
+    auto planResult = engine.compile(graph);
     ASSERT_TRUE(planResult) << planResult.error();
     auto plan = planResult.take();
 
-    sandy::engine::TensorMap inputs;
-    inputs["0"] = make_f32_buffer(
-        "x", sandy::core::Shape({2, 3}), {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f});
+    std::vector<sandy::engine::TensorBufferPtr> inputs;
+    inputs.push_back(make_f32_buffer(
+        "x", sandy::core::Shape({2, 3}), {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f}));
 
     sandy::engine::TensorMap weights;
     weights["embed_tokens.weight"] = make_f32_buffer(
@@ -1501,7 +1530,7 @@ TEST(CpuInterpretTest, GemmaStyleMatMulWithTransposedWeight) {
 
     auto runResult = engine.run(*plan, inputs, weights);
     ASSERT_TRUE(runResult) << runResult.error();
-    auto outputsMap = runResult.take();
+    auto outputsMap = outputs_to_map(runResult.take());
 
     auto it = outputsMap.find("output0");
     ASSERT_NE(it, outputsMap.end());
@@ -1527,24 +1556,23 @@ TEST(CpuInterpretTest, ReshapeProjectionLayout) {
     sandy::ir::mid_ir::Value* outputs[] = {out};
     builder.setOutputs(outputs);
 
-    sandy::engine::Engine engine(
-        std::make_unique<sandy::engine::backend::CpuInterpreterBackend>());
+    auto engine = make_cpu_engine();
 
-    auto planResult = engine.create_plan(graph);
+    auto planResult = engine.compile(graph);
     ASSERT_TRUE(planResult) << planResult.error();
     auto plan = planResult.take();
 
-    sandy::engine::TensorMap inputs;
-    inputs["0"] = make_f32_buffer(
+    std::vector<sandy::engine::TensorBufferPtr> inputs;
+    inputs.push_back(make_f32_buffer(
         "x", sandy::core::Shape({1, 2, 6}), {
             0.0f, 1.0f, 2.0f, 3.0f, 4.0f, 5.0f,
             6.0f, 7.0f, 8.0f, 9.0f, 10.0f, 11.0f,
-        });
+        }));
 
     sandy::engine::TensorMap weights;
     auto runResult = engine.run(*plan, inputs, weights);
     ASSERT_TRUE(runResult) << runResult.error();
-    auto outputsMap = runResult.take();
+    auto outputsMap = outputs_to_map(runResult.take());
 
     auto it = outputsMap.find("output0");
     ASSERT_NE(it, outputsMap.end());
@@ -1564,15 +1592,14 @@ TEST(CpuInterpretTest, PermuteAttentionLayout) {
     sandy::ir::mid_ir::Value* outputs[] = {out};
     builder.setOutputs(outputs);
 
-    sandy::engine::Engine engine(
-        std::make_unique<sandy::engine::backend::CpuInterpreterBackend>());
+    auto engine = make_cpu_engine();
 
-    auto planResult = engine.create_plan(graph);
+    auto planResult = engine.compile(graph);
     ASSERT_TRUE(planResult) << planResult.error();
     auto plan = planResult.take();
 
-    sandy::engine::TensorMap inputs;
-    inputs["0"] = make_f32_buffer(
+    std::vector<sandy::engine::TensorBufferPtr> inputs;
+    inputs.push_back(make_f32_buffer(
         "x", sandy::core::Shape({1, 2, 3, 2}), {
             0.0f, 1.0f,
             2.0f, 3.0f,
@@ -1580,12 +1607,12 @@ TEST(CpuInterpretTest, PermuteAttentionLayout) {
             6.0f, 7.0f,
             8.0f, 9.0f,
             10.0f, 11.0f,
-        });
+        }));
 
     sandy::engine::TensorMap weights;
     auto runResult = engine.run(*plan, inputs, weights);
     ASSERT_TRUE(runResult) << runResult.error();
-    auto outputsMap = runResult.take();
+    auto outputsMap = outputs_to_map(runResult.take());
 
     auto it = outputsMap.find("output0");
     ASSERT_NE(it, outputsMap.end());
@@ -1612,25 +1639,24 @@ TEST(CpuInterpretTest, SlidingQueryKeyScore) {
     sandy::ir::mid_ir::Value* outputs[] = {out};
     builder.setOutputs(outputs);
 
-    sandy::engine::Engine engine(
-        std::make_unique<sandy::engine::backend::CpuInterpreterBackend>());
+    auto engine = make_cpu_engine();
 
-    auto planResult = engine.create_plan(graph);
+    auto planResult = engine.compile(graph);
     ASSERT_TRUE(planResult) << planResult.error();
     auto plan = planResult.take();
 
-    sandy::engine::TensorMap inputs;
-    inputs["0"] = make_f32_buffer("q", sandy::core::Shape({1, 1, 3, 1}), {
+    std::vector<sandy::engine::TensorBufferPtr> inputs;
+    inputs.push_back(make_f32_buffer("q", sandy::core::Shape({1, 1, 3, 1}), {
         1.0f, 2.0f, 3.0f,
-    });
-    inputs["1"] = make_f32_buffer("k", sandy::core::Shape({1, 1, 3, 1}), {
+    }));
+    inputs.push_back(make_f32_buffer("k", sandy::core::Shape({1, 1, 3, 1}), {
         10.0f, 20.0f, 30.0f,
-    });
+    }));
 
     sandy::engine::TensorMap weights;
     auto runResult = engine.run(*plan, inputs, weights);
     ASSERT_TRUE(runResult) << runResult.error();
-    auto outputsMap = runResult.take();
+    auto outputsMap = outputs_to_map(runResult.take());
 
     auto it = outputsMap.find("output0");
     ASSERT_NE(it, outputsMap.end());
@@ -1664,25 +1690,24 @@ TEST(CpuInterpretTest, SoftmaxAfterSlidingQueryKeyScore) {
     sandy::ir::mid_ir::Value* outputs[] = {out};
     builder.setOutputs(outputs);
 
-    sandy::engine::Engine engine(
-        std::make_unique<sandy::engine::backend::CpuInterpreterBackend>());
+    auto engine = make_cpu_engine();
 
-    auto planResult = engine.create_plan(graph);
+    auto planResult = engine.compile(graph);
     ASSERT_TRUE(planResult) << planResult.error();
     auto plan = planResult.take();
 
-    sandy::engine::TensorMap inputs;
-    inputs["0"] = make_f32_buffer("q", sandy::core::Shape({1, 1, 2, 1}), {
+    std::vector<sandy::engine::TensorBufferPtr> inputs;
+    inputs.push_back(make_f32_buffer("q", sandy::core::Shape({1, 1, 2, 1}), {
         1.0f, 1.0f,
-    });
-    inputs["1"] = make_f32_buffer("k", sandy::core::Shape({1, 1, 2, 1}), {
+    }));
+    inputs.push_back(make_f32_buffer("k", sandy::core::Shape({1, 1, 2, 1}), {
         1.0f, 2.0f,
-    });
+    }));
 
     sandy::engine::TensorMap weights;
     auto runResult = engine.run(*plan, inputs, weights);
     ASSERT_TRUE(runResult) << runResult.error();
-    auto outputsMap = runResult.take();
+    auto outputsMap = outputs_to_map(runResult.take());
 
     auto it = outputsMap.find("output0");
     ASSERT_NE(it, outputsMap.end());
@@ -1707,16 +1732,15 @@ TEST(CpuInterpretTest, EmbeddingLoadsRowsFromFullWeightBuffer) {
     sandy::ir::mid_ir::Value* outputs[] = {out};
     builder.setOutputs(outputs);
 
-    sandy::engine::Engine engine(
-        std::make_unique<sandy::engine::backend::CpuInterpreterBackend>());
+    auto engine = make_cpu_engine();
 
-    auto planResult = engine.create_plan(graph);
+    auto planResult = engine.compile(graph);
     ASSERT_TRUE(planResult) << planResult.error();
     auto plan = planResult.take();
 
-    sandy::engine::TensorMap inputs;
-    inputs["0"] = make_i32_buffer(
-        "input_ids", sandy::core::Shape({2, 2}), {3, 1, 0, 2});
+    std::vector<sandy::engine::TensorBufferPtr> inputs;
+    inputs.push_back(make_i32_buffer(
+        "input_ids", sandy::core::Shape({2, 2}), {3, 1, 0, 2}));
 
     sandy::engine::TensorMap weights;
     weights["embed_tokens.weight"] = make_f32_buffer(
@@ -1729,7 +1753,7 @@ TEST(CpuInterpretTest, EmbeddingLoadsRowsFromFullWeightBuffer) {
 
     auto runResult = engine.run(*plan, inputs, weights);
     ASSERT_TRUE(runResult) << runResult.error();
-    auto outputsMap = runResult.take();
+    auto outputsMap = outputs_to_map(runResult.take());
 
     auto it = outputsMap.find("output0");
     ASSERT_NE(it, outputsMap.end());
@@ -1755,23 +1779,22 @@ TEST(CpuInterpretTest, RoPEReceivesThetaAttr) {
     sandy::ir::mid_ir::Value* outputs[] = {out};
     builder.setOutputs(outputs);
 
-    sandy::engine::Engine engine(
-        std::make_unique<sandy::engine::backend::CpuInterpreterBackend>());
+    auto engine = make_cpu_engine();
 
-    auto planResult = engine.create_plan(graph);
+    auto planResult = engine.compile(graph);
     ASSERT_TRUE(planResult) << planResult.error();
     auto plan = planResult.take();
 
-    sandy::engine::TensorMap inputs;
-    inputs["0"] = make_f32_buffer("x", sandy::core::Shape({1, 2, 4}), {
+    std::vector<sandy::engine::TensorBufferPtr> inputs;
+    inputs.push_back(make_f32_buffer("x", sandy::core::Shape({1, 2, 4}), {
         1.0f, 2.0f, 3.0f, 4.0f,
         1.0f, 0.0f, 0.0f, 1.0f,
-    });
+    }));
 
     sandy::engine::TensorMap weights;
     auto runResult = engine.run(*plan, inputs, weights);
     ASSERT_TRUE(runResult) << runResult.error();
-    auto outputsMap = runResult.take();
+    auto outputsMap = outputs_to_map(runResult.take());
 
     auto it = outputsMap.find("output0");
     ASSERT_NE(it, outputsMap.end());

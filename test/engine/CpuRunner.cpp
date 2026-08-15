@@ -1,5 +1,5 @@
 #include "Compiler.h"
-#include "CpuInterpreterBackend.h"
+#include "CpuDevice.h"
 #include "Engine.h"
 #include "Interpreter.h"
 #include "Lexer.h"
@@ -13,6 +13,7 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -36,8 +37,7 @@ void add_tensors_to_map(const sandy::weight::Weights& tensors,
 
 void add_inputs_to_positional_map(const sandy::weight::Weights& tensors,
                                   const sandy::ir::high_ir::Graph& graph,
-                                  sandy::engine::TensorMap& map) {
-    int64_t index = 0;
+                                  std::vector<sandy::engine::TensorBufferPtr>& inputs) {
     for (const auto& op : graph.ops()) {
         if (op.kind != sandy::ir::high_ir::Op::Input)
             continue;
@@ -46,7 +46,7 @@ void add_inputs_to_positional_map(const sandy::weight::Weights& tensors,
             fprintf(stderr, "input tensor missing: %s\n", op.inputName.c_str());
             abort();
         }
-        map[std::to_string(index++)] = tensor;
+        inputs.push_back(tensor);
     }
 }
 
@@ -227,16 +227,21 @@ bool read_file(const std::string& path, std::string& out) {
     return true;
 }
 
-void print_tensor(const std::string& name,
-                  const sandy::engine::backend::BackendBuffer& buffer) {
-    const auto& desc = buffer.desc();
+void print_tensor(const std::string& name, sandy::core::TensorBuffer& buffer) {
+    auto accessResult = buffer.access();
+    if (!accessResult) {
+        fprintf(stderr, "cannot access output buffer %s: %s\n", name.c_str(), accessResult.error().c_str());
+        return;
+    }
+    auto access = accessResult.take();
+    const auto& desc = access.desc();
     printf("%s: %s%s\n",
            name.c_str(),
            sandy::core::dtype_name(desc.dtype),
            desc.shape.str().c_str());
 
     if (desc.dtype != sandy::core::DType::F32) {
-        printf("  raw bytes: %zu\n", buffer.data().size());
+        printf("  raw bytes: %zu\n", access.data().size());
         return;
     }
 
@@ -249,15 +254,15 @@ void print_tensor(const std::string& name,
     printf("  [");
     for (int64_t i = 0; i < numel; i++) {
         if (i > 0) printf(", ");
-        printf("%.6g", read_f32(buffer.data(), static_cast<size_t>(i)));
+        printf("%.6g", read_f32(access.data(), static_cast<size_t>(i)));
     }
     printf("]\n");
 
     if (numel > 0) {
         int64_t best = 0;
-        float bestValue = read_f32(buffer.data(), 0);
+        float bestValue = read_f32(access.data(), 0);
         for (int64_t i = 1; i < numel; i++) {
-            float value = read_f32(buffer.data(), static_cast<size_t>(i));
+            float value = read_f32(access.data(), static_cast<size_t>(i));
             if (value > bestValue) {
                 best = i;
                 bestValue = value;
@@ -329,30 +334,33 @@ int main(int argc, char* argv[]) {
     auto midGraph = midResult.take();
     midGraph->dump();
 
-    printf("[7/8] creating cpu backend plan\n");
-    sandy::engine::Engine engine(
-        std::make_unique<sandy::engine::backend::CpuInterpreterBackend>());
-    auto planResult = engine.create_plan(*midGraph);
+    printf("[7/8] compiling cpu invocation plan\n");
+    std::vector<std::unique_ptr<sandy::engine::Device>> devices;
+    devices.push_back(std::make_unique<sandy::engine::CpuDevice>());
+    sandy::engine::Engine engine(std::move(devices));
+    auto planResult = engine.compile(*midGraph);
     if (!planResult) {
         fprintf(stderr, "plan error: %s\n", planResult.error().c_str());
         return 1;
     }
     auto plan = planResult.take();
 
-    sandy::engine::TensorMap inputMap;
+    std::vector<sandy::engine::TensorBufferPtr> inputBuffers;
     sandy::engine::TensorMap weightMap;
-    add_inputs_to_positional_map(*inputs, highGraph, inputMap);
+    add_inputs_to_positional_map(*inputs, highGraph, inputBuffers);
     add_tensors_to_map(*weights, weightMap);
 
-    printf("[8/8] backend mid ir runs\n");
-    auto runResult = engine.run(*plan, inputMap, weightMap);
+    printf("[8/8] invocation plan runs\n");
+    auto runResult = engine.run(*plan, inputBuffers, weightMap);
     if (!runResult) {
         fprintf(stderr, "run error: %s\n", runResult.error().c_str());
         return 1;
     }
 
     auto outputs = runResult.take();
-    for (const auto& [name, buffer] : outputs) {
+    for (size_t index = 0; index < outputs.size(); index++) {
+        auto& buffer = outputs[index];
+        auto name = "output" + std::to_string(index);
         if (!buffer) {
             fprintf(stderr, "null output buffer: %s\n", name.c_str());
             return 1;

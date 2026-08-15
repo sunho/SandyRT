@@ -13,32 +13,30 @@ namespace sandy::engine {
 
 namespace {
 
-class SimplePlan final : public Plan {
+class HostTensorBuffer final : public core::TensorBuffer {
 public:
-    explicit SimplePlan(std::unique_ptr<backend::Program> program)
-        : program_(std::move(program)) {}
+    HostTensorBuffer(core::TensorDesc desc, std::vector<uint8_t> data)
+        : TensorBuffer(std::move(desc)), data_(std::move(data)) {}
 
 private:
-    const backend::Program& backend_program() const override { return *program_; }
+    Result<void> load() override { return {}; }
+    void unload() override {}
+    std::span<const uint8_t> data() const override { return data_; }
 
-    std::unique_ptr<backend::Program> program_;
+    std::vector<uint8_t> data_;
 };
 
-Result<backend::BackendBufferMap> create_backend_buffers(
-        backend::Backend& backend,
-        const TensorMap& tensors) {
-    backend::BackendBufferMap buffers;
-    for (const auto& [name, tensor] : tensors) {
-        if (!tensor)
-            return make_error("null tensor buffer for '" + name + "'");
+Result<TensorBufferPtr> with_desc(TensorBufferPtr buffer, core::TensorDesc desc) {
+    auto accessResult = buffer->access();
+    if (!accessResult)
+        return make_error(accessResult.error());
+    auto access = accessResult.take();
 
-        auto result = backend.create_buffer(*tensor);
-        if (!result)
-            return make_error(result.error());
-
-        buffers[name] = result.take();
-    }
-    return buffers;
+    auto data = access.data();
+    TensorBufferPtr result = std::make_shared<HostTensorBuffer>(
+        std::move(desc),
+        std::vector<uint8_t>(data.begin(), data.end()));
+    return result;
 }
 
 Result<Device*> lookup_device(
@@ -70,9 +68,6 @@ Result<InvocDeviceId> lookup_value_device(
 }
 
 } // namespace
-
-Engine::Engine(std::unique_ptr<backend::Backend> backend)
-    : backend_(std::move(backend)) {}
 
 Engine::Engine(std::vector<std::unique_ptr<Device>> devices)
     : devices_(std::move(devices)) {}
@@ -121,6 +116,7 @@ Result<std::vector<TensorBufferPtr>> Engine::run(
     std::unordered_map<InvocValueId, InvocDeviceId> valueDevices;
     std::unordered_map<InvocProgramId, InvocProgram> programs;
     std::vector<InvocValueId> outputValues;
+    std::vector<core::TensorDesc> outputDescs;
 
     for (const auto& program : plan.programs)
         programs[program.id] = program;
@@ -243,7 +239,10 @@ Result<std::vector<TensorBufferPtr>> Engine::run(
                     if (!buffer)
                         return make_error(buffer.error());
                 }
+                if (!store.descs.empty() && store.descs.size() != store.values.size())
+                    return make_error("store outputs descriptor count does not match value count");
                 outputValues = store.values;
+                outputDescs = store.descs;
                 break;
             }
         }
@@ -254,7 +253,8 @@ Result<std::vector<TensorBufferPtr>> Engine::run(
 
     std::vector<TensorBufferPtr> outputs;
     outputs.reserve(outputValues.size());
-    for (auto value : outputValues) {
+    for (size_t index = 0; index < outputValues.size(); index++) {
+        auto value = outputValues[index];
         auto valueDevice = lookup_value_device(valueDevices, value);
         if (!valueDevice)
             return make_error(valueDevice.error());
@@ -268,7 +268,14 @@ Result<std::vector<TensorBufferPtr>> Engine::run(
         auto output = (*device)->read(buffer.take());
         if (!output)
             return make_error(output.error());
-        outputs.push_back(output.take());
+        auto outputBuffer = output.take();
+        if (index < outputDescs.size()) {
+            auto describedOutput = with_desc(std::move(outputBuffer), outputDescs[index]);
+            if (!describedOutput)
+                return make_error(describedOutput.error());
+            outputBuffer = describedOutput.take();
+        }
+        outputs.push_back(std::move(outputBuffer));
 
         auto dealloc = (*device)->dealloc(buffers[value]);
         if (!dealloc)
@@ -278,41 +285,6 @@ Result<std::vector<TensorBufferPtr>> Engine::run(
     }
 
     return outputs;
-}
-
-Result<std::unique_ptr<Plan>> Engine::create_plan(const ir::mid_ir::Graph& graph) {
-    if (!backend_)
-        return make_error("engine has no backend");
-
-    auto program = backend_->compile(graph);
-    if (!program)
-        return make_error(program.error());
-
-    std::unique_ptr<Plan> plan = std::make_unique<SimplePlan>(program.take());
-    return plan;
-}
-
-Result<backend::BackendRunResult> Engine::run(
-        const Plan& plan,
-        const TensorMap& inputs,
-        const TensorMap& weights,
-        const RunOptions& options) {
-    if (!backend_)
-        return make_error("engine has no backend");
-
-    auto backendInputs = create_backend_buffers(*backend_, inputs);
-    if (!backendInputs)
-        return make_error(backendInputs.error());
-
-    auto backendWeights = create_backend_buffers(*backend_, weights);
-    if (!backendWeights)
-        return make_error(backendWeights.error());
-
-    return backend_->run(
-        plan.backend_program(),
-        backendInputs.take(),
-        backendWeights.take(),
-        options);
 }
 
 } // namespace sandy::engine

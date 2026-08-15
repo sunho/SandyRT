@@ -227,7 +227,7 @@ TEST_F(EngineCompileTest, RunUsesStoreOutputsOrder) {
         1,
         sandy::core::TensorDesc(sandy::core::Shape({1}), sandy::core::DType::F32),
     }));
-    plan.instructions.push_back(sandy::engine::InvocInstruction::store_outputs({0, {1, 0}}));
+    plan.instructions.push_back(sandy::engine::InvocInstruction::store_outputs({0, {1, 0}, {}}));
     plan.outputs = {0, 1};
 
     std::vector<sandy::engine::TensorBufferPtr> inputs;
@@ -248,7 +248,7 @@ TEST_F(EngineCompileTest, RunFailsForMissingInputIndex) {
 
     sandy::engine::InvocPlan plan;
     plan.instructions.push_back(sandy::engine::InvocInstruction::load_input({0, 1, 0}));
-    plan.instructions.push_back(sandy::engine::InvocInstruction::store_outputs({0, {0}}));
+    plan.instructions.push_back(sandy::engine::InvocInstruction::store_outputs({0, {0}, {}}));
     plan.outputs = {0};
 
     std::vector<sandy::engine::TensorBufferPtr> inputs;
@@ -269,7 +269,7 @@ TEST_F(EngineCompileTest, RunFailsForMissingWeight) {
 
     sandy::engine::InvocPlan plan;
     plan.instructions.push_back(sandy::engine::InvocInstruction::load_weight({0, "w", 0}));
-    plan.instructions.push_back(sandy::engine::InvocInstruction::store_outputs({0, {0}}));
+    plan.instructions.push_back(sandy::engine::InvocInstruction::store_outputs({0, {0}, {}}));
     plan.outputs = {0};
 
     std::vector<sandy::engine::TensorBufferPtr> inputs;
@@ -298,7 +298,7 @@ TEST_F(EngineCompileTest, RunFailsForMissingProgram) {
         {},
         {0},
     }));
-    plan.instructions.push_back(sandy::engine::InvocInstruction::store_outputs({0, {0}}));
+    plan.instructions.push_back(sandy::engine::InvocInstruction::store_outputs({0, {0}, {}}));
     plan.outputs = {0};
 
     std::vector<sandy::engine::TensorBufferPtr> inputs;
