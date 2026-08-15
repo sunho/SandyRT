@@ -77,6 +77,11 @@ target_link_libraries(materialize_tests
   GTest::gtest_main
 )
 
+target_compile_definitions(materialize_tests
+  PRIVATE
+  SANDY_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
+)
+
 set_target_properties(materialize_tests PROPERTIES
   CXX_STANDARD 20
   CXX_STANDARD_REQUIRED ON

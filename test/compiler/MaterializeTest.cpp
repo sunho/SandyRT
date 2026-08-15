@@ -1,15 +1,25 @@
 #include "Compiler.h"
 #include "SafeTensorWeights.h"
+
 #include <gtest/gtest.h>
+
+namespace {
+
+std::string fixture_path(const char* relative) {
+    return std::string(SANDY_SOURCE_DIR) + "/" + relative;
+}
+
+} // namespace
 
 TEST(MaterializeTest, MNISTEndToEnd) {
     sandy::Compiler compiler;
-    auto high_graph = compiler.load_sandygo("../src/models/mnist.sandy.go");
+    auto high_graph = compiler.load_sandygo(fixture_path("src/models/mnist.sandy.go"));
 
     std::cout << "=== HighIR ===" << std::endl;
     high_graph.dump();
 
-    auto weights = sandy::weight::EagerSafeTensorWeights::load("../experiments/mnist/mnist.safetensors");
+    auto weights = sandy::weight::EagerSafeTensorWeights::load(
+        fixture_path("experiments/mnist/mnist.safetensors"));
 
     sandy::ir::mid_ir::MaterializeOptions options;
     options.input_tensor_descs["x"] = sandy::core::TensorDesc(
@@ -36,8 +46,9 @@ TEST(MaterializeTest, MNISTEndToEnd) {
 
 TEST(MaterializeTest, MissingInputShape) {
     sandy::Compiler compiler;
-    auto high_graph = compiler.load_sandygo("../src/models/mnist.sandy.go");
-    auto weights = sandy::weight::EagerSafeTensorWeights::load("../experiments/mnist/mnist.safetensors");
+    auto high_graph = compiler.load_sandygo(fixture_path("src/models/mnist.sandy.go"));
+    auto weights = sandy::weight::EagerSafeTensorWeights::load(
+        fixture_path("experiments/mnist/mnist.safetensors"));
 
     auto result = compiler.materialize_mid_ir(high_graph, *weights);
     EXPECT_FALSE(result);
