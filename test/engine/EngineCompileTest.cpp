@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <memory>
 #include <span>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -156,4 +157,154 @@ TEST_F(EngineCompileTest, CompilePropagatesDeviceCompileFailure) {
     auto planResult = engine.compile(graph);
     EXPECT_FALSE(planResult);
     EXPECT_EQ(planResult.error(), "fake compile failed");
+}
+
+TEST_F(EngineCompileTest, RunInterpretsInvocPlanWithFakeDevice) {
+    sandy::ir::mid_ir::Graph graph;
+    sandy::ir::mid_ir::Builder builder(graph);
+    auto* x = builder.createInput(0, sandy::core::Shape({1}), sandy::core::DType::F32);
+    auto* w = builder.createWeight("w", sandy::core::Shape({1}), sandy::core::DType::F32);
+    auto* out = builder.createAdd(x, w);
+    sandy::ir::mid_ir::Value* outputs[] = {out};
+    builder.setOutputs(outputs);
+
+    auto fake = std::make_unique<FakeDevice>();
+    auto* fakePtr = fake.get();
+    std::vector<std::unique_ptr<sandy::engine::Device>> devices;
+    devices.push_back(std::move(fake));
+    sandy::engine::Engine engine(std::move(devices));
+
+    auto planResult = engine.compile(graph);
+    ASSERT_TRUE(planResult) << planResult.error();
+    auto plan = planResult.take();
+
+    std::vector<sandy::engine::TensorBufferPtr> inputs;
+    inputs.push_back(std::make_shared<FakeTensorBuffer>(
+        sandy::core::TensorDesc("x", sandy::core::Shape({1}), sandy::core::DType::F32)));
+
+    sandy::engine::TensorMap weights;
+    weights["w"] = std::make_shared<FakeTensorBuffer>(
+        sandy::core::TensorDesc("w", sandy::core::Shape({1}), sandy::core::DType::F32));
+
+    auto outputsResult = engine.run(*plan, inputs, weights);
+    ASSERT_TRUE(outputsResult) << outputsResult.error();
+    auto runOutputs = outputsResult.take();
+
+    ASSERT_EQ(runOutputs.size(), 1u);
+    EXPECT_NE(runOutputs[0], nullptr);
+
+    ASSERT_EQ(fakePtr->loads.size(), 2u);
+    EXPECT_EQ(fakePtr->loads[0].name, "x");
+    EXPECT_EQ(fakePtr->loads[1].name, "w");
+
+    ASSERT_EQ(fakePtr->allocDescs.size(), 1u);
+    EXPECT_EQ(fakePtr->allocDescs[0].shape, sandy::core::Shape({1}));
+
+    ASSERT_EQ(fakePtr->runs.size(), 1u);
+    EXPECT_EQ(fakePtr->runs[0].program, 100u);
+    EXPECT_EQ(fakePtr->runs[0].inputs, std::vector<sandy::engine::DeviceBufferId>({200, 201}));
+    EXPECT_EQ(fakePtr->runs[0].outputs, std::vector<sandy::engine::DeviceBufferId>({202}));
+
+    EXPECT_EQ(fakePtr->reads, std::vector<sandy::engine::DeviceBufferId>({202}));
+    EXPECT_EQ(fakePtr->deallocs, std::vector<sandy::engine::DeviceBufferId>({200, 201, 202}));
+}
+
+TEST_F(EngineCompileTest, RunUsesStoreOutputsOrder) {
+    auto fake = std::make_unique<FakeDevice>();
+    auto* fakePtr = fake.get();
+    std::vector<std::unique_ptr<sandy::engine::Device>> devices;
+    devices.push_back(std::move(fake));
+    sandy::engine::Engine engine(std::move(devices));
+
+    sandy::engine::InvocPlan plan;
+    plan.instructions.push_back(sandy::engine::InvocInstruction::alloc({
+        0,
+        0,
+        sandy::core::TensorDesc(sandy::core::Shape({1}), sandy::core::DType::F32),
+    }));
+    plan.instructions.push_back(sandy::engine::InvocInstruction::alloc({
+        0,
+        1,
+        sandy::core::TensorDesc(sandy::core::Shape({1}), sandy::core::DType::F32),
+    }));
+    plan.instructions.push_back(sandy::engine::InvocInstruction::store_outputs({0, {1, 0}}));
+    plan.outputs = {0, 1};
+
+    std::vector<sandy::engine::TensorBufferPtr> inputs;
+    sandy::engine::TensorMap weights;
+
+    auto result = engine.run(plan, inputs, weights);
+    ASSERT_TRUE(result) << result.error();
+    EXPECT_EQ(result->size(), 2u);
+    EXPECT_EQ(fakePtr->reads, std::vector<sandy::engine::DeviceBufferId>({201, 200}));
+    EXPECT_EQ(fakePtr->deallocs, std::vector<sandy::engine::DeviceBufferId>({201, 200}));
+}
+
+TEST_F(EngineCompileTest, RunFailsForMissingInputIndex) {
+    auto fake = std::make_unique<FakeDevice>();
+    std::vector<std::unique_ptr<sandy::engine::Device>> devices;
+    devices.push_back(std::move(fake));
+    sandy::engine::Engine engine(std::move(devices));
+
+    sandy::engine::InvocPlan plan;
+    plan.instructions.push_back(sandy::engine::InvocInstruction::load_input({0, 1, 0}));
+    plan.instructions.push_back(sandy::engine::InvocInstruction::store_outputs({0, {0}}));
+    plan.outputs = {0};
+
+    std::vector<sandy::engine::TensorBufferPtr> inputs;
+    inputs.push_back(std::make_shared<FakeTensorBuffer>(
+        sandy::core::TensorDesc("x", sandy::core::Shape({1}), sandy::core::DType::F32)));
+    sandy::engine::TensorMap weights;
+
+    auto result = engine.run(plan, inputs, weights);
+    EXPECT_FALSE(result);
+    EXPECT_NE(result.error().find("input index out of range"), std::string::npos);
+}
+
+TEST_F(EngineCompileTest, RunFailsForMissingWeight) {
+    auto fake = std::make_unique<FakeDevice>();
+    std::vector<std::unique_ptr<sandy::engine::Device>> devices;
+    devices.push_back(std::move(fake));
+    sandy::engine::Engine engine(std::move(devices));
+
+    sandy::engine::InvocPlan plan;
+    plan.instructions.push_back(sandy::engine::InvocInstruction::load_weight({0, "w", 0}));
+    plan.instructions.push_back(sandy::engine::InvocInstruction::store_outputs({0, {0}}));
+    plan.outputs = {0};
+
+    std::vector<sandy::engine::TensorBufferPtr> inputs;
+    sandy::engine::TensorMap weights;
+
+    auto result = engine.run(plan, inputs, weights);
+    EXPECT_FALSE(result);
+    EXPECT_NE(result.error().find("missing weight buffer: w"), std::string::npos);
+}
+
+TEST_F(EngineCompileTest, RunFailsForMissingProgram) {
+    auto fake = std::make_unique<FakeDevice>();
+    std::vector<std::unique_ptr<sandy::engine::Device>> devices;
+    devices.push_back(std::move(fake));
+    sandy::engine::Engine engine(std::move(devices));
+
+    sandy::engine::InvocPlan plan;
+    plan.instructions.push_back(sandy::engine::InvocInstruction::alloc({
+        0,
+        0,
+        sandy::core::TensorDesc(sandy::core::Shape({1}), sandy::core::DType::F32),
+    }));
+    plan.instructions.push_back(sandy::engine::InvocInstruction::run_kernel({
+        0,
+        42,
+        {},
+        {0},
+    }));
+    plan.instructions.push_back(sandy::engine::InvocInstruction::store_outputs({0, {0}}));
+    plan.outputs = {0};
+
+    std::vector<sandy::engine::TensorBufferPtr> inputs;
+    sandy::engine::TensorMap weights;
+
+    auto result = engine.run(plan, inputs, weights);
+    EXPECT_FALSE(result);
+    EXPECT_NE(result.error().find("missing program: 42"), std::string::npos);
 }

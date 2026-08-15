@@ -7,6 +7,7 @@
 #include "Result.h"
 
 #include <memory>
+#include <span>
 #include <vector>
 
 namespace sandy::engine {
@@ -26,6 +27,11 @@ public:
     explicit Engine(std::vector<std::unique_ptr<Device>> devices);
 
     Result<std::unique_ptr<InvocPlan>> compile(const ir::mid_ir::Graph& graph);
+
+    Result<std::vector<TensorBufferPtr>> run(
+        const InvocPlan& plan,
+        std::span<TensorBufferPtr const> inputs,
+        const TensorMap& weights);
 
     Result<std::unique_ptr<Plan>> create_plan(const ir::mid_ir::Graph& graph);
 
