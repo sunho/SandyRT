@@ -298,7 +298,9 @@ Result<TestTensor> matmul_calc(
         std::span<const uint8_t> lhs,
         sandy::core::TensorDesc lhsDesc,
         std::span<const uint8_t> rhs,
-        sandy::core::TensorDesc rhsDesc) {
+        sandy::core::TensorDesc rhsDesc,
+        bool transposeLhs = false,
+        bool transposeRhs = false) {
     int lhsRank = lhsDesc.shape.rank();
     int rhsRank = rhsDesc.shape.rank();
     auto lhsDims = lhsDesc.shape.dims();
@@ -308,8 +310,8 @@ Result<TestTensor> matmul_calc(
     auto batch = sandy::core::broadcast_shape(lhsBatch, rhsBatch);
     if (!batch) return make_error(batch.error());
     auto outDims = batch.take().dims();
-    outDims.push_back(lhsDesc.shape.dim(lhsRank - 2));
-    outDims.push_back(rhsDesc.shape.dim(rhsRank - 1));
+    outDims.push_back(lhsDesc.shape.dim(lhsRank - (transposeLhs ? 1 : 2)));
+    outDims.push_back(rhsDesc.shape.dim(rhsRank - (transposeRhs ? 2 : 1)));
     auto out = make_output(sandy::core::TensorDesc(sandy::core::Shape(outDims), lhsDesc.dtype));
     if (!out) return make_error(out.error());
     auto lhsRef = tensor_ref(lhs, lhsDesc);
@@ -318,7 +320,7 @@ Result<TestTensor> matmul_calc(
     if (!rhsRef) return make_error(rhsRef.error());
     auto outRef = mutable_tensor_ref(*out);
     if (!outRef) return make_error(outRef.error());
-    auto result = sandy::core::matmul(*lhsRef, *rhsRef, *outRef);
+    auto result = sandy::core::matmul(*lhsRef, *rhsRef, transposeLhs, transposeRhs, *outRef);
     if (!result) return make_error(result.error());
     return out.take();
 }
@@ -806,6 +808,31 @@ TEST(TensorCalcTest, MatMulF32UsesTorchLayout) {
     auto result = matmul_calc(
         lhs, sandy::core::TensorDesc(sandy::core::Shape({2, 3}), sandy::core::DType::F32),
         rhs, sandy::core::TensorDesc(sandy::core::Shape({3, 2}), sandy::core::DType::F32));
+
+    ASSERT_TRUE(result) << result.error();
+    auto out = result.take();
+    EXPECT_EQ(out.desc.shape, sandy::core::Shape({2, 2}));
+    EXPECT_FLOAT_EQ(read_f32(out.data, 0), 58.0f);
+    EXPECT_FLOAT_EQ(read_f32(out.data, 1), 64.0f);
+    EXPECT_FLOAT_EQ(read_f32(out.data, 2), 139.0f);
+    EXPECT_FLOAT_EQ(read_f32(out.data, 3), 154.0f);
+}
+
+TEST(TensorCalcTest, MatMulF32SupportsTransposedRhsFlag) {
+    auto lhs = f32_bytes({
+        1.0f, 2.0f, 3.0f,
+        4.0f, 5.0f, 6.0f,
+    });
+    auto rhs = f32_bytes({
+        7.0f, 9.0f, 11.0f,
+        8.0f, 10.0f, 12.0f,
+    });
+
+    auto result = matmul_calc(
+        lhs, sandy::core::TensorDesc(sandy::core::Shape({2, 3}), sandy::core::DType::F32),
+        rhs, sandy::core::TensorDesc(sandy::core::Shape({2, 3}), sandy::core::DType::F32),
+        false,
+        true);
 
     ASSERT_TRUE(result) << result.error();
     auto out = result.take();

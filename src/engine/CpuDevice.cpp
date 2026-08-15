@@ -235,7 +235,11 @@ Result<void> CpuDevice::run(
             if (!rhs) return make_error(rhs.error());
             auto out = outputRef(0);
             if (!out) return make_error(out.error());
-            return core::matmul(*lhs, *rhs, *out);
+            auto transposeLhs = attr_int_or(program.attrs, "transpose_lhs", 0);
+            if (!transposeLhs) return make_error(transposeLhs.error());
+            auto transposeRhs = attr_int_or(program.attrs, "transpose_rhs", 0);
+            if (!transposeRhs) return make_error(transposeRhs.error());
+            return core::matmul(*lhs, *rhs, transposeLhs.take() != 0, transposeRhs.take() != 0, *out);
         }
         case ir::mid_ir::OpKind::Transpose: {
             auto x = inputRef(0);

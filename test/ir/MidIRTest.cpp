@@ -1,4 +1,5 @@
 #include "MidIR.h"
+#include "MidIRPass.h"
 #include <gtest/gtest.h>
 
 class MidIRTest : public ::testing::Test {
@@ -168,6 +169,21 @@ TEST_F(MidIRTest, MatMulTypeInference) {
     EXPECT_EQ(out->def->kind, sandy::ir::mid_ir::OpKind::MatMul);
 }
 
+TEST_F(MidIRTest, MatMulTransposedRhsTypeInference) {
+    sandy::ir::mid_ir::Graph graph;
+    sandy::ir::mid_ir::Builder builder(graph);
+
+    auto* lhs = builder.createInput(0, sandy::core::Shape({2, 4, 3}), sandy::core::DType::F32);
+    auto* rhs = builder.createInput(1, sandy::core::Shape({1, 5, 3}), sandy::core::DType::F32);
+    auto* out = builder.createMatMul(lhs, rhs, false, true);
+
+    EXPECT_EQ(out->shape, sandy::core::Shape({2, 4, 5}));
+    EXPECT_EQ(out->dtype, sandy::core::DType::F32);
+    EXPECT_EQ(out->def->kind, sandy::ir::mid_ir::OpKind::MatMul);
+    ASSERT_TRUE(out->def->attrs.contains("transpose_rhs"));
+    EXPECT_EQ(out->def->attrs.at("transpose_rhs").intVal, 1);
+}
+
 TEST_F(MidIRTest, Transpose2DTypeInference) {
     sandy::ir::mid_ir::Graph graph;
     sandy::ir::mid_ir::Builder builder(graph);
@@ -178,6 +194,54 @@ TEST_F(MidIRTest, Transpose2DTypeInference) {
     EXPECT_EQ(out->shape, sandy::core::Shape({5, 3}));
     EXPECT_EQ(out->dtype, sandy::core::DType::F32);
     EXPECT_EQ(out->def->kind, sandy::ir::mid_ir::OpKind::Transpose);
+}
+
+TEST_F(MidIRTest, FuseTransposeIntoMatMulPassFusesDeadRhsTranspose) {
+    sandy::ir::mid_ir::Graph graph;
+    sandy::ir::mid_ir::Builder builder(graph);
+
+    auto* lhs = builder.createInput(0, sandy::core::Shape({2, 3}), sandy::core::DType::F32);
+    auto* weight = builder.createWeight("w", sandy::core::Shape({5, 3}), sandy::core::DType::F32);
+    auto* transposed = builder.createTranspose(weight);
+    auto* out = builder.createMatMul(lhs, transposed);
+    sandy::ir::mid_ir::Value* outputs[] = {out};
+    builder.setOutputs(outputs);
+
+    auto pass = sandy::ir::mid_ir::createFuseTransposeIntoMatMulPass();
+    auto result = pass->run(graph);
+    ASSERT_TRUE(result) << result.error();
+    EXPECT_TRUE(result->changed);
+
+    ASSERT_EQ(out->def->operands.size(), 2u);
+    EXPECT_EQ(out->def->operands[1], weight);
+    ASSERT_TRUE(out->def->attrs.contains("transpose_rhs"));
+    EXPECT_EQ(out->def->attrs.at("transpose_rhs").intVal, 1);
+    EXPECT_TRUE(transposed->uses.empty());
+    EXPECT_EQ(graph.entry()->ops.size(), 3u);
+}
+
+TEST_F(MidIRTest, FuseTransposeIntoMatMulPassKeepsSharedTranspose) {
+    sandy::ir::mid_ir::Graph graph;
+    sandy::ir::mid_ir::Builder builder(graph);
+
+    auto* lhs = builder.createInput(0, sandy::core::Shape({2, 3}), sandy::core::DType::F32);
+    auto* weight = builder.createWeight("w", sandy::core::Shape({5, 3}), sandy::core::DType::F32);
+    auto* transposed = builder.createTranspose(weight);
+    auto* out = builder.createMatMul(lhs, transposed);
+    auto* alsoOut = builder.createTanh(transposed);
+    sandy::ir::mid_ir::Value* outputs[] = {out, alsoOut};
+    builder.setOutputs(outputs);
+
+    auto pass = sandy::ir::mid_ir::createFuseTransposeIntoMatMulPass();
+    auto result = pass->run(graph);
+    ASSERT_TRUE(result) << result.error();
+    EXPECT_TRUE(result->changed);
+
+    EXPECT_EQ(out->def->operands[1], weight);
+    ASSERT_TRUE(out->def->attrs.contains("transpose_rhs"));
+    EXPECT_EQ(out->def->attrs.at("transpose_rhs").intVal, 1);
+    EXPECT_FALSE(transposed->uses.empty());
+    EXPECT_EQ(graph.entry()->ops.size(), 5u);
 }
 
 TEST_F(MidIRTest, ReshapeTypeInference) {

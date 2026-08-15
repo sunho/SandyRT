@@ -137,6 +137,9 @@ public:
     const Block* entry() const;
     const std::vector<Value*>& outputs() const;
 
+    void replaceAllUses(Value* oldValue, Value* newValue);
+    void replaceOperand(Op* op, int operandIndex, Value* newValue);
+    bool eraseOp(Op* op);
 
     void dump() const;
 
@@ -174,7 +177,7 @@ public:
     Value* createMul(Value* lhs, Value* rhs);
     Value* createSqrt(Value* x);
     Value* createTanh(Value* x);
-    Value* createMatMul(Value* lhs, Value* rhs);
+    Value* createMatMul(Value* lhs, Value* rhs, bool transpose_lhs = false, bool transpose_rhs = false);
     Value* createTranspose(Value* x);
     Value* createReshape(Value* x, std::vector<int64_t> shape);
     Value* createPermute(Value* x, std::vector<int64_t> dims);

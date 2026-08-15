@@ -374,6 +374,15 @@ func main(x Node) Node {
     ASSERT_NE(midGraph->outputs()[0]->def, nullptr);
     EXPECT_EQ(midGraph->outputs()[0]->def->kind, sandy::ir::mid_ir::OpKind::MatMul);
     EXPECT_EQ(midGraph->outputs()[0]->shape, sandy::core::Shape({2, 5}));
+    ASSERT_TRUE(midGraph->outputs()[0]->def->attrs.contains("transpose_rhs"));
+    EXPECT_EQ(midGraph->outputs()[0]->def->attrs.at("transpose_rhs").intVal, 1);
+
+    int transposeCount = 0;
+    for (auto* op : midGraph->entry()->ops) {
+        if (op->kind == sandy::ir::mid_ir::OpKind::Transpose)
+            transposeCount++;
+    }
+    EXPECT_EQ(transposeCount, 0);
 
     std::error_code ec;
     fs::remove_all(dir, ec);

@@ -342,6 +342,15 @@ Result<void> tanh(TensorRef x, MutableTensorRef out) {
 }
 
 Result<void> matmul(TensorRef lhs, TensorRef rhs, MutableTensorRef out) {
+    return matmul(lhs, rhs, false, false, out);
+}
+
+Result<void> matmul(
+        TensorRef lhs,
+        TensorRef rhs,
+        bool transpose_lhs,
+        bool transpose_rhs,
+        MutableTensorRef out) {
     auto lhsFloat = require_float_tensor(lhs, "matmul lhs");
     if (!lhsFloat) return make_error(lhsFloat.error());
     auto rhsFloat = require_float_tensor(rhs, "matmul rhs");
@@ -356,10 +365,10 @@ Result<void> matmul(TensorRef lhs, TensorRef rhs, MutableTensorRef out) {
 
     int lhsRank = lhs.desc.shape.rank();
     int rhsRank = rhs.desc.shape.rank();
-    int64_t m = lhs.desc.shape.dim(lhsRank - 2);
-    int64_t lhsK = lhs.desc.shape.dim(lhsRank - 1);
-    int64_t rhsK = rhs.desc.shape.dim(rhsRank - 2);
-    int64_t n = rhs.desc.shape.dim(rhsRank - 1);
+    int64_t m = lhs.desc.shape.dim(lhsRank - (transpose_lhs ? 1 : 2));
+    int64_t lhsK = lhs.desc.shape.dim(lhsRank - (transpose_lhs ? 2 : 1));
+    int64_t rhsK = rhs.desc.shape.dim(rhsRank - (transpose_rhs ? 1 : 2));
+    int64_t n = rhs.desc.shape.dim(rhsRank - (transpose_rhs ? 2 : 1));
     if (m < 0 || n < 0 || lhsK < 0 || rhsK < 0)
         return make_error("matmul matrix dimensions must be static");
     if (lhsK != rhsK)
@@ -398,12 +407,16 @@ Result<void> matmul(TensorRef lhs, TensorRef rhs, MutableTensorRef out) {
             for (int64_t col = 0; col < n; col++) {
                 float acc = 0.0f;
                 for (int64_t k = 0; k < lhsK; k++) {
+                    int64_t lhsRow = transpose_lhs ? k : row;
+                    int64_t lhsCol = transpose_lhs ? row : k;
+                    int64_t rhsRow = transpose_rhs ? col : k;
+                    int64_t rhsCol = transpose_rhs ? k : col;
                     size_t lhsIndex = lhsBatchOffset +
-                        static_cast<size_t>(row * lhsStrides[lhsRank - 2] +
-                                            k * lhsStrides[lhsRank - 1]);
+                        static_cast<size_t>(lhsRow * lhsStrides[lhsRank - 2] +
+                                            lhsCol * lhsStrides[lhsRank - 1]);
                     size_t rhsIndex = rhsBatchOffset +
-                        static_cast<size_t>(k * rhsStrides[rhsRank - 2] +
-                                            col * rhsStrides[rhsRank - 1]);
+                        static_cast<size_t>(rhsRow * rhsStrides[rhsRank - 2] +
+                                            rhsCol * rhsStrides[rhsRank - 1]);
                     acc += lhs.load_float(lhsIndex) * rhs.load_float(rhsIndex);
                 }
                 out.store_float(outBatchOffset + static_cast<size_t>(row * n + col), acc);

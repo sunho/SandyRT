@@ -1,5 +1,6 @@
 #include "Compiler.h"
 #include "MidIRMaterializer.h"
+#include "MidIRPass.h"
 #include "Lexer.h"
 #include "Parser.h"
 #include "Interpreter.h"
@@ -121,7 +122,18 @@ Result<std::unique_ptr<ir::mid_ir::Graph>> Compiler::materialize_mid_ir(
         const weight::Weights& weights,
         const ir::mid_ir::MaterializeOptions& options) {
     ir::mid_ir::MidIRMaterializer materializer;
-    return materializer.materialize(graph, weights, options);
+    auto mid = materializer.materialize(graph, weights, options);
+    if (!mid)
+        return make_error(mid.error());
+
+    ir::mid_ir::PassManager passes;
+    passes.add(ir::mid_ir::createFuseTransposeIntoMatMulPass());
+    passes.add(ir::mid_ir::createDeadCodeEliminationPass());
+    auto passResult = passes.run(**mid);
+    if (!passResult)
+        return make_error(passResult.error());
+
+    return mid;
 }
 
 } // namespace sandy

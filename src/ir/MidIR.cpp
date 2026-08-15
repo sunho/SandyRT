@@ -78,6 +78,11 @@ bool is_float_compute_dtype(core::DType dtype) {
     return dtype == core::DType::F32 || dtype == core::DType::BF16;
 }
 
+bool attr_bool_or_false(const AttrMap& attrs, const char* name) {
+    auto it = attrs.find(name);
+    return it != attrs.end() && it->second.kind == AttrValue::Int && it->second.intVal != 0;
+}
+
 class ReLUOpDef : public OpDef {
 public:
     OpKind kind() const override { return OpKind::ReLU; }
@@ -223,8 +228,10 @@ public:
     const char* name() const override { return "matmul"; }
     std::vector<ValueType> infer_types(
         std::span<Value* const> operands,
-        const AttrMap&) const override
+        const AttrMap& attrs) const override
     {
+        bool transposeLhs = attr_bool_or_false(attrs, "transpose_lhs");
+        bool transposeRhs = attr_bool_or_false(attrs, "transpose_rhs");
         const auto& lhsShape = operands[0]->shape;
         const auto& rhsShape = operands[1]->shape;
         auto lhsDims = lhsShape.dims();
@@ -237,13 +244,13 @@ public:
             abort();
         }
         auto outDims = batchShape.take().dims();
-        outDims.push_back(lhsShape.dim(lhsShape.rank() - 2));
-        outDims.push_back(rhsShape.dim(rhsShape.rank() - 1));
+        outDims.push_back(lhsShape.dim(lhsShape.rank() - (transposeLhs ? 1 : 2)));
+        outDims.push_back(rhsShape.dim(rhsShape.rank() - (transposeRhs ? 2 : 1)));
         return {{core::Shape(outDims), operands[0]->dtype}};
     }
     void verify(
         std::span<Value* const> operands,
-        const AttrMap&) const override
+        const AttrMap& attrs) const override
     {
         if (operands.size() != 2) {
             fprintf(stderr, "matmul expects 2 operands, got %zu\n", operands.size());
@@ -257,9 +264,21 @@ public:
             fprintf(stderr, "matmul operands must have rank >= 2\n");
             abort();
         }
+        auto transposeLhsAttr = attrs.find("transpose_lhs");
+        if (transposeLhsAttr != attrs.end() && transposeLhsAttr->second.kind != AttrValue::Int) {
+            fprintf(stderr, "matmul transpose_lhs attr must be int\n");
+            abort();
+        }
+        auto transposeRhsAttr = attrs.find("transpose_rhs");
+        if (transposeRhsAttr != attrs.end() && transposeRhsAttr->second.kind != AttrValue::Int) {
+            fprintf(stderr, "matmul transpose_rhs attr must be int\n");
+            abort();
+        }
 
-        int64_t lhsK = operands[0]->shape.dim(operands[0]->shape.rank() - 1);
-        int64_t rhsK = operands[1]->shape.dim(operands[1]->shape.rank() - 2);
+        bool transposeLhs = attr_bool_or_false(attrs, "transpose_lhs");
+        bool transposeRhs = attr_bool_or_false(attrs, "transpose_rhs");
+        int64_t lhsK = operands[0]->shape.dim(operands[0]->shape.rank() - (transposeLhs ? 2 : 1));
+        int64_t rhsK = operands[1]->shape.dim(operands[1]->shape.rank() - (transposeRhs ? 1 : 2));
         if (lhsK >= 0 && rhsK >= 0 && lhsK != rhsK) {
             fprintf(stderr, "matmul contracting dimension mismatch\n");
             abort();
@@ -781,6 +800,81 @@ Block* Graph::entry() { return &blocks_.front(); }
 const Block* Graph::entry() const { return &blocks_.front(); }
 const std::vector<Value*>& Graph::outputs() const { return outputs_; }
 
+void Graph::replaceOperand(Op* op, int operandIndex, Value* newValue) {
+    if (!op || !newValue || operandIndex < 0 || static_cast<size_t>(operandIndex) >= op->operands.size()) {
+        fprintf(stderr, "invalid operand replacement\n");
+        abort();
+    }
+
+    auto* oldValue = op->operands[static_cast<size_t>(operandIndex)];
+    if (oldValue == newValue)
+        return;
+
+    auto& oldUses = oldValue->uses;
+    auto oldIt = std::find_if(oldUses.begin(), oldUses.end(), [&](const Use& use) {
+        return use.op == op && use.operand == operandIndex;
+    });
+    if (oldIt == oldUses.end()) {
+        fprintf(stderr, "operand use missing during replacement\n");
+        abort();
+    }
+    oldUses.erase(oldIt);
+
+    op->operands[static_cast<size_t>(operandIndex)] = newValue;
+    newValue->uses.push_back({op, operandIndex});
+}
+
+void Graph::replaceAllUses(Value* oldValue, Value* newValue) {
+    if (!oldValue || !newValue) {
+        fprintf(stderr, "invalid value replacement\n");
+        abort();
+    }
+    if (oldValue == newValue)
+        return;
+
+    auto uses = oldValue->uses;
+    for (const auto& use : uses)
+        replaceOperand(use.op, use.operand, newValue);
+
+    for (auto*& output : outputs_) {
+        if (output == oldValue)
+            output = newValue;
+    }
+}
+
+bool Graph::eraseOp(Op* op) {
+    if (!op || !op->parent)
+        return false;
+
+    for (auto* result : op->results) {
+        if (!result->uses.empty())
+            return false;
+        for (auto* output : outputs_) {
+            if (output == result)
+                return false;
+        }
+    }
+
+    for (size_t i = 0; i < op->operands.size(); i++) {
+        auto* operand = op->operands[i];
+        auto& uses = operand->uses;
+        auto it = std::find_if(uses.begin(), uses.end(), [&](const Use& use) {
+            return use.op == op && use.operand == static_cast<int>(i);
+        });
+        if (it != uses.end())
+            uses.erase(it);
+    }
+
+    auto& ops = op->parent->ops;
+    auto it = std::find(ops.begin(), ops.end(), op);
+    if (it == ops.end())
+        return false;
+    ops.erase(it);
+    op->parent = nullptr;
+    op->operands.clear();
+    return true;
+}
+
 Value* Graph::newValue(core::Shape shape, core::DType dtype) {
     auto& v = values_.emplace_back();
     v.id = nextId_++;
@@ -960,9 +1054,14 @@ Value* Builder::createTanh(Value* x) {
     return createOp(OpKind::Tanh, operands)[0];
 }
 
-Value* Builder::createMatMul(Value* lhs, Value* rhs) {
+Value* Builder::createMatMul(Value* lhs, Value* rhs, bool transpose_lhs, bool transpose_rhs) {
     Value* operands[] = {lhs, rhs};
-    return createOp(OpKind::MatMul, operands)[0];
+    AttrMap attrs;
+    if (transpose_lhs)
+        attrs["transpose_lhs"] = AttrValue::make_int(1);
+    if (transpose_rhs)
+        attrs["transpose_rhs"] = AttrValue::make_int(1);
+    return createOp(OpKind::MatMul, operands, attrs)[0];
 }
 
 Value* Builder::createTranspose(Value* x) {
