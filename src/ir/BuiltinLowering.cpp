@@ -128,6 +128,26 @@ BuiltinLowering BuiltinLowering::createDefault() {
         return std::vector<Value*>{builder.createMul(halfX, onePlusTanh)};
     });
 
+    bl.add("softcap", [](Builder& builder,
+                          const std::vector<Value*>& operands,
+                          const AttrMap& attrs,
+                          int numResults) -> Result<std::vector<Value*>> {
+        auto resultCount = expect_num_results("softcap", numResults, 1);
+        if (!resultCount) return make_error(resultCount.error());
+        if (operands.size() != 1)
+            return make_error("softcap expects one operand");
+
+        float cap = get_float_attr_or(attrs, "cap", 0.0f);
+        if (cap <= 0.0f)
+            return make_error("softcap cap must be > 0");
+
+        auto* capConst = builder.createConstantF32(cap);
+        auto* invCap = builder.createConstantF32(1.0f / cap);
+        auto* scaled = builder.createMul(operands[0], invCap);
+        auto* capped = builder.createTanh(scaled);
+        return std::vector<Value*>{builder.createMul(capped, capConst)};
+    });
+
     bl.add("matmul", [](Builder& builder,
                          const std::vector<Value*>& operands,
                          const AttrMap&,
@@ -297,6 +317,92 @@ BuiltinLowering BuiltinLowering::createDefault() {
         if (numResults == 1)
             return std::vector<Value*>{out};
         return std::vector<Value*>{out, k, v};
+    });
+
+    bl.add("attention", [](Builder& builder,
+                            const std::vector<Value*>& operands,
+                            const AttrMap& attrs,
+                            int numResults) -> Result<std::vector<Value*>> {
+        auto resultCount = expect_num_results("attention", numResults, 1);
+        if (!resultCount) return make_error(resultCount.error());
+        if (operands.size() != 5)
+            return make_error("attention expects operands (x, k, v, q_weight, o_weight)");
+
+        auto headsResult = get_int_attr(attrs, "heads");
+        if (!headsResult) return make_error(headsResult.error());
+        int64_t heads = headsResult.take();
+
+        auto kvHeadsResult = get_int_attr(attrs, "kv_heads");
+        if (!kvHeadsResult) return make_error(kvHeadsResult.error());
+        int64_t kvHeads = kvHeadsResult.take();
+
+        auto headDimResult = get_int_attr(attrs, "head_dim");
+        if (!headDimResult) return make_error(headDimResult.error());
+        int64_t headDim = headDimResult.take();
+
+        int64_t window = get_int_attr_or(attrs, "window", 0);
+        float ropeTheta = get_float_attr_or(attrs, "rope_theta", 0.0f);
+        if (heads <= 0 || kvHeads <= 0 || headDim <= 0)
+            return make_error("attention heads, kv_heads, and head_dim must be positive");
+        if (heads % kvHeads != 0)
+            return make_error("attention heads must be divisible by kv_heads");
+        if (kvHeads != 1 && kvHeads != heads)
+            return make_error("attention context matmul currently requires kv_heads == 1 or kv_heads == heads");
+
+        auto* x = operands[0];
+        auto* k = operands[1];
+        auto* v = operands[2];
+        int rank = x->shape.rank();
+        if (rank != 2 && rank != 3)
+            return make_error("attention input must have rank 2 or rank 3");
+
+        auto* qWeightT = builder.createTranspose(operands[3]);
+        auto* oWeightT = builder.createTranspose(operands[4]);
+        auto* qFlat = builder.createMatMul(x, qWeightT);
+
+        Value* q = nullptr;
+        Value* contextFlat = nullptr;
+
+        if (rank == 3) {
+            int64_t batch = x->shape.dim(0);
+            int64_t seq = x->shape.dim(1);
+            if (batch < 0 || seq < 0)
+                return make_error("attention batch and sequence dimensions must be static");
+            if (k->shape.rank() != 4 || v->shape.rank() != 4)
+                return make_error("attention k and v must have rank 4 for batched input");
+
+            q = builder.createPermute(
+                builder.createReshape(qFlat, {batch, seq, heads, headDim}),
+                {0, 2, 1, 3});
+            if (ropeTheta > 0.0f)
+                q = builder.createRoPE(q, ropeTheta);
+
+            auto* scores = builder.createSlidingQueryKeyScore(q, k, window);
+            auto* probs = builder.createSoftmax(scores, -1);
+            auto* context = builder.createMatMul(probs, v);
+            auto* contextSeqMajor = builder.createPermute(context, {0, 2, 1, 3});
+            contextFlat = builder.createReshape(contextSeqMajor, {batch, seq, heads * headDim});
+        } else {
+            int64_t seq = x->shape.dim(0);
+            if (seq < 0)
+                return make_error("attention sequence dimension must be static");
+            if (k->shape.rank() != 3 || v->shape.rank() != 3)
+                return make_error("attention k and v must have rank 3 for unbatched input");
+
+            q = builder.createPermute(
+                builder.createReshape(qFlat, {seq, heads, headDim}),
+                {1, 0, 2});
+            if (ropeTheta > 0.0f)
+                q = builder.createRoPE(q, ropeTheta);
+
+            auto* scores = builder.createSlidingQueryKeyScore(q, k, window);
+            auto* probs = builder.createSoftmax(scores, -1);
+            auto* context = builder.createMatMul(probs, v);
+            auto* contextSeqMajor = builder.createPermute(context, {1, 0, 2});
+            contextFlat = builder.createReshape(contextSeqMajor, {seq, heads * headDim});
+        }
+
+        return std::vector<Value*>{builder.createMatMul(contextFlat, oWeightT)};
     });
 
     bl.add("embedding", [](Builder& builder,

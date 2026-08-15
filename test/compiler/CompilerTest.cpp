@@ -249,6 +249,40 @@ func main(x Node) Node {
     fs::remove_all(dir, ec);
 }
 
+TEST(CompilerTest, SoftcapBuiltinLowersThroughConstantsAndTanh) {
+    sandy::ir::high_ir::Graph highGraph;
+    auto* x = highGraph.addInput("x");
+    auto softcap = highGraph.addBuiltin(
+        "softcap",
+        {x},
+        {sandy::ir::high_ir::Attr::fromFloat("cap", 30.0)},
+        1);
+    highGraph.setOutputs({softcap[0]});
+
+    sandy::Compiler compiler;
+    TestWeights weights;
+    sandy::ir::mid_ir::MaterializeOptions options;
+    options.input_tensor_descs["x"] = sandy::core::TensorDesc(
+        sandy::core::Shape({2, 3}), sandy::core::DType::F32);
+
+    auto result = compiler.materialize_mid_ir(highGraph, weights, options);
+    ASSERT_TRUE(result) << result.error();
+    auto midGraph = result.take();
+
+    ASSERT_EQ(midGraph->outputs().size(), 1u);
+    EXPECT_EQ(midGraph->outputs()[0]->shape, sandy::core::Shape({2, 3}));
+    EXPECT_EQ(midGraph->outputs()[0]->def->kind, sandy::ir::mid_ir::OpKind::Mul);
+
+    bool sawConstant = false;
+    bool sawTanh = false;
+    for (auto* op : midGraph->entry()->ops) {
+        sawConstant = sawConstant || op->kind == sandy::ir::mid_ir::OpKind::Constant;
+        sawTanh = sawTanh || op->kind == sandy::ir::mid_ir::OpKind::Tanh;
+    }
+    EXPECT_TRUE(sawConstant);
+    EXPECT_TRUE(sawTanh);
+}
+
 TEST(CompilerTest, GemmaStyleMatMulWithTransposeMaterializesToMidIROps) {
     fs::path dir = makeTempDir();
     writeFile(dir / "main.sandy.go", R"(
@@ -569,4 +603,93 @@ TEST(CompilerTest, ProgrammaticKVAttentionMaterializesUnbatchedHKeyValue) {
     EXPECT_EQ(midGraph->outputs()[0]->shape, sandy::core::Shape({3, 4}));
     EXPECT_EQ(midGraph->outputs()[1]->shape, sandy::core::Shape({2, 3, 2}));
     EXPECT_EQ(midGraph->outputs()[2]->shape, sandy::core::Shape({2, 3, 2}));
+}
+
+TEST(CompilerTest, ProgrammaticAttentionMaterializesBatchedCachedKV) {
+    sandy::ir::high_ir::Graph highGraph;
+    auto* x = highGraph.addInput("x");
+    auto* k = highGraph.addInput("k");
+    auto* v = highGraph.addInput("v");
+    auto* qWeight = highGraph.addWeight("q.weight");
+    auto* oWeight = highGraph.addWeight("o.weight");
+    auto results = highGraph.addBuiltin(
+        "attention",
+        {x, k, v, qWeight, oWeight},
+        {
+            sandy::ir::high_ir::Attr::fromInt("heads", 2),
+            sandy::ir::high_ir::Attr::fromInt("kv_heads", 1),
+            sandy::ir::high_ir::Attr::fromInt("head_dim", 2),
+            sandy::ir::high_ir::Attr::fromInt("window", 2),
+            sandy::ir::high_ir::Attr::fromFloat("rope_theta", 10000.0),
+        },
+        1);
+    highGraph.setOutputs(results);
+
+    sandy::Compiler compiler;
+    TestWeights weights;
+    weights.add(sandy::core::TensorDesc("q.weight", sandy::core::Shape({4, 4}), sandy::core::DType::F32));
+    weights.add(sandy::core::TensorDesc("o.weight", sandy::core::Shape({4, 4}), sandy::core::DType::F32));
+
+    sandy::ir::mid_ir::MaterializeOptions options;
+    options.input_tensor_descs["x"] = sandy::core::TensorDesc(
+        sandy::core::Shape({2, 3, 4}), sandy::core::DType::F32);
+    options.input_tensor_descs["k"] = sandy::core::TensorDesc(
+        sandy::core::Shape({2, 1, 3, 2}), sandy::core::DType::F32);
+    options.input_tensor_descs["v"] = sandy::core::TensorDesc(
+        sandy::core::Shape({2, 1, 3, 2}), sandy::core::DType::F32);
+
+    auto result = compiler.materialize_mid_ir(highGraph, weights, options);
+    ASSERT_TRUE(result) << result.error();
+    auto midGraph = result.take();
+
+    ASSERT_EQ(midGraph->outputs().size(), 1u);
+    EXPECT_EQ(midGraph->outputs()[0]->shape, sandy::core::Shape({2, 3, 4}));
+    EXPECT_EQ(midGraph->outputs()[0]->def->kind, sandy::ir::mid_ir::OpKind::MatMul);
+
+    int ropeCount = 0;
+    for (auto* op : midGraph->entry()->ops) {
+        if (op->kind == sandy::ir::mid_ir::OpKind::RoPE)
+            ropeCount++;
+    }
+    EXPECT_EQ(ropeCount, 1);
+}
+
+TEST(CompilerTest, ProgrammaticAttentionMaterializesUnbatchedCachedKV) {
+    sandy::ir::high_ir::Graph highGraph;
+    auto* x = highGraph.addInput("x");
+    auto* k = highGraph.addInput("k");
+    auto* v = highGraph.addInput("v");
+    auto* qWeight = highGraph.addWeight("q.weight");
+    auto* oWeight = highGraph.addWeight("o.weight");
+    auto results = highGraph.addBuiltin(
+        "attention",
+        {x, k, v, qWeight, oWeight},
+        {
+            sandy::ir::high_ir::Attr::fromInt("heads", 2),
+            sandy::ir::high_ir::Attr::fromInt("kv_heads", 2),
+            sandy::ir::high_ir::Attr::fromInt("head_dim", 2),
+        },
+        1);
+    highGraph.setOutputs(results);
+
+    sandy::Compiler compiler;
+    TestWeights weights;
+    weights.add(sandy::core::TensorDesc("q.weight", sandy::core::Shape({4, 4}), sandy::core::DType::F32));
+    weights.add(sandy::core::TensorDesc("o.weight", sandy::core::Shape({4, 4}), sandy::core::DType::F32));
+
+    sandy::ir::mid_ir::MaterializeOptions options;
+    options.input_tensor_descs["x"] = sandy::core::TensorDesc(
+        sandy::core::Shape({3, 4}), sandy::core::DType::F32);
+    options.input_tensor_descs["k"] = sandy::core::TensorDesc(
+        sandy::core::Shape({2, 3, 2}), sandy::core::DType::F32);
+    options.input_tensor_descs["v"] = sandy::core::TensorDesc(
+        sandy::core::Shape({2, 3, 2}), sandy::core::DType::F32);
+
+    auto result = compiler.materialize_mid_ir(highGraph, weights, options);
+    ASSERT_TRUE(result) << result.error();
+    auto midGraph = result.take();
+
+    ASSERT_EQ(midGraph->outputs().size(), 1u);
+    EXPECT_EQ(midGraph->outputs()[0]->shape, sandy::core::Shape({3, 4}));
+    EXPECT_EQ(midGraph->outputs()[0]->def->kind, sandy::ir::mid_ir::OpKind::MatMul);
 }

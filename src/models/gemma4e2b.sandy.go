@@ -1,3 +1,13 @@
+func gemma_gated_mlp(x Node) Node {
+    weight_scope "mlp" {
+        gate := __matmul(x, __transpose(@gate_proj.weight))
+        up := __matmul(x, __transpose(@up_proj.weight))
+        x = __mul(__gelu(gate), up)
+        x = __matmul(x, __transpose(@down_proj.weight))
+    }
+    return x
+}
+
 func gemma_kv_layer(x Node, i int, window int, head_dim int, rope_theta float) (Node, Node, Node) {
     weight_scope "layers.{i}" {
         h := __rms_norm(x, @input_layernorm.weight)
@@ -13,12 +23,7 @@ func gemma_kv_layer(x Node, i int, window int, head_dim int, rope_theta float) (
         x = __add(x, h)
 
         h = __rms_norm(x, @pre_feedforward_layernorm.weight)
-        h = __gated_mlp(h,
-            @mlp.gate_proj.weight,
-            @mlp.up_proj.weight,
-            @mlp.down_proj.weight,
-            act="gelu",
-        )
+        h = gemma_gated_mlp(h)
         h = __rms_norm(h, @post_feedforward_layernorm.weight)
         x = __add(x, h)
     }
@@ -38,12 +43,7 @@ func gemma_layer(x Node, i int, k Node, v Node, window int, head_dim int, rope_t
         x = __add(x, h)
 
         h = __rms_norm(x, @pre_feedforward_layernorm.weight)
-        h = __gated_mlp(h,
-            @mlp.gate_proj.weight,
-            @mlp.up_proj.weight,
-            @mlp.down_proj.weight,
-            act="gelu",
-        )
+        h = gemma_gated_mlp(h)
         h = __rms_norm(h, @post_feedforward_layernorm.weight)
         x = __add(x, h)
     }
