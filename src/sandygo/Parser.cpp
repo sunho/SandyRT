@@ -131,7 +131,52 @@ TypeExpr Parser::parseType() {
 
     Token name = expect(TokenKind::Ident, "expected type name");
     if (hasError_) return TypeExpr::simple("");
-    return TypeExpr::simple(name.value);
+    auto type = TypeExpr::simple(name.value);
+    if (match(TokenKind::LBracket)) {
+        expect(TokenKind::LBracket, "expected '[' in type argument");
+        if (hasError_) return type;
+        type.dims = parseTypeDimList();
+        if (hasError_) return type;
+        expect(TokenKind::RBracket, "expected ']' after type argument");
+        if (hasError_) return type;
+        if (name.value == "PagedTensor") {
+            expect(TokenKind::Comma, "expected ', page_size=...' in PagedTensor type");
+            if (hasError_) return type;
+            Token pageSizeName = expect(TokenKind::Ident, "expected page_size in PagedTensor type");
+            if (hasError_) return type;
+            if (pageSizeName.value != "page_size") {
+                reportError("expected page_size in PagedTensor type");
+                return type;
+            }
+            expect(TokenKind::Assign, "expected '=' after page_size in PagedTensor type");
+            if (hasError_) return type;
+            Token pageSize = expect(TokenKind::IntLit, "expected integer page size in PagedTensor type");
+            if (hasError_) return type;
+            type.pageSize = std::strtoll(pageSize.value.c_str(), nullptr, 10);
+        } else if (match(TokenKind::Comma)) {
+            reportError("unexpected type argument");
+            return type;
+        }
+        expect(TokenKind::RBracket, "expected ']' after type arguments");
+    }
+    return type;
+}
+
+std::vector<int64_t> Parser::parseTypeDimList() {
+    std::vector<int64_t> dims;
+    if (check(TokenKind::RBracket)) return dims;
+
+    while (true) {
+        int64_t sign = 1;
+        if (match(TokenKind::Minus))
+            sign = -1;
+        Token value = expect(TokenKind::IntLit, "expected integer in type dimension list");
+        if (hasError_) return dims;
+        dims.push_back(sign * std::strtoll(value.value.c_str(), nullptr, 10));
+        if (!match(TokenKind::Comma)) break;
+        if (check(TokenKind::RBracket)) break;
+    }
+    return dims;
 }
 
 std::vector<TypeExpr> Parser::parseReturnTypes() {

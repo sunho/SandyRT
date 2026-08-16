@@ -14,6 +14,7 @@ namespace sandy::ir::mid_ir {
 const char* op_kind_name(OpKind kind) {
     switch (kind) {
         case OpKind::Input:     return "input";
+        case OpKind::PagedTensorInput: return "paged_tensor_input";
         case OpKind::Weight:    return "weight";
         case OpKind::Constant:  return "constant";
         case OpKind::Linear:    return "linear";
@@ -989,6 +990,52 @@ Value* Builder::createInput(int64_t index, core::Shape shape, core::DType dtype)
     op.parent = block_;
 
     auto* v = graph_.newValue(std::move(shape), dtype);
+    v->def = &op;
+    op.results.push_back(v);
+
+    block_->ops.push_back(&op);
+    return v;
+}
+
+Value* Builder::createPagedTensorInput(int64_t index,
+                                       core::Shape dims,
+                                       core::DType dtype,
+                                       int64_t growDim,
+                                       int64_t pageSize) {
+    if (index < 0) {
+        fprintf(stderr, "paged_tensor_input index must be >= 0\n");
+        abort();
+    }
+    if (dims.rank() < 1) {
+        fprintf(stderr, "paged_tensor_input dims must have rank >= 1\n");
+        abort();
+    }
+    if (growDim < 0 || growDim >= dims.rank()) {
+        fprintf(stderr, "paged_tensor_input grow_dim out of range\n");
+        abort();
+    }
+    if (pageSize <= 0) {
+        fprintf(stderr, "paged_tensor_input page_size must be > 0\n");
+        abort();
+    }
+    for (int i = 0; i < dims.rank(); i++) {
+        auto dim = dims.dim(i);
+        if (dim != core::Shape::kDynamic && dim <= 0) {
+            fprintf(stderr, "paged_tensor_input dims must be positive or dynamic\n");
+            abort();
+        }
+    }
+
+    auto attrDims = dims.dims();
+    auto& op = graph_.ops_.emplace_back();
+    op.kind = OpKind::PagedTensorInput;
+    op.attrs["index"] = AttrValue::make_int(index);
+    op.attrs["grow_dim"] = AttrValue::make_int(growDim);
+    op.attrs["dims"] = AttrValue::make_int_list(std::move(attrDims));
+    op.attrs["page_size"] = AttrValue::make_int(pageSize);
+    op.parent = block_;
+
+    auto* v = graph_.newValue(std::move(dims), dtype);
     v->def = &op;
     op.results.push_back(v);
 

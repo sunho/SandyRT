@@ -1,4 +1,4 @@
-func gpt2_attention(x Node) Node {
+func gpt2_attention(x Tensor) Tensor {
     weight_scope "attn" {
         q := __linear(x, @q_proj.weight, @q_proj.bias)
         k := __linear(x, @k_proj.weight, @k_proj.bias)
@@ -24,7 +24,7 @@ func gpt2_attention(x Node) Node {
     return out
 }
 
-func gpt2_mlp(x Node) Node {
+func gpt2_mlp(x Tensor) Tensor {
     weight_scope "mlp" {
         x = __linear(x, @c_fc.weight, @c_fc.bias)
         x = __gelu(x)
@@ -33,7 +33,7 @@ func gpt2_mlp(x Node) Node {
     return x
 }
 
-func gpt2_block(x Node, i int) Node {
+func gpt2_block(x Tensor, i int) Tensor {
     weight_scope "h.{i}" {
         h := __layer_norm(x, @ln_1.weight, @ln_1.bias, epsilon=0.00001)
         h = gpt2_attention(h)
@@ -46,7 +46,7 @@ func gpt2_block(x Node, i int) Node {
     return x
 }
 
-func main(input_ids Node, position_ids Node) Node {
+func main(input_ids Tensor, position_ids Tensor) Tensor {
     x := __embedding(input_ids, @wte.weight)
     pos := __embedding(position_ids, @wpe.weight)
     x = __add(x, pos)

@@ -4,6 +4,20 @@
 
 namespace sandy::sandygo {
 
+namespace {
+
+bool isTensorType(const TypeExpr& type) {
+    return type.kind == TypeExpr::Simple &&
+           type.dims.empty() &&
+           type.name == "Tensor";
+}
+
+bool isPagedTensorType(const TypeExpr& type) {
+    return type.kind == TypeExpr::Simple && type.name == "PagedTensor";
+}
+
+} // namespace
+
 Interpreter::Interpreter(const Program& program, ir::high_ir::Graph& graph)
     : program_(program), graph_(graph) {
     for (auto& func : program_.funcs) {
@@ -22,7 +36,18 @@ void Interpreter::interpret() {
 
     std::vector<RuntimeValue> mainArgs;
     for (auto& param : mainFunc.params) {
-        auto input = graph_.addInput(param.name);
+        ir::high_ir::Value* input = nullptr;
+        if (isTensorType(param.type)) {
+            input = graph_.addInput(param.name);
+        } else if (isPagedTensorType(param.type)) {
+            if (param.type.dims.empty())
+                error("PagedTensor parameter '" + param.name + "' requires shape, for example PagedTensor[[2, -1, 128], page_size=16]");
+            if (param.type.pageSize <= 0)
+                error("PagedTensor parameter '" + param.name + "' requires positive page_size");
+            input = graph_.addPagedTensorInput(param.name, param.type.dims, param.type.pageSize);
+        } else {
+            error("main parameter '" + param.name + "' must have type Tensor or PagedTensor");
+        }
         mainArgs.push_back(RuntimeValue::makeNode(input));
     }
 

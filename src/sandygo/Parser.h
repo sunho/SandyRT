@@ -20,6 +20,7 @@ private:
     FuncDecl parseFuncDecl();
     std::vector<Param> parseParams();
     TypeExpr parseType();
+    std::vector<int64_t> parseTypeDimList();
     std::vector<TypeExpr> parseReturnTypes();
 
     std::vector<StmtPtr> parseBlock();

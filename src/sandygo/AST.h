@@ -16,6 +16,8 @@ struct TypeExpr {
     enum Kind { Simple, Slice };
     Kind kind = Simple;
     std::string name;
+    std::vector<int64_t> dims;
+    int64_t pageSize = -1;
 
     static TypeExpr simple(const std::string& n) { return {Simple, n}; }
     static TypeExpr slice(const std::string& elem) { return {Slice, elem}; }

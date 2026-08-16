@@ -4,6 +4,24 @@
 
 namespace sandy::ir::mid_ir {
 
+namespace {
+
+Result<int64_t> infer_paged_tensor_grow_dim(const std::vector<int64_t>& dims) {
+    int64_t growDim = -1;
+    for (size_t i = 0; i < dims.size(); i++) {
+        if (dims[i] != core::Shape::kDynamic)
+            continue;
+        if (growDim >= 0)
+            return make_error("PagedTensor input shape must have exactly one dynamic grow dimension");
+        growDim = static_cast<int64_t>(i);
+    }
+    if (growDim < 0)
+        return make_error("PagedTensor input shape must have one dynamic grow dimension");
+    return growDim;
+}
+
+} // namespace
+
 MidIRMaterializer::MidIRMaterializer()
     : lowering_(BuiltinLowering::createDefault()) {
     register_all_ops();
@@ -25,7 +43,20 @@ Result<std::unique_ptr<Graph>> MidIRMaterializer::materialize(
                 auto it = options.input_tensor_descs.find(op.inputName);
                 if (it == options.input_tensor_descs.end())
                     return make_error("no shape provided for input '" + op.inputName + "'");
-                auto* v = builder.createInput(nextInputIndex++, it->second.shape, it->second.dtype);
+                Value* v = nullptr;
+                if (op.inputKind == high_ir::InputKind::PagedTensor) {
+                    auto growDim = infer_paged_tensor_grow_dim(op.inputPagedTensorDims);
+                    if (!growDim)
+                        return make_error("input '" + op.inputName + "': " + growDim.error());
+                    v = builder.createPagedTensorInput(
+                        nextInputIndex++,
+                        core::Shape(op.inputPagedTensorDims),
+                        it->second.dtype,
+                        growDim.take(),
+                        op.inputPagedTensorPageSize);
+                } else {
+                    v = builder.createInput(nextInputIndex++, it->second.shape, it->second.dtype);
+                }
                 value_map[op.results[0]->id] = v;
                 break;
             }

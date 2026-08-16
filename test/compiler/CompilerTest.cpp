@@ -83,7 +83,7 @@ TEST(CompilerTest, LoadSandyGoImportsRelativeFile) {
     fs::path dir = makeTempDir();
 
     writeFile(dir / "nested" / "layers.sandy.go", R"(
-func imported(x Node) Node {
+func imported(x Tensor) Tensor {
     return __relu(x)
 }
 )");
@@ -91,7 +91,7 @@ func imported(x Node) Node {
     writeFile(dir / "main.sandy.go", R"(
 import "nested/layers.sandy.go"
 
-func main(x Node) Node {
+func main(x Tensor) Tensor {
     return imported(x)
 }
 )");
@@ -109,10 +109,58 @@ func main(x Node) Node {
     fs::remove_all(dir, ec);
 }
 
+TEST(CompilerTest, PagedTensorMainParamsMaterializeToMidIRInputs) {
+    fs::path dir = makeTempDir();
+    writeFile(dir / "main.sandy.go", R"(
+func main(k PagedTensor[[2, -1, 128], page_size=16], v PagedTensor[[2, -1, 128], page_size=16]) Tensor {
+    return k
+}
+)");
+
+    sandy::Compiler compiler;
+    auto highGraph = compiler.load_sandygo((dir / "main.sandy.go").string());
+
+    ASSERT_EQ(highGraph.outputs().size(), 1u);
+    ASSERT_NE(highGraph.outputs()[0], nullptr);
+    ASSERT_NE(highGraph.outputs()[0]->def, nullptr);
+    EXPECT_EQ(highGraph.outputs()[0]->def->kind, sandy::ir::high_ir::Op::Input);
+    EXPECT_EQ(highGraph.outputs()[0]->def->inputKind, sandy::ir::high_ir::InputKind::PagedTensor);
+    EXPECT_EQ(highGraph.outputs()[0]->def->inputPagedTensorDims,
+              (std::vector<int64_t>{2, -1, 128}));
+    EXPECT_EQ(highGraph.outputs()[0]->def->inputPagedTensorPageSize, 16);
+
+    TestWeights weights;
+    sandy::ir::mid_ir::MaterializeOptions options;
+    options.input_tensor_descs["k"] = sandy::core::TensorDesc(
+        sandy::core::Shape({}), sandy::core::DType::BF16);
+    options.input_tensor_descs["v"] = sandy::core::TensorDesc(
+        sandy::core::Shape({}), sandy::core::DType::BF16);
+
+    auto result = compiler.materialize_mid_ir(highGraph, weights, options);
+    ASSERT_TRUE(result) << result.error();
+    auto midGraph = result.take();
+
+    ASSERT_EQ(midGraph->outputs().size(), 1u);
+    auto* cache = midGraph->outputs()[0];
+    ASSERT_NE(cache, nullptr);
+    ASSERT_NE(cache->def, nullptr);
+    EXPECT_EQ(cache->def->kind, sandy::ir::mid_ir::OpKind::PagedTensorInput);
+    EXPECT_EQ(cache->shape, sandy::core::Shape({2, -1, 128}));
+    EXPECT_EQ(cache->dtype, sandy::core::DType::BF16);
+    EXPECT_EQ(cache->def->attrs.at("index").intVal, 0);
+    EXPECT_EQ(cache->def->attrs.at("grow_dim").intVal, 1);
+    EXPECT_EQ(cache->def->attrs.at("page_size").intVal, 16);
+    EXPECT_EQ(cache->def->attrs.at("dims").intListVal,
+              (std::vector<int64_t>{2, -1, 128}));
+
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
 TEST(CompilerTest, RMSNormBuiltinMaterializesToMidIROp) {
     fs::path dir = makeTempDir();
     writeFile(dir / "main.sandy.go", R"(
-func main(x Node) Node {
+func main(x Tensor) Tensor {
     return __rms_norm(x, @norm.weight)
 }
 )");
@@ -145,7 +193,7 @@ func main(x Node) Node {
 TEST(CompilerTest, RMSNormBuiltinWithoutScaleMaterializesToMidIROp) {
     fs::path dir = makeTempDir();
     writeFile(dir / "main.sandy.go", R"(
-func main(x Node) Node {
+func main(x Tensor) Tensor {
     return __rms_norm(x)
 }
 )");
@@ -177,7 +225,7 @@ func main(x Node) Node {
 TEST(CompilerTest, LayerNormBuiltinMaterializesToMidIROp) {
     fs::path dir = makeTempDir();
     writeFile(dir / "main.sandy.go", R"(
-func main(x Node) Node {
+func main(x Tensor) Tensor {
     return __layer_norm(x, @ln.weight, @ln.bias, epsilon=0.00001)
 }
 )");
@@ -212,7 +260,7 @@ func main(x Node) Node {
 TEST(CompilerTest, AddMulSqrtBuiltinsMaterializeToMidIROps) {
     fs::path dir = makeTempDir();
     writeFile(dir / "main.sandy.go", R"(
-func main(x Node, y Node, z Node) Node {
+func main(x Tensor, y Tensor, z Tensor) Tensor {
     return __sqrt(__mul(__add(x, y), z))
 }
 )");
@@ -254,7 +302,7 @@ func main(x Node, y Node, z Node) Node {
 TEST(CompilerTest, GeluBuiltinLowersThroughConstantsAndTanh) {
     fs::path dir = makeTempDir();
     writeFile(dir / "main.sandy.go", R"(
-func main(x Node) Node {
+func main(x Tensor) Tensor {
     return __gelu(x)
 }
 )");
@@ -349,7 +397,7 @@ TEST(CompilerTest, SoftcapBuiltinAcceptsPositionalConstantCap) {
 TEST(CompilerTest, GemmaStyleMatMulWithTransposeMaterializesToMidIROps) {
     fs::path dir = makeTempDir();
     writeFile(dir / "main.sandy.go", R"(
-func main(x Node) Node {
+func main(x Tensor) Tensor {
     return __matmul(x, __transpose(@embed_tokens.weight))
 }
 )");
@@ -391,7 +439,7 @@ func main(x Node) Node {
 TEST(CompilerTest, EmbeddingBuiltinMaterializesToMidIROp) {
     fs::path dir = makeTempDir();
     writeFile(dir / "main.sandy.go", R"(
-func main(input_ids Node) Node {
+func main(input_ids Tensor) Tensor {
     return __embedding(input_ids, @embed_tokens.weight)
 }
 )");

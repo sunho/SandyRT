@@ -22,13 +22,13 @@ TEST(Lexer, Keywords) {
 }
 
 TEST(Lexer, Identifiers) {
-    auto tokens = lex("x __rms_norm Node gemma_layer");
+    auto tokens = lex("x __rms_norm Tensor gemma_layer");
     EXPECT_EQ(tokens[0].kind, TokenKind::Ident);
     EXPECT_EQ(tokens[0].value, "x");
     EXPECT_EQ(tokens[1].kind, TokenKind::Ident);
     EXPECT_EQ(tokens[1].value, "__rms_norm");
     EXPECT_EQ(tokens[2].kind, TokenKind::Ident);
-    EXPECT_EQ(tokens[2].value, "Node");
+    EXPECT_EQ(tokens[2].value, "Tensor");
     EXPECT_EQ(tokens[3].kind, TokenKind::Ident);
     EXPECT_EQ(tokens[3].value, "gemma_layer");
 }
@@ -146,17 +146,17 @@ TEST(Lexer, Comments) {
 }
 
 TEST(Lexer, VarDecl) {
-    auto tokens = lex("var sliding_kv Node\n");
+    auto tokens = lex("var sliding_kv Tensor\n");
     EXPECT_EQ(tokens[0].kind, TokenKind::Var);
     EXPECT_EQ(tokens[1].kind, TokenKind::Ident);
     EXPECT_EQ(tokens[1].value, "sliding_kv");
     EXPECT_EQ(tokens[2].kind, TokenKind::Ident);
-    EXPECT_EQ(tokens[2].value, "Node");
+    EXPECT_EQ(tokens[2].value, "Tensor");
     EXPECT_EQ(tokens[3].kind, TokenKind::Semicolon);
 }
 
 TEST(Lexer, FuncSignature) {
-    auto tokens = lex("func f(x Node, i int) (Node, Node) {\n");
+    auto tokens = lex("func f(x Tensor, i int) (Tensor, Tensor) {\n");
     EXPECT_EQ(tokens[0].kind, TokenKind::Func);
     EXPECT_EQ(tokens[1].kind, TokenKind::Ident);
     EXPECT_EQ(tokens[1].value, "f");

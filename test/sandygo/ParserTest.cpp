@@ -16,7 +16,7 @@ static Program parseSource(const std::string& src) {
 
 TEST(Parser, SimpleFunction) {
     auto prog = parseSource(R"(
-func f() Node {
+func f() Tensor {
     return x
 }
 )");
@@ -24,7 +24,7 @@ func f() Node {
     EXPECT_EQ(prog.funcs[0].name, "f");
     EXPECT_EQ(prog.funcs[0].params.size(), 0u);
     ASSERT_EQ(prog.funcs[0].returnTypes.size(), 1u);
-    EXPECT_EQ(prog.funcs[0].returnTypes[0].name, "Node");
+    EXPECT_EQ(prog.funcs[0].returnTypes[0].name, "Tensor");
     ASSERT_EQ(prog.funcs[0].body.size(), 1u);
     EXPECT_EQ(prog.funcs[0].body[0]->kind, Stmt::Return);
 }
@@ -33,7 +33,7 @@ TEST(Parser, ImportDecl) {
     auto prog = parseSource(R"(
 import "layers.sandy.go"
 
-func f() Node {
+func f() Tensor {
     return x
 }
 )");
@@ -46,7 +46,7 @@ func f() Node {
 
 TEST(Parser, FunctionWithParams) {
     auto prog = parseSource(R"(
-func f(x Node, i int, s string) Node {
+func f(x Tensor, i int, s string) Tensor {
     return x
 }
 )");
@@ -54,24 +54,59 @@ func f(x Node, i int, s string) Node {
     auto& fn = prog.funcs[0];
     ASSERT_EQ(fn.params.size(), 3u);
     EXPECT_EQ(fn.params[0].name, "x");
-    EXPECT_EQ(fn.params[0].type.name, "Node");
+    EXPECT_EQ(fn.params[0].type.name, "Tensor");
     EXPECT_EQ(fn.params[1].name, "i");
     EXPECT_EQ(fn.params[1].type.name, "int");
     EXPECT_EQ(fn.params[2].name, "s");
     EXPECT_EQ(fn.params[2].type.name, "string");
 }
 
+TEST(Parser, PagedTensorParamWithShape) {
+    auto prog = parseSource(R"(
+func main(k PagedTensor[[2, -1, 128], page_size=16], v PagedTensor[[2, -1, 128], page_size=32]) Tensor {
+    return k
+}
+)");
+    ASSERT_EQ(prog.funcs.size(), 1u);
+    auto& fn = prog.funcs[0];
+    ASSERT_EQ(fn.params.size(), 2u);
+    EXPECT_EQ(fn.params[0].name, "k");
+    EXPECT_EQ(fn.params[0].type.name, "PagedTensor");
+    EXPECT_EQ(fn.params[0].type.dims, (std::vector<int64_t>{2, -1, 128}));
+    EXPECT_EQ(fn.params[0].type.pageSize, 16);
+    EXPECT_EQ(fn.params[1].name, "v");
+    EXPECT_EQ(fn.params[1].type.name, "PagedTensor");
+    EXPECT_EQ(fn.params[1].type.dims, (std::vector<int64_t>{2, -1, 128}));
+    EXPECT_EQ(fn.params[1].type.pageSize, 32);
+    ASSERT_EQ(fn.returnTypes.size(), 1u);
+    EXPECT_EQ(fn.returnTypes[0].name, "Tensor");
+}
+
+TEST(Parser, PagedTensorParamRequiresPageSize) {
+    Lexer lexer(R"(
+func main(k PagedTensor[[2, -1, 128]]) Tensor {
+    return k
+}
+)");
+    auto tokens = lexer.tokenize();
+    ASSERT_FALSE(lexer.hasError()) << lexer.errorMessage();
+
+    Parser parser(std::move(tokens));
+    (void)parser.parse();
+    EXPECT_TRUE(parser.hasError());
+}
+
 TEST(Parser, MultiReturn) {
     auto prog = parseSource(R"(
-func f(x Node) (Node, Node) {
+func f(x Tensor) (Tensor, Tensor) {
     return x, x
 }
 )");
     ASSERT_EQ(prog.funcs.size(), 1u);
     auto& fn = prog.funcs[0];
     ASSERT_EQ(fn.returnTypes.size(), 2u);
-    EXPECT_EQ(fn.returnTypes[0].name, "Node");
-    EXPECT_EQ(fn.returnTypes[1].name, "Node");
+    EXPECT_EQ(fn.returnTypes[0].name, "Tensor");
+    EXPECT_EQ(fn.returnTypes[1].name, "Tensor");
     ASSERT_EQ(fn.body.size(), 1u);
     EXPECT_EQ(fn.body[0]->kind, Stmt::Return);
     EXPECT_EQ(fn.body[0]->values.size(), 2u);
@@ -79,27 +114,27 @@ func f(x Node) (Node, Node) {
 
 TEST(Parser, SliceParam) {
     auto prog = parseSource(R"(
-func f(xs []Node) Node {
+func f(xs []Tensor) Tensor {
     return xs
 }
 )");
     ASSERT_EQ(prog.funcs.size(), 1u);
     ASSERT_EQ(prog.funcs[0].params.size(), 1u);
     EXPECT_EQ(prog.funcs[0].params[0].type.kind, TypeExpr::Slice);
-    EXPECT_EQ(prog.funcs[0].params[0].type.name, "Node");
+    EXPECT_EQ(prog.funcs[0].params[0].type.name, "Tensor");
 }
 
 TEST(Parser, VarDecl) {
     auto prog = parseSource(R"(
 func f() {
-    var x Node
+    var x Tensor
     var y int
 }
 )");
     ASSERT_EQ(prog.funcs[0].body.size(), 2u);
     EXPECT_EQ(prog.funcs[0].body[0]->kind, Stmt::VarDecl);
     EXPECT_EQ(prog.funcs[0].body[0]->name, "x");
-    EXPECT_EQ(prog.funcs[0].body[0]->type.name, "Node");
+    EXPECT_EQ(prog.funcs[0].body[0]->type.name, "Tensor");
     EXPECT_EQ(prog.funcs[0].body[1]->kind, Stmt::VarDecl);
     EXPECT_EQ(prog.funcs[0].body[1]->name, "y");
     EXPECT_EQ(prog.funcs[0].body[1]->type.name, "int");
@@ -303,7 +338,7 @@ TEST(Parser, MultipleFunctions) {
 func a() {
 }
 
-func b(x Node) Node {
+func b(x Tensor) Tensor {
     return x
 }
 )");
@@ -314,7 +349,7 @@ func b(x Node) Node {
 
 TEST(Parser, GemmaLayerStructure) {
     auto prog = parseSource(R"(
-func gemma_kv_layer(x Node, i int, window int, head_dim int, rope_theta float) (Node, Node) {
+func gemma_kv_layer(x Tensor, i int, window int, head_dim int, rope_theta float) (Tensor, Tensor) {
     weight_scope "layers.{i}" {
         h := __rms_norm(x, @input_layernorm.weight)
         h, kv := __kv_attention(h,
@@ -355,12 +390,12 @@ func gemma_kv_layer(x Node, i int, window int, head_dim int, rope_theta float) (
 
 TEST(Parser, MainFunction) {
     auto prog = parseSource(R"(
-func main(input_ids Node) Node {
+func main(input_ids Tensor) Tensor {
     weight_scope "language_model.model" {
         x := __embedding(input_ids, @embed_tokens.weight)
         x = __mul(x, __sqrt(1536))
-        var sliding_kv Node
-        var full_kv Node
+        var sliding_kv Tensor
+        var full_kv Tensor
         for i := range(15) {
             if i % 5 == 4 {
                 x, full_kv = gemma_kv_layer(x, i, 0, 512, 1000000.0)

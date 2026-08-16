@@ -1,4 +1,4 @@
-func gemma_gated_mlp(x Node) Node {
+func gemma_gated_mlp(x Tensor) Tensor {
     weight_scope "mlp" {
         gate := __matmul(x, __transpose(@gate_proj.weight))
         up := __matmul(x, __transpose(@up_proj.weight))
@@ -8,7 +8,7 @@ func gemma_gated_mlp(x Node) Node {
     return x
 }
 
-func gemma_per_layer_input(input_embed Node, input_ids Node, i int) Node {
+func gemma_per_layer_input(input_embed Tensor, input_ids Tensor, i int) Tensor {
     weight_scope "per_layer_inputs.{i}" {
         model_input := __matmul(input_embed, @model_projection.weight)
         model_input = __mul(model_input, 0.019775390625)
@@ -23,7 +23,7 @@ func gemma_per_layer_input(input_embed Node, input_ids Node, i int) Node {
     return out
 }
 
-func gemma_apply_per_layer_input(x Node, per_layer_input Node) Node {
+func gemma_apply_per_layer_input(x Tensor, per_layer_input Tensor) Tensor {
     h := __matmul(x, @per_layer_input_gate.weight)
     h = __mul(__gelu(h), per_layer_input)
     h = __matmul(h, @per_layer_projection.weight)
@@ -32,7 +32,7 @@ func gemma_apply_per_layer_input(x Node, per_layer_input Node) Node {
     return x
 }
 
-func gemma_local_kv_attention(x Node) (Node, Node, Node) {
+func gemma_local_kv_attention(x Tensor) (Tensor, Tensor, Tensor) {
     weight_scope "self_attn" {
         q := __matmul(x, __transpose(@q_proj.weight))
         k := __matmul(x, __transpose(@k_proj.weight))
@@ -65,7 +65,7 @@ func gemma_local_kv_attention(x Node) (Node, Node, Node) {
     return out, k, v
 }
 
-func gemma_global_kv_attention(x Node) (Node, Node, Node) {
+func gemma_global_kv_attention(x Tensor) (Tensor, Tensor, Tensor) {
     weight_scope "self_attn" {
         q := __matmul(x, __transpose(@q_proj.weight))
         k := __matmul(x, __transpose(@k_proj.weight))
@@ -98,7 +98,7 @@ func gemma_global_kv_attention(x Node) (Node, Node, Node) {
     return out, k, v
 }
 
-func gemma_local_attention(x Node, k Node, v Node) Node {
+func gemma_local_attention(x Tensor, k Tensor, v Tensor) Tensor {
     weight_scope "self_attn" {
         q := __matmul(x, __transpose(@q_proj.weight))
         q = __reshape(q, shape=[-1, -1, 8, 256])
@@ -118,7 +118,7 @@ func gemma_local_attention(x Node, k Node, v Node) Node {
     return out
 }
 
-func gemma_global_attention(x Node, k Node, v Node) Node {
+func gemma_global_attention(x Tensor, k Tensor, v Tensor) Tensor {
     weight_scope "self_attn" {
         q := __matmul(x, __transpose(@q_proj.weight))
         q = __reshape(q, shape=[-1, -1, 8, 512])
@@ -138,7 +138,7 @@ func gemma_global_attention(x Node, k Node, v Node) Node {
     return out
 }
 
-func gemma_local_kv_layer(x Node, per_layer_input Node, i int) (Node, Node, Node) {
+func gemma_local_kv_layer(x Tensor, per_layer_input Tensor, i int) (Tensor, Tensor, Tensor) {
     weight_scope "layers.{i}" {
         h := __rms_norm(x, @input_layernorm.weight)
         h, k, v := gemma_local_kv_attention(h)
@@ -156,7 +156,7 @@ func gemma_local_kv_layer(x Node, per_layer_input Node, i int) (Node, Node, Node
     return x, k, v
 }
 
-func gemma_global_kv_layer(x Node, per_layer_input Node, i int) (Node, Node, Node) {
+func gemma_global_kv_layer(x Tensor, per_layer_input Tensor, i int) (Tensor, Tensor, Tensor) {
     weight_scope "layers.{i}" {
         h := __rms_norm(x, @input_layernorm.weight)
         h, k, v := gemma_global_kv_attention(h)
@@ -174,7 +174,7 @@ func gemma_global_kv_layer(x Node, per_layer_input Node, i int) (Node, Node, Nod
     return x, k, v
 }
 
-func gemma_local_layer(x Node, per_layer_input Node, i int, k Node, v Node) Node {
+func gemma_local_layer(x Tensor, per_layer_input Tensor, i int, k Tensor, v Tensor) Tensor {
     weight_scope "layers.{i}" {
         h := __rms_norm(x, @input_layernorm.weight)
         h = gemma_local_attention(h, k, v)
@@ -192,7 +192,7 @@ func gemma_local_layer(x Node, per_layer_input Node, i int, k Node, v Node) Node
     return x
 }
 
-func gemma_global_layer(x Node, per_layer_input Node, i int, k Node, v Node) Node {
+func gemma_global_layer(x Tensor, per_layer_input Tensor, i int, k Tensor, v Tensor) Tensor {
     weight_scope "layers.{i}" {
         h := __rms_norm(x, @input_layernorm.weight)
         h = gemma_global_attention(h, k, v)
@@ -210,16 +210,16 @@ func gemma_global_layer(x Node, per_layer_input Node, i int, k Node, v Node) Nod
     return x
 }
 
-func main(input_ids Node) Node {
+func main(input_ids Tensor) Tensor {
     weight_scope "language_model.model" {
         x := __embedding(input_ids, @embed_tokens.weight)
         x = __mul(x, 50.5)
         input_embed := x
 
-        var sliding_k Node
-        var sliding_v Node
-        var full_k Node
-        var full_v Node
+        var sliding_k Tensor
+        var sliding_v Tensor
+        var full_k Tensor
+        var full_v Tensor
 
         for i := range(24) {
             per_layer_input := gemma_per_layer_input(input_embed, input_ids, i)

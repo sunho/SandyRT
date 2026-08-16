@@ -452,3 +452,30 @@ TEST_F(MidIRTest, InputWeightAttrs) {
     EXPECT_EQ(x->def->attrs.count("name"), 0u);
     EXPECT_EQ(w->def->attrs.at("name").strVal, "fc1.weight");
 }
+
+TEST_F(MidIRTest, PagedTensorInputAttrs) {
+    sandy::ir::mid_ir::Graph graph;
+    sandy::ir::mid_ir::Builder builder(graph);
+
+    auto* cache = builder.createPagedTensorInput(
+        1,
+        sandy::core::Shape({2, 4, -1, 128}),
+        sandy::core::DType::BF16,
+        2,
+        16);
+
+    EXPECT_EQ(cache->shape, sandy::core::Shape({2, 4, -1, 128}));
+    EXPECT_EQ(cache->dtype, sandy::core::DType::BF16);
+    ASSERT_NE(cache->def, nullptr);
+    EXPECT_EQ(cache->def->kind, sandy::ir::mid_ir::OpKind::PagedTensorInput);
+    EXPECT_EQ(cache->def->attrs.at("index").intVal, 1);
+    EXPECT_EQ(cache->def->attrs.at("grow_dim").intVal, 2);
+    EXPECT_EQ(cache->def->attrs.at("page_size").intVal, 16);
+
+    const auto& dims = cache->def->attrs.at("dims").intListVal;
+    ASSERT_EQ(dims.size(), 4u);
+    EXPECT_EQ(dims[0], 2);
+    EXPECT_EQ(dims[1], 4);
+    EXPECT_EQ(dims[2], -1);
+    EXPECT_EQ(dims[3], 128);
+}

@@ -6,7 +6,7 @@ namespace sandy::ir::high_ir {
 
 const char* typeName(Type type) {
     switch (type) {
-        case Type::Node: return "node";
+        case Type::Tensor: return "tensor";
         case Type::Int: return "int";
         case Type::Float: return "float";
         case Type::String: return "string";
@@ -42,7 +42,24 @@ Value* Graph::addInput(const std::string& name) {
     auto& op = ops_.emplace_back();
     op.kind = Op::Input;
     op.inputName = name;
-    auto* v = newValue(Type::Node);
+    op.inputKind = InputKind::Tensor;
+    auto* v = newValue(Type::Tensor);
+    v->def = &op;
+    op.results.push_back(v);
+    return v;
+}
+
+Value* Graph::addPagedTensorInput(
+        const std::string& name,
+        std::vector<int64_t> dims,
+        int64_t pageSize) {
+    auto& op = ops_.emplace_back();
+    op.kind = Op::Input;
+    op.inputName = name;
+    op.inputKind = InputKind::PagedTensor;
+    op.inputPagedTensorDims = std::move(dims);
+    op.inputPagedTensorPageSize = pageSize;
+    auto* v = newValue(Type::Tensor);
     v->def = &op;
     op.results.push_back(v);
     return v;
@@ -52,7 +69,7 @@ Value* Graph::addWeight(const std::string& name) {
     auto& op = ops_.emplace_back();
     op.kind = Op::Weight;
     op.weightName = name;
-    auto* v = newValue(Type::Node);
+    auto* v = newValue(Type::Tensor);
     v->def = &op;
     op.results.push_back(v);
     return v;
@@ -99,7 +116,7 @@ std::vector<Value*> Graph::addBuiltin(const std::string& name,
     op.attrs = attrs;
     std::vector<Value*> results;
     for (int i = 0; i < numResults; i++) {
-        auto* v = newValue(Type::Node);
+        auto* v = newValue(Type::Tensor);
         v->def = &op;
         op.results.push_back(v);
         results.push_back(v);
@@ -133,11 +150,23 @@ void Graph::dump() const {
         switch (op.kind) {
             case Op::Input:
                 std::cout << "%" << op.results[0]->id
-                          << " = input(\"" << op.inputName << "\") : node\n";
+                          << " = ";
+                if (op.inputKind == InputKind::PagedTensor) {
+                    std::cout << "paged_tensor_input(\"" << op.inputName << "\", dims=";
+                    std::cout << "[";
+                    for (size_t i = 0; i < op.inputPagedTensorDims.size(); i++) {
+                        if (i > 0) std::cout << ", ";
+                        std::cout << op.inputPagedTensorDims[i];
+                    }
+                    std::cout << "], page_size=" << op.inputPagedTensorPageSize;
+                } else {
+                    std::cout << "input(\"" << op.inputName << "\"";
+                }
+                std::cout << ") : tensor\n";
                 break;
             case Op::Weight:
                 std::cout << "%" << op.results[0]->id
-                          << " = weight(\"" << op.weightName << "\") : node\n";
+                          << " = weight(\"" << op.weightName << "\") : tensor\n";
                 break;
             case Op::IntConst:
                 std::cout << "%" << op.results[0]->id

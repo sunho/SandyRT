@@ -7,7 +7,7 @@
 
 namespace sandy::ir::high_ir {
 
-enum class Type { Node, Int, Float, String, IntList };
+enum class Type { Tensor, Int, Float, String, IntList };
 
 const char* typeName(Type type);
 
@@ -17,6 +17,11 @@ struct Value {
     int id;
     Type type;
     Op* def = nullptr;
+};
+
+enum class InputKind {
+    Tensor,
+    PagedTensor,
 };
 
 struct Attr {
@@ -44,6 +49,9 @@ struct Op {
 
     std::string weightName;
     std::string inputName;
+    InputKind inputKind = InputKind::Tensor;
+    std::vector<int64_t> inputPagedTensorDims;
+    int64_t inputPagedTensorPageSize = -1;
 
     int64_t intVal = 0;
     double floatVal = 0.0;
@@ -53,6 +61,9 @@ struct Op {
 class Graph {
 public:
     Value* addInput(const std::string& name);
+    Value* addPagedTensorInput(const std::string& name,
+                               std::vector<int64_t> dims,
+                               int64_t pageSize);
     Value* addWeight(const std::string& name);
     Value* addIntConst(int64_t val);
     Value* addFloatConst(double val);

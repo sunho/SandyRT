@@ -15,6 +15,7 @@ namespace sandy::ir::mid_ir {
 
 enum class OpKind {
     Input,
+    PagedTensorInput,
     Weight,
     Constant,
     Linear,
@@ -168,6 +169,11 @@ public:
                                  int numResults = 1);
 
     Value* createInput(int64_t index, core::Shape shape, core::DType dtype);
+    Value* createPagedTensorInput(int64_t index,
+                                  core::Shape dims,
+                                  core::DType dtype,
+                                  int64_t growDim,
+                                  int64_t pageSize);
     Value* createWeight(const std::string& name, core::Shape shape, core::DType dtype);
     Value* createConstantF32(float value);
 
