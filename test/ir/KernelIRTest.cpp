@@ -55,15 +55,11 @@ TEST(KernelIRGraphTest, VerifyTracksDefsUsesAndOutputs) {
         kernel_ir::ScalarNode{
             1, kernel_ir::ScalarOp::ReLU, sandy::core::DType::F32, 0, 0.0, {0}},
     };
-    std::vector<kernel_ir::ElementwiseStore> stores = {
-        kernel_ir::ElementwiseStore{output, 1},
-    };
     graph.addOp<kernel_ir::ElementwiseKernelOp>(
         std::move(inputs),
-        std::vector<kernel_ir::ValueId>{output},
         output,
-        std::move(scalars),
-        std::move(stores));
+        1,
+        std::move(scalars));
     graph.setOutputs({output});
 
     auto result = graph.verify();
@@ -100,15 +96,11 @@ TEST(KernelIRGraphTest, DumpPrintsElementwiseScalarDag) {
         kernel_ir::ScalarNode{
             2, kernel_ir::ScalarOp::Add, sandy::core::DType::F32, 0, 0.0, {0, 1}},
     };
-    std::vector<kernel_ir::ElementwiseStore> stores = {
-        kernel_ir::ElementwiseStore{output, 2},
-    };
     graph.addOp<kernel_ir::ElementwiseKernelOp>(
         std::move(inputs),
-        std::vector<kernel_ir::ValueId>{output},
         output,
-        std::move(scalars),
-        std::move(stores));
+        2,
+        std::move(scalars));
     graph.setOutputs({output});
 
     testing::internal::CaptureStdout();
@@ -139,7 +131,7 @@ TEST(KernelIRGraphTest, VerifyTracksDeviceTransfer) {
         kernel_ir::InputSource{kernel_ir::InputSourceKind::Argument, 0, ""},
         input);
 
-    auto output = graph.addValue(tensor_type({2, 3}), "x_on_device_1");
+    auto output = graph.addValue(tensor_type({2, 3}), "x_on_device_1", 1);
     graph.addOp<kernel_ir::DeviceTransferOp>(0, 1, input, output);
     graph.setOutputs({output});
 
@@ -168,6 +160,36 @@ TEST(KernelIRGraphTest, VerifyRejectsSameDeviceTransfer) {
     auto result = graph.verify();
     EXPECT_FALSE(result);
     EXPECT_NE(result.error().find("source and target are equal"), std::string::npos);
+}
+
+TEST(KernelIRGraphTest, VerifyRejectsKernelInputOnWrongDevice) {
+    kernel_ir::Graph graph;
+
+    auto input = graph.addValue(tensor_type({2, 3}));
+    graph.addOp<kernel_ir::InputOp>(
+        kernel_ir::InputSource{kernel_ir::InputSourceKind::Argument, 0, ""},
+        input);
+
+    auto output = graph.addValue(tensor_type({2, 3}), 1);
+    graph.addOp<kernel_ir::ElementwiseKernelOp>(
+        std::vector<kernel_ir::ElementwiseInput>{
+            kernel_ir::ElementwiseInput{input, kernel_ir::BroadcastMode::None},
+        },
+        output,
+        1,
+        std::vector<kernel_ir::ScalarNode>{
+            kernel_ir::ScalarNode{
+                0, kernel_ir::ScalarOp::Load, sandy::core::DType::F32, 0, 0.0, {}},
+            kernel_ir::ScalarNode{
+                1, kernel_ir::ScalarOp::Tanh, sandy::core::DType::F32, 0, 0.0, {0}},
+        },
+        1);
+    graph.setOutputs({output});
+
+    auto result = graph.verify();
+    EXPECT_FALSE(result);
+    EXPECT_NE(result.error().find("input %0 is on device 0, expected device 1"),
+              std::string::npos);
 }
 
 TEST_F(MidIRToKernelIRTest, LowersInputAndWeight) {

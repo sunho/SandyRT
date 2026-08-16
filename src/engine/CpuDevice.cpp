@@ -64,17 +64,10 @@ bool is_load_of(
 
 Result<SimpleElementwiseKernel> validate_simple_elementwise_kernel(
         const ir::kernel_ir::ElementwiseKernelOp& elementwise) {
-    if (elementwise.outputs().size() != 1)
-        return make_error("cpu device supports one elementwise output per kernel");
-    if (elementwise.stores().size() != 1)
-        return make_error("cpu device supports one elementwise store per kernel");
-    if (elementwise.stores()[0].output != elementwise.outputs()[0])
-        return make_error("cpu device elementwise store must target the only output");
-
     const auto& scalars = elementwise.scalars();
-    auto* terminal = find_scalar(scalars, elementwise.stores()[0].value);
+    auto* terminal = find_scalar(scalars, elementwise.result());
     if (!terminal)
-        return make_error("cpu device elementwise store references missing scalar");
+        return make_error("cpu device elementwise result references missing scalar");
 
     SimpleElementwiseKernel simple;
     simple.scalarOp = terminal->op;

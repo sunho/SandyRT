@@ -16,6 +16,10 @@ std::string op_ref(OpId id) {
     return "op " + std::to_string(id);
 }
 
+std::string device_ref(DeviceId device) {
+    return "device " + std::to_string(device);
+}
+
 std::string shape_dims_string(const core::Shape& shape) {
     std::string out;
     for (int i = 0; i < shape.rank(); ++i) {
@@ -68,10 +72,6 @@ std::string int_list_string(const std::vector<int64_t>& values) {
     }
     out += "]";
     return out;
-}
-
-bool span_contains(std::span<const ValueId> values, ValueId value) {
-    return std::find(values.begin(), values.end(), value) != values.end();
 }
 
 bool has_scalar(const std::vector<ScalarNode>& scalars, ScalarId id) {
@@ -143,10 +143,8 @@ void dump_elementwise_body(const ElementwiseKernelOp& op) {
         std::cout << "\n";
     }
 
-    for (const auto& store : op.stores()) {
-        std::cout << "    store " << value_ref(store.output)
-                  << ", " << scalar_ref(store.value) << "\n";
-    }
+    std::cout << "    store " << value_ref(op.output())
+              << ", " << scalar_ref(op.result()) << "\n";
     std::cout << "  }\n";
 }
 
@@ -185,6 +183,40 @@ Result<void> verify_common_op_shape(
         return result;
     }
     return verify_values_exist(graph, op.outputs(), "output", op);
+}
+
+Result<void> verify_device_placement(const Graph& graph, const Op& op) {
+    if (op.kind() == OpKind::DeviceTransfer) {
+        const auto& transfer = static_cast<const DeviceTransferOp&>(op);
+        if (op.device() != transfer.sourceDevice()) {
+            return make_error(op_ref(op.id()) + " device transfer op placement must match source device");
+        }
+        if (graph.value(transfer.inputs()[0]).device != transfer.sourceDevice()) {
+            return make_error(op_ref(op.id()) + " device transfer input is not on source device");
+        }
+        if (graph.value(transfer.outputs()[0]).device != transfer.targetDevice()) {
+            return make_error(op_ref(op.id()) + " device transfer output is not on target device");
+        }
+        return {};
+    }
+
+    for (auto input : op.inputs()) {
+        if (graph.value(input).device != op.device()) {
+            return make_error(op_ref(op.id()) + " input " + value_ref(input) +
+                              " is on " + device_ref(graph.value(input).device) +
+                              ", expected " + device_ref(op.device()));
+        }
+    }
+
+    for (auto output : op.outputs()) {
+        if (graph.value(output).device != op.device()) {
+            return make_error(op_ref(op.id()) + " output " + value_ref(output) +
+                              " is on " + device_ref(graph.value(output).device) +
+                              ", expected " + device_ref(op.device()));
+        }
+    }
+
+    return {};
 }
 
 std::string input_source_string(const InputSource& source) {
@@ -247,7 +279,7 @@ std::string op_attr_string(const Op& op) {
         case OpKind::ElementwiseKernel: {
             const auto& elementwise = static_cast<const ElementwiseKernelOp&>(op);
             return " scalars=" + std::to_string(elementwise.scalars().size()) +
-                   " stores=" + std::to_string(elementwise.stores().size());
+                   " result=" + scalar_ref(elementwise.result());
         }
         case OpKind::ReductionKernel: {
             const auto& reduction = static_cast<const ReductionKernelOp&>(op);
@@ -312,10 +344,14 @@ const char* op_kind_name(OpKind kind) {
     return "?";
 }
 
-ValueId Graph::addValue(ValueType type, std::string debugName) {
+ValueId Graph::addValue(ValueType type, std::string debugName, DeviceId device) {
     auto id = nextValueId_++;
-    values_.push_back(Value{id, std::move(type), {}, {}, std::move(debugName)});
+    values_.push_back(Value{id, std::move(type), device, {}, {}, std::move(debugName)});
     return id;
+}
+
+ValueId Graph::addValue(ValueType type, DeviceId device) {
+    return addValue(std::move(type), "", device);
 }
 
 bool Graph::hasValue(ValueId id) const {
@@ -388,6 +424,9 @@ Result<void> Graph::verify() const {
         }
 
         if (auto result = current.verify(*this); !result) {
+            return result;
+        }
+        if (auto result = verify_device_placement(*this, current); !result) {
             return result;
         }
 
@@ -480,8 +519,8 @@ void Graph::dump() const {
     std::cout << "}\n";
 }
 
-InputOp::InputOp(OpId id, InputSource source, ValueId output)
-    : Op(id, OpKind::Input),
+InputOp::InputOp(OpId id, InputSource source, ValueId output, DeviceId device)
+    : Op(id, OpKind::Input, device),
       source_(std::move(source)),
       outputs_{output}
 {}
@@ -513,7 +552,7 @@ DeviceTransferOp::DeviceTransferOp(
     DeviceId targetDevice,
     ValueId input,
     ValueId output)
-    : Op(id, OpKind::DeviceTransfer),
+    : Op(id, OpKind::DeviceTransfer, sourceDevice),
       sourceDevice_(sourceDevice),
       targetDevice_(targetDevice),
       inputs_{input},
@@ -538,8 +577,9 @@ LayoutTransformOp::LayoutTransformOp(
     LayoutTransformKind transform,
     ValueId input,
     ValueId output,
-    std::vector<int64_t> dims)
-    : Op(id, OpKind::LayoutTransform),
+    std::vector<int64_t> dims,
+    DeviceId device)
+    : Op(id, OpKind::LayoutTransform, device),
       transform_(transform),
       inputs_{input},
       outputs_{output},
@@ -559,16 +599,16 @@ Result<void> LayoutTransformOp::verify(const Graph& graph) const {
 ElementwiseKernelOp::ElementwiseKernelOp(
     OpId id,
     std::vector<ElementwiseInput> elementwiseInputs,
-    std::vector<ValueId> outputs,
-    ValueId iterationValue,
+    ValueId output,
+    ScalarId result,
     std::vector<ScalarNode> scalars,
-    std::vector<ElementwiseStore> stores)
-    : Op(id, OpKind::ElementwiseKernel),
+    DeviceId device)
+    : Op(id, OpKind::ElementwiseKernel, device),
       elementwiseInputs_(std::move(elementwiseInputs)),
-      outputs_(std::move(outputs)),
-      iterationValue_(iterationValue),
-      scalars_(std::move(scalars)),
-      stores_(std::move(stores))
+      outputs_{output},
+      output_(output),
+      result_(result),
+      scalars_(std::move(scalars))
 {
     inputs_.reserve(elementwiseInputs_.size());
     for (const auto& input : elementwiseInputs_) {
@@ -580,25 +620,12 @@ std::span<const ValueId> ElementwiseKernelOp::inputs() const {
     return {inputs_.data(), inputs_.size()};
 }
 
-std::span<const ValueId> ElementwiseKernelOp::outputs() const {
-    return {outputs_.data(), outputs_.size()};
-}
-
 Result<void> ElementwiseKernelOp::verify(const Graph& graph) const {
-    if (outputs_.empty()) {
-        return make_error(op_ref(id()) + " elementwise kernel has no outputs");
-    }
-    if (stores_.empty()) {
-        return make_error(op_ref(id()) + " elementwise kernel has no stores");
-    }
     if (auto result = verify_values_exist(graph, inputs(), "input", *this); !result) {
         return result;
     }
     if (auto result = verify_values_exist(graph, outputs(), "output", *this); !result) {
         return result;
-    }
-    if (!graph.hasValue(iterationValue_)) {
-        return make_error(op_ref(id()) + " elementwise iteration value is invalid");
     }
 
     for (const auto& scalar : scalars_) {
@@ -612,13 +639,8 @@ Result<void> ElementwiseKernelOp::verify(const Graph& graph) const {
         }
     }
 
-    for (const auto& store : stores_) {
-        if (!span_contains(outputs(), store.output)) {
-            return make_error(op_ref(id()) + " store references non-output value");
-        }
-        if (!has_scalar(scalars_, store.value)) {
-            return make_error(op_ref(id()) + " store references invalid scalar");
-        }
+    if (!has_scalar(scalars_, result_)) {
+        return make_error(op_ref(id()) + " result references invalid scalar");
     }
 
     return {};
@@ -630,8 +652,9 @@ ReductionKernelOp::ReductionKernelOp(
     ValueId input,
     ValueId output,
     std::vector<int64_t> axes,
-    bool keepDims)
-    : Op(id, OpKind::ReductionKernel),
+    bool keepDims,
+    DeviceId device)
+    : Op(id, OpKind::ReductionKernel, device),
       reduce_(reduce),
       inputs_{input},
       outputs_{output},
@@ -655,8 +678,9 @@ MatMulKernelOp::MatMulKernelOp(
     ValueId rhs,
     ValueId output,
     bool transposeLhs,
-    bool transposeRhs)
-    : Op(id, OpKind::MatMulKernel),
+    bool transposeRhs,
+    DeviceId device)
+    : Op(id, OpKind::MatMulKernel, device),
       inputs_{lhs, rhs},
       outputs_{output},
       transposeLhs_(transposeLhs),
@@ -671,8 +695,9 @@ GatherKernelOp::GatherKernelOp(
     OpId id,
     ValueId ids,
     ValueId table,
-    ValueId output)
-    : Op(id, OpKind::GatherKernel),
+    ValueId output,
+    DeviceId device)
+    : Op(id, OpKind::GatherKernel, device),
       inputs_{ids, table},
       outputs_{output}
 {}
@@ -685,8 +710,9 @@ SoftmaxKernelOp::SoftmaxKernelOp(
     OpId id,
     ValueId input,
     ValueId output,
-    int64_t axis)
-    : Op(id, OpKind::SoftmaxKernel),
+    int64_t axis,
+    DeviceId device)
+    : Op(id, OpKind::SoftmaxKernel, device),
       inputs_{input},
       outputs_{output},
       axis_(axis)
@@ -701,8 +727,9 @@ NormKernelOp::NormKernelOp(
     NormKind norm,
     std::vector<ValueId> inputs,
     ValueId output,
-    double epsilon)
-    : Op(id, OpKind::NormKernel),
+    double epsilon,
+    DeviceId device)
+    : Op(id, OpKind::NormKernel, device),
       norm_(norm),
       inputs_(std::move(inputs)),
       outputs_{output},
@@ -739,8 +766,9 @@ RoPEKernelOp::RoPEKernelOp(
     ValueId output,
     double theta,
     int64_t rotaryDim,
-    bool splitHalf)
-    : Op(id, OpKind::RoPEKernel),
+    bool splitHalf,
+    DeviceId device)
+    : Op(id, OpKind::RoPEKernel, device),
       inputs_{input},
       outputs_{output},
       theta_(theta),
@@ -764,8 +792,9 @@ SlidingQueryKeyScoreKernelOp::SlidingQueryKeyScoreKernelOp(
     ValueId key,
     ValueId output,
     int64_t window,
-    double scale)
-    : Op(id, OpKind::SlidingQueryKeyScoreKernel),
+    double scale,
+    DeviceId device)
+    : Op(id, OpKind::SlidingQueryKeyScoreKernel, device),
       inputs_{query, key},
       outputs_{output},
       window_(window),
@@ -787,8 +816,9 @@ CustomKernelOp::CustomKernelOp(
     std::string customName,
     std::vector<ValueId> inputs,
     std::vector<ValueId> outputs,
-    mid_ir::AttrMap attrs)
-    : Op(id, OpKind::CustomKernel),
+    mid_ir::AttrMap attrs,
+    DeviceId device)
+    : Op(id, OpKind::CustomKernel, device),
       customName_(std::move(customName)),
       inputs_(std::move(inputs)),
       outputs_(std::move(outputs)),

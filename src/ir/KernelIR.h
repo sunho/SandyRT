@@ -45,6 +45,7 @@ struct Def {
 struct Value {
     ValueId id = 0;
     ValueType type;
+    DeviceId device = 0;
 
     Def def;
     std::vector<Use> uses;
@@ -73,11 +74,13 @@ class Graph;
 
 class Op {
 public:
-    Op(OpId id, OpKind kind) : id_(id), kind_(kind) {}
+    Op(OpId id, OpKind kind, DeviceId device = 0)
+        : id_(id), kind_(kind), device_(device) {}
     virtual ~Op() = default;
 
     OpId id() const { return id_; }
     OpKind kind() const { return kind_; }
+    DeviceId device() const { return device_; }
 
     virtual std::span<const ValueId> inputs() const = 0;
     virtual std::span<const ValueId> outputs() const = 0;
@@ -88,11 +91,13 @@ public:
 private:
     OpId id_;
     OpKind kind_;
+    DeviceId device_ = 0;
 };
 
 class Graph {
 public:
-    ValueId addValue(ValueType type, std::string debugName = "");
+    ValueId addValue(ValueType type, std::string debugName = "", DeviceId device = 0);
+    ValueId addValue(ValueType type, DeviceId device);
 
     template <class OpT, class... Args>
     OpT* addOp(Args&&... args) {
@@ -159,7 +164,7 @@ struct InputSource {
 
 class InputOp final : public Op {
 public:
-    InputOp(OpId id, InputSource source, ValueId output);
+    InputOp(OpId id, InputSource source, ValueId output, DeviceId device = 0);
 
     const InputSource& source() const { return source_; }
 
@@ -213,7 +218,8 @@ public:
         LayoutTransformKind transform,
         ValueId input,
         ValueId output,
-        std::vector<int64_t> dims);
+        std::vector<int64_t> dims,
+        DeviceId device = 0);
 
     LayoutTransformKind transform() const { return transform_; }
     const std::vector<int64_t>& dims() const { return dims_; }
@@ -276,30 +282,25 @@ struct ScalarNode {
     std::vector<ScalarId> operands;
 };
 
-struct ElementwiseStore {
-    ValueId output = 0;
-    ScalarId value = 0;
-};
-
 class ElementwiseKernelOp final : public Op {
 public:
     ElementwiseKernelOp(
         OpId id,
         std::vector<ElementwiseInput> elementwiseInputs,
-        std::vector<ValueId> outputs,
-        ValueId iterationValue,
+        ValueId output,
+        ScalarId result,
         std::vector<ScalarNode> scalars,
-        std::vector<ElementwiseStore> stores);
+        DeviceId device = 0);
 
     const std::vector<ElementwiseInput>& elementwiseInputs() const {
         return elementwiseInputs_;
     }
-    ValueId iterationValue() const { return iterationValue_; }
+    ValueId output() const { return output_; }
+    ScalarId result() const { return result_; }
     const std::vector<ScalarNode>& scalars() const { return scalars_; }
-    const std::vector<ElementwiseStore>& stores() const { return stores_; }
 
     std::span<const ValueId> inputs() const override;
-    std::span<const ValueId> outputs() const override;
+    std::span<const ValueId> outputs() const override { return outputs_; }
 
     const char* name() const override { return "elementwise_kernel"; }
     Result<void> verify(const Graph& graph) const override;
@@ -307,10 +308,10 @@ public:
 private:
     std::vector<ElementwiseInput> elementwiseInputs_;
     std::vector<ValueId> inputs_;
-    std::vector<ValueId> outputs_;
-    ValueId iterationValue_;
+    std::array<ValueId, 1> outputs_;
+    ValueId output_;
+    ScalarId result_;
     std::vector<ScalarNode> scalars_;
-    std::vector<ElementwiseStore> stores_;
 };
 
 enum class ReduceOp {
@@ -329,7 +330,8 @@ public:
         ValueId input,
         ValueId output,
         std::vector<int64_t> axes,
-        bool keepDims);
+        bool keepDims,
+        DeviceId device = 0);
 
     ReduceOp reduce() const { return reduce_; }
     const std::vector<int64_t>& axes() const { return axes_; }
@@ -357,7 +359,8 @@ public:
         ValueId rhs,
         ValueId output,
         bool transposeLhs,
-        bool transposeRhs);
+        bool transposeRhs,
+        DeviceId device = 0);
 
     bool transposeLhs() const { return transposeLhs_; }
     bool transposeRhs() const { return transposeRhs_; }
@@ -377,7 +380,12 @@ private:
 
 class GatherKernelOp final : public Op {
 public:
-    GatherKernelOp(OpId id, ValueId ids, ValueId table, ValueId output);
+    GatherKernelOp(
+        OpId id,
+        ValueId ids,
+        ValueId table,
+        ValueId output,
+        DeviceId device = 0);
 
     std::span<const ValueId> inputs() const override { return inputs_; }
     std::span<const ValueId> outputs() const override { return outputs_; }
@@ -392,7 +400,12 @@ private:
 
 class SoftmaxKernelOp final : public Op {
 public:
-    SoftmaxKernelOp(OpId id, ValueId input, ValueId output, int64_t axis);
+    SoftmaxKernelOp(
+        OpId id,
+        ValueId input,
+        ValueId output,
+        int64_t axis,
+        DeviceId device = 0);
 
     int64_t axis() const { return axis_; }
 
@@ -420,7 +433,8 @@ public:
         NormKind norm,
         std::vector<ValueId> inputs,
         ValueId output,
-        double epsilon);
+        double epsilon,
+        DeviceId device = 0);
 
     NormKind norm() const { return norm_; }
     double epsilon() const { return epsilon_; }
@@ -446,7 +460,8 @@ public:
         ValueId output,
         double theta,
         int64_t rotaryDim,
-        bool splitHalf);
+        bool splitHalf,
+        DeviceId device = 0);
 
     double theta() const { return theta_; }
     int64_t rotaryDim() const { return rotaryDim_; }
@@ -474,7 +489,8 @@ public:
         ValueId key,
         ValueId output,
         int64_t window,
-        double scale);
+        double scale,
+        DeviceId device = 0);
 
     int64_t window() const { return window_; }
     double scale() const { return scale_; }
@@ -499,7 +515,8 @@ public:
         std::string customName,
         std::vector<ValueId> inputs,
         std::vector<ValueId> outputs,
-        mid_ir::AttrMap attrs);
+        mid_ir::AttrMap attrs,
+        DeviceId device = 0);
 
     const std::string& customName() const { return customName_; }
     const mid_ir::AttrMap& attrs() const { return attrs_; }

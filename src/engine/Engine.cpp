@@ -1,5 +1,6 @@
 #include "Engine.h"
 
+#include "DeviceWiseCopier.h"
 #include "MidIRToKernelIR.h"
 #include "ShapeUtil.h"
 
@@ -8,6 +9,7 @@
 #include <span>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -17,6 +19,7 @@ namespace {
 
 using ir::kernel_ir::Graph;
 using ir::kernel_ir::DeviceTransferOp;
+using ir::kernel_ir::DeviceId;
 using ir::kernel_ir::InputOp;
 using ir::kernel_ir::InputSourceKind;
 using ir::kernel_ir::LayoutTransformKind;
@@ -33,6 +36,31 @@ Result<Device*> lookup_device(
     if (!devices[device])
         return make_error("null device: " + std::to_string(device));
     return devices[device].get();
+}
+
+Result<DeviceCompiledGraphId> lookup_device_graph(
+        const CompiledKernelGraph& compiled,
+        DeviceId device) {
+    auto it = compiled.deviceGraphs.find(device);
+    if (it != compiled.deviceGraphs.end())
+        return it->second;
+    if (device == compiled.device)
+        return compiled.deviceGraph;
+    return make_error("missing compiled device graph for device: " + std::to_string(device));
+}
+
+DeviceId default_runtime_device(const CompiledKernelGraph& compiled) {
+    if (compiled.deviceGraphs.empty())
+        return compiled.device;
+    return compiled.defaultDevice;
+}
+
+DeviceId runtime_op_device(
+        const CompiledKernelGraph& compiled,
+        const Op& op) {
+    if (compiled.deviceGraphs.empty())
+        return compiled.device;
+    return op.device();
 }
 
 Result<DeviceBufferId> lookup_runtime_buffer(
@@ -284,8 +312,14 @@ Result<void> dealloc_value(
 
 } // namespace
 
-Engine::Engine(std::vector<std::unique_ptr<Device>> devices)
-    : devices_(std::move(devices)) {}
+Engine::Engine(
+        std::vector<std::unique_ptr<Device>> devices,
+        std::unique_ptr<DeviceWiseCopier> copier)
+    : devices_(std::move(devices)),
+      copier_(std::move(copier)) {
+    if (!copier_)
+        copier_ = std::make_unique<HostBounceDeviceWiseCopier>();
+}
 
 Result<std::unique_ptr<CompiledKernelGraph>> Engine::compile(const ir::mid_ir::Graph& graph) {
     if (devices_.empty())
@@ -297,15 +331,35 @@ Result<std::unique_ptr<CompiledKernelGraph>> Engine::compile(const ir::mid_ir::G
 
     auto compiled = std::make_unique<CompiledKernelGraph>();
     compiled->graph = lowered.take();
-    compiled->device = 0;
+    compiled->defaultDevice = 0;
+    compiled->device = compiled->defaultDevice;
 
-    auto device = lookup_device(devices_, compiled->device);
-    if (!device)
-        return make_error(device.error());
-    auto deviceGraph = (*device)->compile(*compiled->graph);
-    if (!deviceGraph)
-        return make_error(deviceGraph.error());
-    compiled->deviceGraph = deviceGraph.take();
+    auto verify = compiled->graph->verify();
+    if (!verify)
+        return make_error(verify.error());
+
+    std::unordered_set<DeviceId> executableDevices;
+    for (const auto& opPtr : compiled->graph->ops()) {
+        const auto& op = *opPtr;
+        if (op.kind() == OpKind::Input || op.kind() == OpKind::DeviceTransfer)
+            continue;
+        executableDevices.insert(op.device());
+    }
+
+    for (auto deviceId : executableDevices) {
+        auto device = lookup_device(devices_, deviceId);
+        if (!device)
+            return make_error(device.error());
+        auto deviceGraph = (*device)->compile(*compiled->graph);
+        if (!deviceGraph)
+            return make_error(deviceGraph.error());
+        compiled->deviceGraphs[deviceId] = deviceGraph.take();
+    }
+
+    if (auto it = compiled->deviceGraphs.find(compiled->defaultDevice);
+        it != compiled->deviceGraphs.end()) {
+        compiled->deviceGraph = it->second;
+    }
     return compiled;
 }
 
@@ -319,10 +373,11 @@ Result<std::vector<TensorBufferPtr>> Engine::run(
     if (!compiled.graph)
         return make_error("compiled KernelIR graph is null");
 
-    auto deviceResult = lookup_device(devices_, compiled.device);
-    if (!deviceResult)
-        return make_error(deviceResult.error());
-    auto& device = **deviceResult;
+    auto graphDefaultDevice = default_runtime_device(compiled);
+    auto defaultDeviceResult = lookup_device(devices_, graphDefaultDevice);
+    if (!defaultDeviceResult)
+        return make_error(defaultDeviceResult.error());
+    auto& defaultDevice = **defaultDeviceResult;
     const auto& graph = *compiled.graph;
 
     std::unordered_map<ValueId, DeviceBufferId> buffers;
@@ -408,12 +463,12 @@ Result<std::vector<TensorBufferPtr>> Engine::run(
             if (!verify)
                 return make_error(verify.error());
 
-            auto loaded = device.load(*host);
+            auto loaded = defaultDevice.load(*host);
             if (!loaded)
                 return make_error(loaded.error());
             buffers[output] = loaded.take();
             descs[output] = host->desc();
-            bufferDevices[output] = compiled.device;
+            bufferDevices[output] = graphDefaultDevice;
 
             auto finish = finish_op_lifetimes(op);
             if (!finish)
@@ -442,14 +497,14 @@ Result<std::vector<TensorBufferPtr>> Engine::run(
                 return make_error("device transfer source does not match runtime value device");
             }
 
-            auto host = (*sourceDevice)->read(inputBuffer.take());
-            if (!host)
-                return make_error(host.error());
-            auto loaded = (*targetDevice)->load(**host);
+            auto loaded = copier_->copy(**sourceDevice, inputBuffer.take(), **targetDevice);
             if (!loaded)
                 return make_error(loaded.error());
             buffers[output] = loaded.take();
-            descs[output] = (*host)->desc();
+            auto desc = lookup_runtime_desc(descs, input);
+            if (!desc)
+                return make_error(desc.error());
+            descs[output] = desc.take();
             bufferDevices[output] = transfer.targetDevice();
 
             auto finish = finish_op_lifetimes(op);
@@ -457,6 +512,15 @@ Result<std::vector<TensorBufferPtr>> Engine::run(
                 return make_error(finish.error());
             continue;
         }
+
+        auto opDevice = runtime_op_device(compiled, op);
+        auto opDeviceResult = lookup_device(devices_, opDevice);
+        if (!opDeviceResult)
+            return make_error(opDeviceResult.error());
+        auto& device = **opDeviceResult;
+        auto deviceGraph = lookup_device_graph(compiled, opDevice);
+        if (!deviceGraph)
+            return make_error(deviceGraph.error());
 
         for (auto output : op.outputs()) {
             auto desc = resolve_output_desc(graph, op, output, descs);
@@ -468,7 +532,7 @@ Result<std::vector<TensorBufferPtr>> Engine::run(
                 return make_error(buffer.error());
             buffers[output] = buffer.take();
             descs[output] = std::move(descValue);
-            bufferDevices[output] = compiled.device;
+            bufferDevices[output] = opDevice;
         }
 
         std::vector<DeviceBufferId> inputBuffers;
@@ -480,7 +544,7 @@ Result<std::vector<TensorBufferPtr>> Engine::run(
             auto inputDeviceIt = bufferDevices.find(input);
             if (inputDeviceIt == bufferDevices.end())
                 return make_error("missing runtime device for value: " + std::to_string(input));
-            if (inputDeviceIt->second != compiled.device) {
+            if (inputDeviceIt->second != opDevice) {
                 return make_error("KernelIR op input is not on execution device");
             }
             inputBuffers.push_back(buffer.take());
@@ -496,15 +560,15 @@ Result<std::vector<TensorBufferPtr>> Engine::run(
         }
 
         auto start = std::chrono::steady_clock::now();
-        auto runResult = device.run(compiled.deviceGraph, op.id(), inputBuffers, outputBuffers);
+        auto runResult = device.run(*deviceGraph, op.id(), inputBuffers, outputBuffers);
         auto end = std::chrono::steady_clock::now();
         if (options && options->profileKernel) {
             auto elapsed = std::chrono::duration<double, std::milli>(end - start).count();
             options->profileKernel({
                 opIndex,
                 op.id(),
-                compiled.device,
-                compiled.deviceGraph,
+                opDevice,
+                *deviceGraph,
                 op.kind(),
                 inputBuffers.size(),
                 outputBuffers.size(),

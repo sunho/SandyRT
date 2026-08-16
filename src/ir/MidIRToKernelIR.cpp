@@ -191,15 +191,11 @@ Result<void> lower_constant(
             {},
         },
     };
-    std::vector<ElementwiseStore> stores = {
-        ElementwiseStore{outputId, 0},
-    };
     graph.addOp<ElementwiseKernelOp>(
         std::vector<ElementwiseInput>{},
-        std::vector<ValueId>{outputId},
         outputId,
-        std::move(scalars),
-        std::move(stores));
+        0,
+        std::move(scalars));
     return {};
 }
 
@@ -230,15 +226,11 @@ Result<void> lower_unary_elementwise(
         ScalarNode{0, ScalarOp::Load, op.operands[0]->dtype, 0, 0.0, {}},
         ScalarNode{1, unary_scalar_op(op.kind), op.results[0]->dtype, 0, 0.0, {0}},
     };
-    std::vector<ElementwiseStore> stores = {
-        ElementwiseStore{outputId, 1},
-    };
     graph.addOp<ElementwiseKernelOp>(
         std::move(inputs),
-        std::vector<ValueId>{outputId},
         outputId,
-        std::move(scalars),
-        std::move(stores));
+        1,
+        std::move(scalars));
     return {};
 }
 
@@ -279,15 +271,11 @@ Result<void> lower_binary_elementwise(
         ScalarNode{1, ScalarOp::Load, op.operands[1]->dtype, 1, 0.0, {}},
         ScalarNode{2, binary_scalar_op(op.kind), op.results[0]->dtype, 0, 0.0, {0, 1}},
     };
-    std::vector<ElementwiseStore> stores = {
-        ElementwiseStore{outputId, 2},
-    };
     graph.addOp<ElementwiseKernelOp>(
         std::move(inputs),
-        std::vector<ValueId>{outputId},
         outputId,
-        std::move(scalars),
-        std::move(stores));
+        2,
+        std::move(scalars));
     return {};
 }
 

@@ -259,15 +259,12 @@ TEST_F(CpuDeviceTest, CompileRejectsChainedUnaryElementwiseKernel) {
         std::vector<kir::ElementwiseInput>{
             kir::ElementwiseInput{input, kir::BroadcastMode::None},
         },
-        std::vector<kir::ValueId>{output},
         output,
+        2,
         std::vector<kir::ScalarNode>{
             kir::ScalarNode{0, kir::ScalarOp::Load, sandy::core::DType::F32, 0, 0.0, {}},
             kir::ScalarNode{1, kir::ScalarOp::Sqrt, sandy::core::DType::F32, 0, 0.0, {0}},
             kir::ScalarNode{2, kir::ScalarOp::Tanh, sandy::core::DType::F32, 0, 0.0, {1}},
-        },
-        std::vector<kir::ElementwiseStore>{
-            kir::ElementwiseStore{output, 2},
         });
     graph.setOutputs({output});
 
@@ -295,16 +292,13 @@ TEST_F(CpuDeviceTest, CompileRejectsChainedBinaryElementwiseKernel) {
             kir::ElementwiseInput{lhs, kir::BroadcastMode::None},
             kir::ElementwiseInput{rhs, kir::BroadcastMode::None},
         },
-        std::vector<kir::ValueId>{output},
         output,
+        3,
         std::vector<kir::ScalarNode>{
             kir::ScalarNode{0, kir::ScalarOp::Load, sandy::core::DType::F32, 0, 0.0, {}},
             kir::ScalarNode{1, kir::ScalarOp::Load, sandy::core::DType::F32, 1, 0.0, {}},
             kir::ScalarNode{2, kir::ScalarOp::Add, sandy::core::DType::F32, 0, 0.0, {0, 1}},
             kir::ScalarNode{3, kir::ScalarOp::Mul, sandy::core::DType::F32, 0, 0.0, {2, 1}},
-        },
-        std::vector<kir::ElementwiseStore>{
-            kir::ElementwiseStore{output, 3},
         });
     graph.setOutputs({output});
 

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Device.h"
+#include "DeviceWiseCopier.h"
 #include "EngineTypes.h"
 #include "KernelIR.h"
 #include "MidIR.h"
@@ -31,7 +32,9 @@ struct EngineRunOptions {
 
 class Engine {
 public:
-    explicit Engine(std::vector<std::unique_ptr<Device>> devices);
+    explicit Engine(
+        std::vector<std::unique_ptr<Device>> devices,
+        std::unique_ptr<DeviceWiseCopier> copier = nullptr);
 
     Result<std::unique_ptr<CompiledKernelGraph>> compile(const ir::mid_ir::Graph& graph);
 
@@ -43,6 +46,7 @@ public:
 
 private:
     std::vector<std::unique_ptr<Device>> devices_;
+    std::unique_ptr<DeviceWiseCopier> copier_;
 };
 
 } // namespace sandy::engine

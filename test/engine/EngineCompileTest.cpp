@@ -248,7 +248,8 @@ TEST_F(EngineCompileTest, RunExecutesDeviceTransferThroughHost) {
         input);
     auto output = graph->addValue(
         ValueType{ValueKind::Tensor, sandy::core::DType::F32, sandy::core::Shape({1})},
-        "x_on_device_1");
+        "x_on_device_1",
+        1);
     graph->addOp<DeviceTransferOp>(0, 1, input, output);
     graph->setOutputs({output});
 
@@ -282,6 +283,75 @@ TEST_F(EngineCompileTest, RunExecutesDeviceTransferThroughHost) {
     EXPECT_TRUE(second->runs.empty());
     EXPECT_EQ(second->reads, std::vector<sandy::engine::DeviceBufferId>({200}));
     EXPECT_EQ(second->deallocs, std::vector<sandy::engine::DeviceBufferId>({200}));
+}
+
+TEST_F(EngineCompileTest, RunExecutesKernelOnDeviceSelectedByTransferredInput) {
+    using namespace sandy::ir::kernel_ir;
+
+    auto graph = std::make_unique<Graph>();
+    auto input = graph->addValue(
+        ValueType{ValueKind::Tensor, sandy::core::DType::F32, sandy::core::Shape({1})},
+        "x");
+    graph->addOp<InputOp>(
+        InputSource{InputSourceKind::Argument, 0, ""},
+        input);
+
+    auto transferred = graph->addValue(
+        ValueType{ValueKind::Tensor, sandy::core::DType::F32, sandy::core::Shape({1})},
+        "x_on_device_1",
+        1);
+    graph->addOp<DeviceTransferOp>(0, 1, input, transferred);
+
+    auto output = graph->addValue(
+        ValueType{ValueKind::Tensor, sandy::core::DType::F32, sandy::core::Shape({1})},
+        "out",
+        1);
+    auto* elementwise = graph->addOp<ElementwiseKernelOp>(
+        std::vector<ElementwiseInput>{ElementwiseInput{transferred, BroadcastMode::None}},
+        output,
+        1,
+        std::vector<ScalarNode>{
+            ScalarNode{0, ScalarOp::Load, sandy::core::DType::F32, 0, 0.0, {}},
+            ScalarNode{1, ScalarOp::Tanh, sandy::core::DType::F32, 0, 0.0, {0}},
+        },
+        1);
+    graph->setOutputs({output});
+
+    auto verify = graph->verify();
+    ASSERT_TRUE(verify) << verify.error();
+
+    sandy::engine::CompiledKernelGraph compiled;
+    compiled.graph = std::move(graph);
+    compiled.defaultDevice = 0;
+    compiled.device = 0;
+    compiled.deviceGraphs[1] = 900;
+
+    FakeDevice* first = nullptr;
+    FakeDevice* second = nullptr;
+    auto engine = make_two_device_engine(&first, &second);
+
+    std::vector<sandy::engine::TensorBufferPtr> inputs;
+    inputs.push_back(std::make_shared<FakeTensorBuffer>(
+        sandy::core::TensorDesc("x", sandy::core::Shape({1}), sandy::core::DType::F32)));
+    sandy::engine::TensorMap weights;
+
+    auto outputsResult = engine.run(compiled, inputs, weights);
+    ASSERT_TRUE(outputsResult) << outputsResult.error();
+    ASSERT_EQ(outputsResult->size(), 1u);
+
+    EXPECT_TRUE(first->runs.empty());
+    EXPECT_EQ(first->reads, std::vector<sandy::engine::DeviceBufferId>({200}));
+    EXPECT_EQ(first->deallocs, std::vector<sandy::engine::DeviceBufferId>({200}));
+
+    ASSERT_EQ(second->allocDescs.size(), 1u);
+    EXPECT_EQ(second->allocDescs[0].shape, sandy::core::Shape({1}));
+    ASSERT_EQ(second->runs.size(), 1u);
+    EXPECT_EQ(second->runs[0].graph, 900u);
+    EXPECT_EQ(second->runs[0].op, elementwise->id());
+    EXPECT_EQ(second->runs[0].inputs, std::vector<sandy::engine::DeviceBufferId>({200}));
+    EXPECT_EQ(second->runs[0].outputs, std::vector<sandy::engine::DeviceBufferId>({201}));
+    EXPECT_EQ(second->reads, std::vector<sandy::engine::DeviceBufferId>({201}));
+    EXPECT_EQ(second->deallocs, std::vector<sandy::engine::DeviceBufferId>({200, 201}));
 }
 
 TEST_F(EngineCompileTest, RunReportsProfileEventsForKernels) {

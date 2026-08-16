@@ -4,6 +4,13 @@ project(SandyCompiler LANGUAGES CXX C)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+option(SANDY_ENABLE_CUDA "Build Sandy CUDA backend" OFF)
+
+if(SANDY_ENABLE_CUDA)
+  enable_language(CUDA)
+  find_package(CUDAToolkit REQUIRED)
+endif()
+
 add_subdirectory(external/json)
 add_subdirectory(src/core)
 add_subdirectory(src/ir)
