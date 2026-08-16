@@ -1,35 +1,23 @@
 #pragma once
 
+#include "DeviceTypes.h"
 #include "KernelIR.h"
-#include "TensorBuffer.h"
 
 #include <cstdint>
 #include <memory>
-#include <string>
 #include <unordered_map>
-#include <vector>
 
 namespace sandy::engine {
 
 struct RunOptions {};
 
-using DeviceBufferId = uint32_t;
-using DeviceCompiledGraphId = uint32_t;
-using DeviceProgramId = DeviceCompiledGraphId;
-
-using TensorBufferPtr = std::shared_ptr<core::TensorBuffer>;
-using TensorMap = std::unordered_map<std::string, TensorBufferPtr>;
-
-struct TensorViewDesc {
-    core::TensorDesc desc;
-    std::vector<int64_t> strides;
-    int64_t storageOffset = 0;
-};
-
-struct DeviceTensorView {
-    DeviceBufferId buffer = 0;
-    TensorViewDesc view;
-};
+using device::DeviceBufferId;
+using device::DeviceCompiledGraphId;
+using device::DeviceProgramId;
+using device::DeviceTensorView;
+using device::TensorBufferPtr;
+using device::TensorMap;
+using device::TensorViewDesc;
 
 struct CompiledKernelGraph {
     std::unique_ptr<ir::kernel_ir::Graph> graph;

@@ -184,8 +184,8 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
-        std::vector<std::unique_ptr<sandy::engine::Device>> devices;
-        devices.push_back(std::make_unique<sandy::engine::CpuDevice>());
+        std::vector<std::unique_ptr<sandy::device::Device>> devices;
+        devices.push_back(std::make_unique<sandy::device::CpuDevice>());
         sandy::engine::Engine engine(std::move(devices));
         auto planResult = engine.compile(**midResult);
         if (!planResult) {

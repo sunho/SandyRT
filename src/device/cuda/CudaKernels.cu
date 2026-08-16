@@ -1,6 +1,6 @@
 #include "CudaKernels.h"
 
-namespace sandy::engine {
+namespace sandy::device {
 
 namespace {
 
@@ -124,4 +124,4 @@ Result<void> launch_cuda_custom(
     return unimplemented(program.customName.empty() ? "custom" : program.customName.c_str());
 }
 
-} // namespace sandy::engine
+} // namespace sandy::device

@@ -15,6 +15,10 @@
 
 namespace sandy::engine {
 
+using device::Device;
+using device::DeviceWiseCopier;
+using device::HostBounceDeviceWiseCopier;
+
 namespace {
 
 using ir::kernel_ir::Graph;

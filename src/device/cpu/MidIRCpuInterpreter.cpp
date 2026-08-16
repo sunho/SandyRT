@@ -3,7 +3,7 @@
 #include <string>
 #include <vector>
 
-namespace sandy::engine::debug {
+namespace sandy::device::debug {
 
 namespace {
 
@@ -158,4 +158,4 @@ Result<void> runMidIROpOnCpu(
     return make_error("debug MidIR CPU interpreter cannot run unknown op kind");
 }
 
-} // namespace sandy::engine::debug
+} // namespace sandy::device::debug

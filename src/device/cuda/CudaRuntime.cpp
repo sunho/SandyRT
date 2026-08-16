@@ -1,6 +1,6 @@
 #include "CudaRuntime.h"
 
-namespace sandy::engine {
+namespace sandy::device {
 
 Result<void> cuda_check(cudaError_t status, const std::string& context) {
     if (status == cudaSuccess)
@@ -8,4 +8,4 @@ Result<void> cuda_check(cudaError_t status, const std::string& context) {
     return make_error(context + ": " + cudaGetErrorString(status));
 }
 
-} // namespace sandy::engine
+} // namespace sandy::device

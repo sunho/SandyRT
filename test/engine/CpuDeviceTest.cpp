@@ -61,8 +61,8 @@ float read_f32(std::span<const uint8_t> bytes, size_t index) {
 }
 
 void expect_f32_output(
-        sandy::engine::CpuDevice& device,
-        sandy::engine::DeviceBufferId buffer,
+        sandy::device::CpuDevice& device,
+        sandy::device::DeviceBufferId buffer,
         std::initializer_list<float> expected) {
     auto read = device.read(buffer);
     ASSERT_TRUE(read) << read.error();
@@ -88,12 +88,12 @@ sandy::ir::kernel_ir::ValueType tensor_type(
     };
 }
 
-sandy::engine::DeviceTensorView tensor_view(
-        sandy::engine::CpuDevice& device,
-        sandy::engine::DeviceBufferId buffer,
+sandy::device::DeviceTensorView tensor_view(
+        sandy::device::CpuDevice& device,
+        sandy::device::DeviceBufferId buffer,
         sandy::core::TensorDesc desc) {
     auto view = device.defaultView(std::move(desc));
-    return sandy::engine::DeviceTensorView{
+    return sandy::device::DeviceTensorView{
         buffer,
         view.take(),
     };
@@ -102,7 +102,7 @@ sandy::engine::DeviceTensorView tensor_view(
 } // namespace
 
 TEST_F(CpuDeviceTest, LoadReadAndDeallocBuffer) {
-    sandy::engine::CpuDevice device;
+    sandy::device::CpuDevice device;
     auto host = make_f32_buffer("x", sandy::core::Shape({2}), {1.0f, 2.0f});
 
     auto loaded = device.load(*host);
@@ -116,7 +116,7 @@ TEST_F(CpuDeviceTest, LoadReadAndDeallocBuffer) {
 }
 
 TEST_F(CpuDeviceTest, DefaultViewRejectsDynamicShape) {
-    sandy::engine::CpuDevice device;
+    sandy::device::CpuDevice device;
     auto view = device.defaultView(
         sandy::core::TensorDesc(sandy::core::Shape({sandy::core::Shape::kDynamic, 2}),
                                 sandy::core::DType::F32));
@@ -132,7 +132,7 @@ TEST_F(CpuDeviceTest, RunReshapeF32) {
     sandy::ir::mid_ir::Value* graphOutputs[] = {out};
     builder.setOutputs(graphOutputs);
 
-    sandy::engine::CpuDevice device;
+    sandy::device::CpuDevice device;
     auto kernelGraph = sandy::ir::kernel_ir::lowerMidIRToKernelIR(graph);
     ASSERT_TRUE(kernelGraph) << kernelGraph.error();
     auto op = (*kernelGraph)->value((*kernelGraph)->outputs()[0]).def.op;
@@ -148,10 +148,10 @@ TEST_F(CpuDeviceTest, RunReshapeF32) {
     auto outBuffer = device.alloc(sandy::core::TensorDesc(out->shape, out->dtype));
     ASSERT_TRUE(outBuffer) << outBuffer.error();
 
-    std::vector<sandy::engine::DeviceTensorView> inputs = {
+    std::vector<sandy::device::DeviceTensorView> inputs = {
         tensor_view(device, *xBuffer, xHost->desc()),
     };
-    std::vector<sandy::engine::DeviceTensorView> outputs = {
+    std::vector<sandy::device::DeviceTensorView> outputs = {
         tensor_view(device, *outBuffer, sandy::core::TensorDesc(out->shape, out->dtype)),
     };
     auto run = device.run(*compiled, op, inputs, outputs);
@@ -171,7 +171,7 @@ TEST_F(CpuDeviceTest, RunAddF32) {
     sandy::ir::mid_ir::Value* graphOutputs[] = {out};
     builder.setOutputs(graphOutputs);
 
-    sandy::engine::CpuDevice device;
+    sandy::device::CpuDevice device;
     auto kernelGraph = sandy::ir::kernel_ir::lowerMidIRToKernelIR(graph);
     ASSERT_TRUE(kernelGraph) << kernelGraph.error();
     auto op = (*kernelGraph)->value((*kernelGraph)->outputs()[0]).def.op;
@@ -187,11 +187,11 @@ TEST_F(CpuDeviceTest, RunAddF32) {
     auto outBuffer = device.alloc(sandy::core::TensorDesc(out->shape, out->dtype));
     ASSERT_TRUE(outBuffer) << outBuffer.error();
 
-    std::vector<sandy::engine::DeviceTensorView> inputs = {
+    std::vector<sandy::device::DeviceTensorView> inputs = {
         tensor_view(device, *lhsBuffer, lhsHost->desc()),
         tensor_view(device, *rhsBuffer, rhsHost->desc()),
     };
-    std::vector<sandy::engine::DeviceTensorView> outputs = {
+    std::vector<sandy::device::DeviceTensorView> outputs = {
         tensor_view(device, *outBuffer, sandy::core::TensorDesc(out->shape, out->dtype)),
     };
     auto run = device.run(*compiled, op, inputs, outputs);
@@ -213,7 +213,7 @@ TEST_F(CpuDeviceTest, RunLinearF32) {
     sandy::ir::mid_ir::Value* graphOutputs[] = {out};
     builder.setOutputs(graphOutputs);
 
-    sandy::engine::CpuDevice device;
+    sandy::device::CpuDevice device;
     auto kernelGraph = sandy::ir::kernel_ir::lowerMidIRToKernelIR(graph);
     ASSERT_TRUE(kernelGraph) << kernelGraph.error();
     auto op = (*kernelGraph)->value((*kernelGraph)->outputs()[0]).def.op;
@@ -232,12 +232,12 @@ TEST_F(CpuDeviceTest, RunLinearF32) {
     auto outBuffer = device.alloc(sandy::core::TensorDesc(out->shape, out->dtype));
     ASSERT_TRUE(outBuffer) << outBuffer.error();
 
-    std::vector<sandy::engine::DeviceTensorView> inputs = {
+    std::vector<sandy::device::DeviceTensorView> inputs = {
         tensor_view(device, *xBuffer, xHost->desc()),
         tensor_view(device, *weightBuffer, weightHost->desc()),
         tensor_view(device, *biasBuffer, biasHost->desc()),
     };
-    std::vector<sandy::engine::DeviceTensorView> outputs = {
+    std::vector<sandy::device::DeviceTensorView> outputs = {
         tensor_view(device, *outBuffer, sandy::core::TensorDesc(out->shape, out->dtype)),
     };
     auto run = device.run(*compiled, op, inputs, outputs);
@@ -258,7 +258,7 @@ TEST_F(CpuDeviceTest, RunTanhF32) {
     sandy::ir::mid_ir::Value* graphOutputs[] = {out};
     builder.setOutputs(graphOutputs);
 
-    sandy::engine::CpuDevice device;
+    sandy::device::CpuDevice device;
     auto kernelGraph = sandy::ir::kernel_ir::lowerMidIRToKernelIR(graph);
     ASSERT_TRUE(kernelGraph) << kernelGraph.error();
     auto op = (*kernelGraph)->value((*kernelGraph)->outputs()[0]).def.op;
@@ -271,10 +271,10 @@ TEST_F(CpuDeviceTest, RunTanhF32) {
     auto outBuffer = device.alloc(sandy::core::TensorDesc(out->shape, out->dtype));
     ASSERT_TRUE(outBuffer) << outBuffer.error();
 
-    std::vector<sandy::engine::DeviceTensorView> inputs = {
+    std::vector<sandy::device::DeviceTensorView> inputs = {
         tensor_view(device, *xBuffer, xHost->desc()),
     };
-    std::vector<sandy::engine::DeviceTensorView> outputs = {
+    std::vector<sandy::device::DeviceTensorView> outputs = {
         tensor_view(device, *outBuffer, sandy::core::TensorDesc(out->shape, out->dtype)),
     };
     auto run = device.run(*compiled, op, inputs, outputs);
@@ -307,7 +307,7 @@ TEST_F(CpuDeviceTest, CompileRejectsChainedUnaryElementwiseKernel) {
         });
     graph.setOutputs({output});
 
-    sandy::engine::CpuDevice device;
+    sandy::device::CpuDevice device;
     auto compiled = device.compile(graph);
     EXPECT_FALSE(compiled);
     EXPECT_NE(compiled.error().find("unary kernel must be a single op"), std::string::npos);
@@ -341,7 +341,7 @@ TEST_F(CpuDeviceTest, CompileRejectsChainedBinaryElementwiseKernel) {
         });
     graph.setOutputs({output});
 
-    sandy::engine::CpuDevice device;
+    sandy::device::CpuDevice device;
     auto compiled = device.compile(graph);
     EXPECT_FALSE(compiled);
     EXPECT_NE(compiled.error().find("binary kernel must be a single op"), std::string::npos);
@@ -373,7 +373,7 @@ TEST_F(CpuDeviceTest, DebugMidIRCpuInterpreterRunsOldPerOpDispatch) {
 
     std::vector<sandy::core::TensorRef> inputs = {*lhsRef, *rhsRef};
     std::vector<sandy::core::MutableTensorRef> outputs = {*outRef};
-    auto run = sandy::engine::debug::runMidIROpOnCpu(*out->def, inputs, outputs);
+    auto run = sandy::device::debug::runMidIROpOnCpu(*out->def, inputs, outputs);
     ASSERT_TRUE(run) << run.error();
 
     EXPECT_FLOAT_EQ(read_f32(outBytes, 0), 4.0f);

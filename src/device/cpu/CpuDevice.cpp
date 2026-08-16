@@ -11,7 +11,7 @@
 #include <utility>
 #include <vector>
 
-namespace sandy::engine {
+namespace sandy::device {
 
 namespace {
 
@@ -483,4 +483,4 @@ Result<void> CpuDevice::run(
     return make_error("cpu device cannot run unknown op kind");
 }
 
-} // namespace sandy::engine
+} // namespace sandy::device

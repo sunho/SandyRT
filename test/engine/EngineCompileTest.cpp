@@ -26,9 +26,9 @@ private:
     std::span<const uint8_t> data() const override { return {}; }
 };
 
-class FakeDevice final : public sandy::engine::Device {
+class FakeDevice final : public sandy::device::Device {
 public:
-    Result<sandy::engine::DeviceCompiledGraphId> compile(
+    Result<sandy::device::DeviceCompiledGraphId> compile(
             const sandy::ir::kernel_ir::Graph& graph) override {
         compiledOpKinds.clear();
         compiledOutputs = graph.outputs();
@@ -39,20 +39,20 @@ public:
         return nextGraphId++;
     }
 
-    Result<sandy::engine::DeviceBufferId> alloc(sandy::core::TensorDesc desc) override {
+    Result<sandy::device::DeviceBufferId> alloc(sandy::core::TensorDesc desc) override {
         allocDescs.push_back(desc);
         auto id = nextBufferId++;
         bufferDescs[id] = std::move(desc);
         return id;
     }
 
-    Result<void> dealloc(sandy::engine::DeviceBufferId buffer) override {
+    Result<void> dealloc(sandy::device::DeviceBufferId buffer) override {
         deallocs.push_back(buffer);
         bufferDescs.erase(buffer);
         return {};
     }
 
-    Result<sandy::engine::DeviceBufferId> load(sandy::core::TensorBuffer& src) override {
+    Result<sandy::device::DeviceBufferId> load(sandy::core::TensorBuffer& src) override {
         loads.push_back(src.desc());
         auto id = nextBufferId++;
         bufferDescs[id] = src.desc();
@@ -60,15 +60,15 @@ public:
     }
 
     Result<void> run(
-            sandy::engine::DeviceCompiledGraphId graph,
+            sandy::device::DeviceCompiledGraphId graph,
             sandy::ir::kernel_ir::OpId op,
-            std::span<const sandy::engine::DeviceTensorView> inputs,
-            std::span<const sandy::engine::DeviceTensorView> outputs) override {
-        std::vector<sandy::engine::DeviceBufferId> inputBuffers;
+            std::span<const sandy::device::DeviceTensorView> inputs,
+            std::span<const sandy::device::DeviceTensorView> outputs) override {
+        std::vector<sandy::device::DeviceBufferId> inputBuffers;
         inputBuffers.reserve(inputs.size());
         for (const auto& input : inputs)
             inputBuffers.push_back(input.buffer);
-        std::vector<sandy::engine::DeviceBufferId> outputBuffers;
+        std::vector<sandy::device::DeviceBufferId> outputBuffers;
         outputBuffers.reserve(outputs.size());
         for (const auto& output : outputs)
             outputBuffers.push_back(output.buffer);
@@ -82,7 +82,7 @@ public:
     }
 
     Result<sandy::engine::TensorBufferPtr> read(
-            sandy::engine::DeviceTensorView src) override {
+            sandy::device::DeviceTensorView src) override {
         reads.push_back(src.buffer);
         auto it = bufferDescs.find(src.buffer);
         if (it == bufferDescs.end())
@@ -93,23 +93,23 @@ public:
     }
 
     struct RunCall {
-        sandy::engine::DeviceCompiledGraphId graph = 0;
+        sandy::device::DeviceCompiledGraphId graph = 0;
         sandy::ir::kernel_ir::OpId op = 0;
-        std::vector<sandy::engine::DeviceBufferId> inputs;
-        std::vector<sandy::engine::DeviceBufferId> outputs;
+        std::vector<sandy::device::DeviceBufferId> inputs;
+        std::vector<sandy::device::DeviceBufferId> outputs;
     };
 
     bool failCompile = false;
-    sandy::engine::DeviceCompiledGraphId nextGraphId = 100;
-    sandy::engine::DeviceBufferId nextBufferId = 200;
+    sandy::device::DeviceCompiledGraphId nextGraphId = 100;
+    sandy::device::DeviceBufferId nextBufferId = 200;
     std::vector<sandy::ir::kernel_ir::OpKind> compiledOpKinds;
     std::vector<sandy::ir::kernel_ir::ValueId> compiledOutputs;
     std::vector<sandy::core::TensorDesc> allocDescs;
-    std::vector<sandy::engine::DeviceBufferId> deallocs;
+    std::vector<sandy::device::DeviceBufferId> deallocs;
     std::vector<sandy::core::TensorDesc> loads;
     std::vector<RunCall> runs;
-    std::vector<sandy::engine::DeviceBufferId> reads;
-    std::unordered_map<sandy::engine::DeviceBufferId, sandy::core::TensorDesc> bufferDescs;
+    std::vector<sandy::device::DeviceBufferId> reads;
+    std::unordered_map<sandy::device::DeviceBufferId, sandy::core::TensorDesc> bufferDescs;
 };
 
 class EngineCompileTest : public ::testing::Test {
@@ -122,7 +122,7 @@ protected:
 sandy::engine::Engine make_engine(FakeDevice** fakePtr) {
     auto fake = std::make_unique<FakeDevice>();
     *fakePtr = fake.get();
-    std::vector<std::unique_ptr<sandy::engine::Device>> devices;
+    std::vector<std::unique_ptr<sandy::device::Device>> devices;
     devices.push_back(std::move(fake));
     return sandy::engine::Engine(std::move(devices));
 }
@@ -132,7 +132,7 @@ sandy::engine::Engine make_two_device_engine(FakeDevice** firstPtr, FakeDevice**
     auto second = std::make_unique<FakeDevice>();
     *firstPtr = first.get();
     *secondPtr = second.get();
-    std::vector<std::unique_ptr<sandy::engine::Device>> devices;
+    std::vector<std::unique_ptr<sandy::device::Device>> devices;
     devices.push_back(std::move(first));
     devices.push_back(std::move(second));
     return sandy::engine::Engine(std::move(devices));
@@ -176,7 +176,7 @@ TEST_F(EngineCompileTest, CompileFailsWithoutDevices) {
     auto* x = builder.createInput(0, sandy::core::Shape({1}), sandy::core::DType::F32);
     builder.setOutputs(std::span<sandy::ir::mid_ir::Value* const>(&x, 1));
 
-    sandy::engine::Engine engine(std::vector<std::unique_ptr<sandy::engine::Device>>{});
+    sandy::engine::Engine engine(std::vector<std::unique_ptr<sandy::device::Device>>{});
 
     auto result = engine.compile(graph);
     EXPECT_FALSE(result);
@@ -193,7 +193,7 @@ TEST_F(EngineCompileTest, CompilePropagatesDeviceCompileFailure) {
 
     auto fake = std::make_unique<FakeDevice>();
     fake->failCompile = true;
-    std::vector<std::unique_ptr<sandy::engine::Device>> devices;
+    std::vector<std::unique_ptr<sandy::device::Device>> devices;
     devices.push_back(std::move(fake));
     sandy::engine::Engine engine(std::move(devices));
 
@@ -239,11 +239,11 @@ TEST_F(EngineCompileTest, RunExecutesKernelGraphWithFakeDevice) {
     ASSERT_EQ(fakePtr->runs.size(), 1u);
     EXPECT_EQ(fakePtr->runs[0].graph, 100u);
     EXPECT_EQ(fakePtr->runs[0].op, 2u);
-    EXPECT_EQ(fakePtr->runs[0].inputs, std::vector<sandy::engine::DeviceBufferId>({200, 201}));
-    EXPECT_EQ(fakePtr->runs[0].outputs, std::vector<sandy::engine::DeviceBufferId>({202}));
+    EXPECT_EQ(fakePtr->runs[0].inputs, std::vector<sandy::device::DeviceBufferId>({200, 201}));
+    EXPECT_EQ(fakePtr->runs[0].outputs, std::vector<sandy::device::DeviceBufferId>({202}));
 
-    EXPECT_EQ(fakePtr->reads, std::vector<sandy::engine::DeviceBufferId>({202}));
-    EXPECT_EQ(fakePtr->deallocs, std::vector<sandy::engine::DeviceBufferId>({200, 201, 202}));
+    EXPECT_EQ(fakePtr->reads, std::vector<sandy::device::DeviceBufferId>({202}));
+    EXPECT_EQ(fakePtr->deallocs, std::vector<sandy::device::DeviceBufferId>({200, 201, 202}));
 }
 
 TEST_F(EngineCompileTest, RunReshapeUsesDeviceTensorViewWithoutKernelLaunch) {
@@ -272,8 +272,8 @@ TEST_F(EngineCompileTest, RunReshapeUsesDeviceTensorViewWithoutKernelLaunch) {
     ASSERT_EQ(fakePtr->loads.size(), 1u);
     EXPECT_TRUE(fakePtr->allocDescs.empty());
     EXPECT_TRUE(fakePtr->runs.empty());
-    EXPECT_EQ(fakePtr->reads, std::vector<sandy::engine::DeviceBufferId>({200}));
-    EXPECT_EQ(fakePtr->deallocs, std::vector<sandy::engine::DeviceBufferId>({200}));
+    EXPECT_EQ(fakePtr->reads, std::vector<sandy::device::DeviceBufferId>({200}));
+    EXPECT_EQ(fakePtr->deallocs, std::vector<sandy::device::DeviceBufferId>({200}));
 }
 
 TEST_F(EngineCompileTest, RunPermuteUsesDeviceTensorViewWithoutKernelLaunch) {
@@ -303,8 +303,8 @@ TEST_F(EngineCompileTest, RunPermuteUsesDeviceTensorViewWithoutKernelLaunch) {
     ASSERT_EQ(fakePtr->loads.size(), 1u);
     EXPECT_TRUE(fakePtr->allocDescs.empty());
     EXPECT_TRUE(fakePtr->runs.empty());
-    EXPECT_EQ(fakePtr->reads, std::vector<sandy::engine::DeviceBufferId>({200}));
-    EXPECT_EQ(fakePtr->deallocs, std::vector<sandy::engine::DeviceBufferId>({200}));
+    EXPECT_EQ(fakePtr->reads, std::vector<sandy::device::DeviceBufferId>({200}));
+    EXPECT_EQ(fakePtr->deallocs, std::vector<sandy::device::DeviceBufferId>({200}));
 }
 
 TEST_F(EngineCompileTest, RunExecutesDeviceTransferThroughHost) {
@@ -346,14 +346,14 @@ TEST_F(EngineCompileTest, RunExecutesDeviceTransferThroughHost) {
     ASSERT_EQ(outputsResult->size(), 1u);
 
     EXPECT_EQ(first->loads.size(), 1u);
-    EXPECT_EQ(first->reads, std::vector<sandy::engine::DeviceBufferId>({200}));
-    EXPECT_EQ(first->deallocs, std::vector<sandy::engine::DeviceBufferId>({200}));
+    EXPECT_EQ(first->reads, std::vector<sandy::device::DeviceBufferId>({200}));
+    EXPECT_EQ(first->deallocs, std::vector<sandy::device::DeviceBufferId>({200}));
 
     EXPECT_EQ(second->loads.size(), 1u);
     EXPECT_EQ(second->loads[0].name, "x");
     EXPECT_TRUE(second->runs.empty());
-    EXPECT_EQ(second->reads, std::vector<sandy::engine::DeviceBufferId>({200}));
-    EXPECT_EQ(second->deallocs, std::vector<sandy::engine::DeviceBufferId>({200}));
+    EXPECT_EQ(second->reads, std::vector<sandy::device::DeviceBufferId>({200}));
+    EXPECT_EQ(second->deallocs, std::vector<sandy::device::DeviceBufferId>({200}));
 }
 
 TEST_F(EngineCompileTest, RunExecutesKernelOnDeviceSelectedByTransferredInput) {
@@ -411,18 +411,18 @@ TEST_F(EngineCompileTest, RunExecutesKernelOnDeviceSelectedByTransferredInput) {
     ASSERT_EQ(outputsResult->size(), 1u);
 
     EXPECT_TRUE(first->runs.empty());
-    EXPECT_EQ(first->reads, std::vector<sandy::engine::DeviceBufferId>({200}));
-    EXPECT_EQ(first->deallocs, std::vector<sandy::engine::DeviceBufferId>({200}));
+    EXPECT_EQ(first->reads, std::vector<sandy::device::DeviceBufferId>({200}));
+    EXPECT_EQ(first->deallocs, std::vector<sandy::device::DeviceBufferId>({200}));
 
     ASSERT_EQ(second->allocDescs.size(), 1u);
     EXPECT_EQ(second->allocDescs[0].shape, sandy::core::Shape({1}));
     ASSERT_EQ(second->runs.size(), 1u);
     EXPECT_EQ(second->runs[0].graph, 900u);
     EXPECT_EQ(second->runs[0].op, elementwise->id());
-    EXPECT_EQ(second->runs[0].inputs, std::vector<sandy::engine::DeviceBufferId>({200}));
-    EXPECT_EQ(second->runs[0].outputs, std::vector<sandy::engine::DeviceBufferId>({201}));
-    EXPECT_EQ(second->reads, std::vector<sandy::engine::DeviceBufferId>({201}));
-    EXPECT_EQ(second->deallocs, std::vector<sandy::engine::DeviceBufferId>({200, 201}));
+    EXPECT_EQ(second->runs[0].inputs, std::vector<sandy::device::DeviceBufferId>({200}));
+    EXPECT_EQ(second->runs[0].outputs, std::vector<sandy::device::DeviceBufferId>({201}));
+    EXPECT_EQ(second->reads, std::vector<sandy::device::DeviceBufferId>({201}));
+    EXPECT_EQ(second->deallocs, std::vector<sandy::device::DeviceBufferId>({200, 201}));
 }
 
 TEST_F(EngineCompileTest, RunReportsProfileEventsForKernels) {
@@ -444,9 +444,9 @@ TEST_F(EngineCompileTest, RunReportsProfileEventsForKernels) {
         sandy::core::TensorDesc("x", sandy::core::Shape({1}), sandy::core::DType::F32)));
     sandy::engine::TensorMap weights;
 
-    std::vector<sandy::engine::InvocProfileEvent> events;
+    std::vector<sandy::engine::EngineProfileEvent> events;
     sandy::engine::EngineRunOptions options;
-    options.profileKernel = [&](const sandy::engine::InvocProfileEvent& event) {
+    options.profileKernel = [&](const sandy::engine::EngineProfileEvent& event) {
         events.push_back(event);
     };
 

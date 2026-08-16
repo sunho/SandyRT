@@ -1,6 +1,6 @@
 #include "DeviceWiseCopier.h"
 
-namespace sandy::engine {
+namespace sandy::device {
 
 Result<DeviceTensorView> HostBounceDeviceWiseCopier::copy(
         Device& sourceDevice,
@@ -21,4 +21,4 @@ Result<DeviceTensorView> HostBounceDeviceWiseCopier::copy(
     };
 }
 
-} // namespace sandy::engine
+} // namespace sandy::device

@@ -9,7 +9,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace sandy::engine {
+namespace sandy::device {
 
 class CpuDevice final : public Device {
 public:
@@ -71,4 +71,4 @@ private:
     std::unordered_map<DeviceCompiledGraphId, CpuDeviceGraph> graphs_;
 };
 
-} // namespace sandy::engine
+} // namespace sandy::device

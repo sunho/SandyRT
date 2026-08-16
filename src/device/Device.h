@@ -1,6 +1,6 @@
 #pragma once
 
-#include "EngineTypes.h"
+#include "DeviceTypes.h"
 #include "KernelIR.h"
 #include "Result.h"
 #include "Tensor.h"
@@ -10,7 +10,7 @@
 #include <span>
 #include <vector>
 
-namespace sandy::engine {
+namespace sandy::device {
 
 class Device {
 public:
@@ -36,4 +36,4 @@ public:
     virtual Result<TensorBufferPtr> read(DeviceTensorView src) = 0;
 };
 
-} // namespace sandy::engine
+} // namespace sandy::device

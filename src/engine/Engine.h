@@ -15,7 +15,7 @@
 
 namespace sandy::engine {
 
-struct InvocProfileEvent {
+struct EngineProfileEvent {
     size_t opIndex = 0;
     ir::kernel_ir::OpId op = 0;
     uint32_t device = 0;
@@ -27,14 +27,14 @@ struct InvocProfileEvent {
 };
 
 struct EngineRunOptions {
-    std::function<void(const InvocProfileEvent&)> profileKernel;
+    std::function<void(const EngineProfileEvent&)> profileKernel;
 };
 
 class Engine {
 public:
     explicit Engine(
-        std::vector<std::unique_ptr<Device>> devices,
-        std::unique_ptr<DeviceWiseCopier> copier = nullptr);
+        std::vector<std::unique_ptr<device::Device>> devices,
+        std::unique_ptr<device::DeviceWiseCopier> copier = nullptr);
 
     Result<std::unique_ptr<CompiledKernelGraph>> compile(const ir::mid_ir::Graph& graph);
 
@@ -45,8 +45,8 @@ public:
         const EngineRunOptions* options = nullptr);
 
 private:
-    std::vector<std::unique_ptr<Device>> devices_;
-    std::unique_ptr<DeviceWiseCopier> copier_;
+    std::vector<std::unique_ptr<device::Device>> devices_;
+    std::unique_ptr<device::DeviceWiseCopier> copier_;
 };
 
 } // namespace sandy::engine

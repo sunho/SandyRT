@@ -6,8 +6,8 @@
 
 #include <string>
 
-namespace sandy::engine {
+namespace sandy::device {
 
 Result<void> cuda_check(cudaError_t status, const std::string& context);
 
-} // namespace sandy::engine
+} // namespace sandy::device

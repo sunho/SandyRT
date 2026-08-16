@@ -3,7 +3,7 @@
 #include <utility>
 #include <vector>
 
-namespace sandy::engine {
+namespace sandy::device {
 
 Result<std::vector<int64_t>> Device::defaultStrides(const core::Shape& shape) const {
     if (shape.has_dynamic())
@@ -37,4 +37,4 @@ Result<bool> Device::isDefaultView(const TensorViewDesc& view) const {
     return view.storageOffset == 0 && view.strides == *strides;
 }
 
-} // namespace sandy::engine
+} // namespace sandy::device

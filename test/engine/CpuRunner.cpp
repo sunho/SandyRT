@@ -433,9 +433,9 @@ int main(int argc, char* argv[]) {
     midGraph->dump();
     printStage("dump_mid_ir");
 
-    printf("[7/8] compiling cpu invocation plan\n");
-    std::vector<std::unique_ptr<sandy::engine::Device>> devices;
-    devices.push_back(std::make_unique<sandy::engine::CpuDevice>());
+    printf("[7/8] compiling cpu kernel graph\n");
+    std::vector<std::unique_ptr<sandy::device::Device>> devices;
+    devices.push_back(std::make_unique<sandy::device::CpuDevice>());
     sandy::engine::Engine engine(std::move(devices));
     auto graphResult = engine.compile(*midGraph);
     if (!graphResult) {
@@ -457,7 +457,7 @@ int main(int argc, char* argv[]) {
     int64_t profileKernelCount = 0;
     double profileTotalMs = 0.0;
     if (instrument) {
-        runOptions.profileKernel = [&](const sandy::engine::InvocProfileEvent& event) {
+        runOptions.profileKernel = [&](const sandy::engine::EngineProfileEvent& event) {
             profileKernelCount++;
             profileTotalMs += event.elapsedMs;
             auto key = static_cast<int>(event.opKind);

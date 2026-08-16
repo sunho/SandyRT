@@ -1,10 +1,9 @@
 #pragma once
 
 #include "Device.h"
-#include "EngineTypes.h"
 #include "Result.h"
 
-namespace sandy::engine {
+namespace sandy::device {
 
 class DeviceWiseCopier {
 public:
@@ -24,4 +23,4 @@ public:
         Device& target) override;
 };
 
-} // namespace sandy::engine
+} // namespace sandy::device

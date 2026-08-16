@@ -13,7 +13,7 @@
 #include <variant>
 #include <vector>
 
-namespace sandy::engine {
+namespace sandy::device {
 
 class CudaDevice final : public Device {
 public:
@@ -78,4 +78,4 @@ private:
     std::unordered_map<DeviceCompiledGraphId, CudaDeviceGraph> graphs_;
 };
 
-} // namespace sandy::engine
+} // namespace sandy::device

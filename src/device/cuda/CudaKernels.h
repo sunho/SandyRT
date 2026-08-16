@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CudaRuntime.h"
+#include "DeviceTypes.h"
 #include "KernelIR.h"
 #include "Result.h"
 #include "Tensor.h"
@@ -12,7 +13,7 @@
 #include <string>
 #include <vector>
 
-namespace sandy::engine {
+namespace sandy::device {
 
 struct CudaDeviceBufferView {
     void* data = nullptr;
@@ -114,4 +115,4 @@ Result<void> launch_cuda_custom(
     const CudaLaunchContext& context,
     const CudaCustomProgram& program);
 
-} // namespace sandy::engine
+} // namespace sandy::device

@@ -70,8 +70,8 @@ private:
 };
 
 sandy::engine::Engine make_cpu_engine() {
-    std::vector<std::unique_ptr<sandy::engine::Device>> devices;
-    devices.push_back(std::make_unique<sandy::engine::CpuDevice>());
+    std::vector<std::unique_ptr<sandy::device::Device>> devices;
+    devices.push_back(std::make_unique<sandy::device::CpuDevice>());
     return sandy::engine::Engine(std::move(devices));
 }
 

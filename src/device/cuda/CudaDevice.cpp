@@ -5,7 +5,7 @@
 #include <span>
 #include <utility>
 
-namespace sandy::engine {
+namespace sandy::device {
 
 namespace {
 
@@ -411,4 +411,4 @@ Result<TensorBufferPtr> CudaDevice::read(DeviceBufferId src) {
     return read(DeviceTensorView{src, view.take()});
 }
 
-} // namespace sandy::engine
+} // namespace sandy::device
