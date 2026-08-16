@@ -1,4 +1,5 @@
 #include "CpuDevice.h"
+#include "MidIRToKernelIR.h"
 #include "MidIR.h"
 
 #include <gtest/gtest.h>
@@ -76,6 +77,16 @@ void expect_f32_output(
     }
 }
 
+sandy::ir::kernel_ir::ValueType tensor_type(
+        sandy::core::Shape shape,
+        sandy::core::DType dtype = sandy::core::DType::F32) {
+    return sandy::ir::kernel_ir::ValueType{
+        sandy::ir::kernel_ir::ValueKind::Tensor,
+        dtype,
+        std::move(shape),
+    };
+}
+
 } // namespace
 
 TEST_F(CpuDeviceTest, LoadReadAndDeallocBuffer) {
@@ -97,10 +108,15 @@ TEST_F(CpuDeviceTest, RunReshapeF32) {
     sandy::ir::mid_ir::Builder builder(graph);
     auto* x = builder.createInput(0, sandy::core::Shape({2, 3}), sandy::core::DType::F32);
     auto* out = builder.createReshape(x, {3, 2});
+    sandy::ir::mid_ir::Value* graphOutputs[] = {out};
+    builder.setOutputs(graphOutputs);
 
     sandy::engine::CpuDevice device;
-    auto program = device.compile(*out->def);
-    ASSERT_TRUE(program) << program.error();
+    auto kernelGraph = sandy::ir::kernel_ir::lowerMidIRToKernelIR(graph);
+    ASSERT_TRUE(kernelGraph) << kernelGraph.error();
+    auto op = (*kernelGraph)->value((*kernelGraph)->outputs()[0]).def.op;
+    auto compiled = device.compile(**kernelGraph);
+    ASSERT_TRUE(compiled) << compiled.error();
 
     auto xHost = make_f32_buffer("x", sandy::core::Shape({2, 3}), {
         1.0f, 2.0f, 3.0f,
@@ -113,10 +129,12 @@ TEST_F(CpuDeviceTest, RunReshapeF32) {
 
     std::vector<sandy::engine::DeviceBufferId> inputs = {*xBuffer};
     std::vector<sandy::engine::DeviceBufferId> outputs = {*outBuffer};
-    auto run = device.run(*program, inputs, outputs);
+    auto run = device.run(*compiled, op, inputs, outputs);
     ASSERT_TRUE(run) << run.error();
 
     expect_f32_output(device, *outBuffer, {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f});
+    EXPECT_TRUE(device.dealloc(*xBuffer));
+    EXPECT_TRUE(device.dealloc(*outBuffer));
 }
 
 TEST_F(CpuDeviceTest, RunAddF32) {
@@ -125,10 +143,15 @@ TEST_F(CpuDeviceTest, RunAddF32) {
     auto* lhs = builder.createInput(0, sandy::core::Shape({2}), sandy::core::DType::F32);
     auto* rhs = builder.createInput(1, sandy::core::Shape({2}), sandy::core::DType::F32);
     auto* out = builder.createAdd(lhs, rhs);
+    sandy::ir::mid_ir::Value* graphOutputs[] = {out};
+    builder.setOutputs(graphOutputs);
 
     sandy::engine::CpuDevice device;
-    auto program = device.compile(*out->def);
-    ASSERT_TRUE(program) << program.error();
+    auto kernelGraph = sandy::ir::kernel_ir::lowerMidIRToKernelIR(graph);
+    ASSERT_TRUE(kernelGraph) << kernelGraph.error();
+    auto op = (*kernelGraph)->value((*kernelGraph)->outputs()[0]).def.op;
+    auto compiled = device.compile(**kernelGraph);
+    ASSERT_TRUE(compiled) << compiled.error();
 
     auto lhsHost = make_f32_buffer("lhs", sandy::core::Shape({2}), {1.0f, 2.0f});
     auto rhsHost = make_f32_buffer("rhs", sandy::core::Shape({2}), {3.0f, 4.0f});
@@ -141,10 +164,13 @@ TEST_F(CpuDeviceTest, RunAddF32) {
 
     std::vector<sandy::engine::DeviceBufferId> inputs = {*lhsBuffer, *rhsBuffer};
     std::vector<sandy::engine::DeviceBufferId> outputs = {*outBuffer};
-    auto run = device.run(*program, inputs, outputs);
+    auto run = device.run(*compiled, op, inputs, outputs);
     ASSERT_TRUE(run) << run.error();
 
     expect_f32_output(device, *outBuffer, {4.0f, 6.0f});
+    EXPECT_TRUE(device.dealloc(*lhsBuffer));
+    EXPECT_TRUE(device.dealloc(*rhsBuffer));
+    EXPECT_TRUE(device.dealloc(*outBuffer));
 }
 
 TEST_F(CpuDeviceTest, RunLinearF32) {
@@ -154,10 +180,15 @@ TEST_F(CpuDeviceTest, RunLinearF32) {
     auto* weight = builder.createWeight("w", sandy::core::Shape({2, 2}), sandy::core::DType::F32);
     auto* bias = builder.createWeight("b", sandy::core::Shape({2}), sandy::core::DType::F32);
     auto* out = builder.createLinear(x, weight, bias);
+    sandy::ir::mid_ir::Value* graphOutputs[] = {out};
+    builder.setOutputs(graphOutputs);
 
     sandy::engine::CpuDevice device;
-    auto program = device.compile(*out->def);
-    ASSERT_TRUE(program) << program.error();
+    auto kernelGraph = sandy::ir::kernel_ir::lowerMidIRToKernelIR(graph);
+    ASSERT_TRUE(kernelGraph) << kernelGraph.error();
+    auto op = (*kernelGraph)->value((*kernelGraph)->outputs()[0]).def.op;
+    auto compiled = device.compile(**kernelGraph);
+    ASSERT_TRUE(compiled) << compiled.error();
 
     auto xHost = make_f32_buffer("x", sandy::core::Shape({1, 2}), {1.0f, 2.0f});
     auto weightHost = make_f32_buffer("w", sandy::core::Shape({2, 2}), {3.0f, 4.0f, 5.0f, 6.0f});
@@ -173,10 +204,14 @@ TEST_F(CpuDeviceTest, RunLinearF32) {
 
     std::vector<sandy::engine::DeviceBufferId> inputs = {*xBuffer, *weightBuffer, *biasBuffer};
     std::vector<sandy::engine::DeviceBufferId> outputs = {*outBuffer};
-    auto run = device.run(*program, inputs, outputs);
+    auto run = device.run(*compiled, op, inputs, outputs);
     ASSERT_TRUE(run) << run.error();
 
     expect_f32_output(device, *outBuffer, {18.0f, 25.0f});
+    EXPECT_TRUE(device.dealloc(*xBuffer));
+    EXPECT_TRUE(device.dealloc(*weightBuffer));
+    EXPECT_TRUE(device.dealloc(*biasBuffer));
+    EXPECT_TRUE(device.dealloc(*outBuffer));
 }
 
 TEST_F(CpuDeviceTest, RunTanhF32) {
@@ -184,10 +219,15 @@ TEST_F(CpuDeviceTest, RunTanhF32) {
     sandy::ir::mid_ir::Builder builder(graph);
     auto* x = builder.createInput(0, sandy::core::Shape({2}), sandy::core::DType::F32);
     auto* out = builder.createTanh(x);
+    sandy::ir::mid_ir::Value* graphOutputs[] = {out};
+    builder.setOutputs(graphOutputs);
 
     sandy::engine::CpuDevice device;
-    auto program = device.compile(*out->def);
-    ASSERT_TRUE(program) << program.error();
+    auto kernelGraph = sandy::ir::kernel_ir::lowerMidIRToKernelIR(graph);
+    ASSERT_TRUE(kernelGraph) << kernelGraph.error();
+    auto op = (*kernelGraph)->value((*kernelGraph)->outputs()[0]).def.op;
+    auto compiled = device.compile(**kernelGraph);
+    ASSERT_TRUE(compiled) << compiled.error();
 
     auto xHost = make_f32_buffer("x", sandy::core::Shape({2}), {0.0f, 1.0f});
     auto xBuffer = device.load(*xHost);
@@ -197,8 +237,78 @@ TEST_F(CpuDeviceTest, RunTanhF32) {
 
     std::vector<sandy::engine::DeviceBufferId> inputs = {*xBuffer};
     std::vector<sandy::engine::DeviceBufferId> outputs = {*outBuffer};
-    auto run = device.run(*program, inputs, outputs);
+    auto run = device.run(*compiled, op, inputs, outputs);
     ASSERT_TRUE(run) << run.error();
 
     expect_f32_output(device, *outBuffer, {0.0f, std::tanh(1.0f)});
+    EXPECT_TRUE(device.dealloc(*xBuffer));
+    EXPECT_TRUE(device.dealloc(*outBuffer));
+}
+
+TEST_F(CpuDeviceTest, CompileRejectsChainedUnaryElementwiseKernel) {
+    namespace kir = sandy::ir::kernel_ir;
+
+    kir::Graph graph;
+    auto input = graph.addValue(tensor_type({2}));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 0, ""},
+        input);
+    auto output = graph.addValue(tensor_type({2}));
+    graph.addOp<kir::ElementwiseKernelOp>(
+        std::vector<kir::ElementwiseInput>{
+            kir::ElementwiseInput{input, kir::BroadcastMode::None},
+        },
+        std::vector<kir::ValueId>{output},
+        output,
+        std::vector<kir::ScalarNode>{
+            kir::ScalarNode{0, kir::ScalarOp::Load, sandy::core::DType::F32, 0, 0.0, {}},
+            kir::ScalarNode{1, kir::ScalarOp::Sqrt, sandy::core::DType::F32, 0, 0.0, {0}},
+            kir::ScalarNode{2, kir::ScalarOp::Tanh, sandy::core::DType::F32, 0, 0.0, {1}},
+        },
+        std::vector<kir::ElementwiseStore>{
+            kir::ElementwiseStore{output, 2},
+        });
+    graph.setOutputs({output});
+
+    sandy::engine::CpuDevice device;
+    auto compiled = device.compile(graph);
+    EXPECT_FALSE(compiled);
+    EXPECT_NE(compiled.error().find("unary kernel must be a single op"), std::string::npos);
+}
+
+TEST_F(CpuDeviceTest, CompileRejectsChainedBinaryElementwiseKernel) {
+    namespace kir = sandy::ir::kernel_ir;
+
+    kir::Graph graph;
+    auto lhs = graph.addValue(tensor_type({2}));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 0, ""},
+        lhs);
+    auto rhs = graph.addValue(tensor_type({2}));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 1, ""},
+        rhs);
+    auto output = graph.addValue(tensor_type({2}));
+    graph.addOp<kir::ElementwiseKernelOp>(
+        std::vector<kir::ElementwiseInput>{
+            kir::ElementwiseInput{lhs, kir::BroadcastMode::None},
+            kir::ElementwiseInput{rhs, kir::BroadcastMode::None},
+        },
+        std::vector<kir::ValueId>{output},
+        output,
+        std::vector<kir::ScalarNode>{
+            kir::ScalarNode{0, kir::ScalarOp::Load, sandy::core::DType::F32, 0, 0.0, {}},
+            kir::ScalarNode{1, kir::ScalarOp::Load, sandy::core::DType::F32, 1, 0.0, {}},
+            kir::ScalarNode{2, kir::ScalarOp::Add, sandy::core::DType::F32, 0, 0.0, {0, 1}},
+            kir::ScalarNode{3, kir::ScalarOp::Mul, sandy::core::DType::F32, 0, 0.0, {2, 1}},
+        },
+        std::vector<kir::ElementwiseStore>{
+            kir::ElementwiseStore{output, 3},
+        });
+    graph.setOutputs({output});
+
+    sandy::engine::CpuDevice device;
+    auto compiled = device.compile(graph);
+    EXPECT_FALSE(compiled);
+    EXPECT_NE(compiled.error().find("binary kernel must be a single op"), std::string::npos);
 }

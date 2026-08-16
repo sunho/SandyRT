@@ -2,7 +2,7 @@
 
 #include "Device.h"
 #include "EngineTypes.h"
-#include "InvocPlan.h"
+#include "KernelIR.h"
 #include "MidIR.h"
 #include "Result.h"
 
@@ -15,11 +15,11 @@
 namespace sandy::engine {
 
 struct InvocProfileEvent {
-    size_t instructionIndex = 0;
-    InvocProgramId program = 0;
-    InvocDeviceId device = 0;
-    DeviceProgramId deviceProgram = 0;
-    ir::mid_ir::OpKind opKind = ir::mid_ir::OpKind::NUM_KINDS;
+    size_t opIndex = 0;
+    ir::kernel_ir::OpId op = 0;
+    uint32_t device = 0;
+    DeviceCompiledGraphId deviceGraph = 0;
+    ir::kernel_ir::OpKind opKind = ir::kernel_ir::OpKind::Input;
     size_t inputCount = 0;
     size_t outputCount = 0;
     double elapsedMs = 0.0;
@@ -33,10 +33,10 @@ class Engine {
 public:
     explicit Engine(std::vector<std::unique_ptr<Device>> devices);
 
-    Result<std::unique_ptr<InvocPlan>> compile(const ir::mid_ir::Graph& graph);
+    Result<std::unique_ptr<CompiledKernelGraph>> compile(const ir::mid_ir::Graph& graph);
 
     Result<std::vector<TensorBufferPtr>> run(
-        const InvocPlan& plan,
+        const CompiledKernelGraph& compiled,
         std::span<TensorBufferPtr const> inputs,
         const TensorMap& weights,
         const EngineRunOptions* options = nullptr);

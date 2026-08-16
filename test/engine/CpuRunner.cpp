@@ -437,13 +437,13 @@ int main(int argc, char* argv[]) {
     std::vector<std::unique_ptr<sandy::engine::Device>> devices;
     devices.push_back(std::make_unique<sandy::engine::CpuDevice>());
     sandy::engine::Engine engine(std::move(devices));
-    auto planResult = engine.compile(*midGraph);
-    if (!planResult) {
-        fprintf(stderr, "plan error: %s\n", planResult.error().c_str());
+    auto graphResult = engine.compile(*midGraph);
+    if (!graphResult) {
+        fprintf(stderr, "compile error: %s\n", graphResult.error().c_str());
         return 1;
     }
-    auto plan = planResult.take();
-    printStage("compile_invocation_plan");
+    auto compiledGraph = graphResult.take();
+    printStage("compile_kernel_ir_graph");
 
     std::vector<sandy::engine::TensorBufferPtr> inputBuffers;
     sandy::engine::TensorMap weightMap;
@@ -451,7 +451,7 @@ int main(int argc, char* argv[]) {
     add_tensors_to_map(*weights, weightMap);
     printStage("prepare_runtime_maps");
 
-    printf("[8/8] invocation plan runs\n");
+    printf("[8/8] KernelIR graph runs\n");
     sandy::engine::EngineRunOptions runOptions;
     std::unordered_map<int, ProfileStat> profileStats;
     int64_t profileKernelCount = 0;
@@ -466,11 +466,11 @@ int main(int argc, char* argv[]) {
             stat.totalMs += event.elapsedMs;
             if (event.elapsedMs > stat.maxMs)
                 stat.maxMs = event.elapsedMs;
-            printf("[profile] instr=%zu program=%u device=%u op=%s inputs=%zu outputs=%zu time_ms=%.3f\n",
-                   event.instructionIndex,
-                   event.program,
+            printf("[profile] op_index=%zu op_id=%u device=%u kind=%s inputs=%zu outputs=%zu time_ms=%.3f\n",
+                   event.opIndex,
+                   event.op,
                    event.device,
-                   sandy::ir::mid_ir::op_kind_name(event.opKind),
+                   sandy::ir::kernel_ir::op_kind_name(event.opKind),
                    event.inputCount,
                    event.outputCount,
                    event.elapsedMs);
@@ -479,7 +479,7 @@ int main(int argc, char* argv[]) {
 
     auto engineRunStart = Clock::now();
     auto runResult = engine.run(
-        *plan,
+        *compiledGraph,
         inputBuffers,
         weightMap,
         instrument ? &runOptions : nullptr);

@@ -1,5 +1,6 @@
 #include "Device.h"
 #include "Engine.h"
+#include "KernelIR.h"
 #include "MidIR.h"
 
 #include <gtest/gtest.h>
@@ -8,6 +9,7 @@
 #include <memory>
 #include <span>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -26,59 +28,78 @@ private:
 
 class FakeDevice final : public sandy::engine::Device {
 public:
-    Result<sandy::engine::DeviceProgramId> compile(const sandy::ir::mid_ir::Op& op) override {
-        compiledOps.push_back(&op);
+    Result<sandy::engine::DeviceCompiledGraphId> compile(
+            const sandy::ir::kernel_ir::Graph& graph) override {
+        compiledOpKinds.clear();
+        compiledOutputs = graph.outputs();
+        for (const auto& op : graph.ops())
+            compiledOpKinds.push_back(op->kind());
         if (failCompile)
             return make_error("fake compile failed");
-        return nextProgramId++;
+        return nextGraphId++;
     }
 
     Result<sandy::engine::DeviceBufferId> alloc(sandy::core::TensorDesc desc) override {
-        allocDescs.push_back(std::move(desc));
-        return nextBufferId++;
+        allocDescs.push_back(desc);
+        auto id = nextBufferId++;
+        bufferDescs[id] = std::move(desc);
+        return id;
     }
 
     Result<void> dealloc(sandy::engine::DeviceBufferId buffer) override {
         deallocs.push_back(buffer);
+        bufferDescs.erase(buffer);
         return {};
     }
 
     Result<sandy::engine::DeviceBufferId> load(sandy::core::TensorBuffer& src) override {
         loads.push_back(src.desc());
-        return nextBufferId++;
+        auto id = nextBufferId++;
+        bufferDescs[id] = src.desc();
+        return id;
     }
 
     Result<void> run(
-            sandy::engine::DeviceProgramId program,
+            sandy::engine::DeviceCompiledGraphId graph,
+            sandy::ir::kernel_ir::OpId op,
             std::span<const sandy::engine::DeviceBufferId> inputs,
             std::span<const sandy::engine::DeviceBufferId> outputs) override {
-        runs.push_back({program, std::vector<sandy::engine::DeviceBufferId>(inputs.begin(), inputs.end()),
-                        std::vector<sandy::engine::DeviceBufferId>(outputs.begin(), outputs.end())});
+        runs.push_back({
+            graph,
+            op,
+            std::vector<sandy::engine::DeviceBufferId>(inputs.begin(), inputs.end()),
+            std::vector<sandy::engine::DeviceBufferId>(outputs.begin(), outputs.end()),
+        });
         return {};
     }
 
     Result<sandy::engine::TensorBufferPtr> read(sandy::engine::DeviceBufferId src) override {
         reads.push_back(src);
-        sandy::engine::TensorBufferPtr buffer = std::make_shared<FakeTensorBuffer>(
-            sandy::core::TensorDesc(sandy::core::Shape({1}), sandy::core::DType::F32));
+        auto it = bufferDescs.find(src);
+        if (it == bufferDescs.end())
+            return make_error("fake buffer not found");
+        sandy::engine::TensorBufferPtr buffer = std::make_shared<FakeTensorBuffer>(it->second);
         return buffer;
     }
 
     struct RunCall {
-        sandy::engine::DeviceProgramId program = 0;
+        sandy::engine::DeviceCompiledGraphId graph = 0;
+        sandy::ir::kernel_ir::OpId op = 0;
         std::vector<sandy::engine::DeviceBufferId> inputs;
         std::vector<sandy::engine::DeviceBufferId> outputs;
     };
 
     bool failCompile = false;
-    sandy::engine::DeviceProgramId nextProgramId = 100;
+    sandy::engine::DeviceCompiledGraphId nextGraphId = 100;
     sandy::engine::DeviceBufferId nextBufferId = 200;
-    std::vector<const sandy::ir::mid_ir::Op*> compiledOps;
+    std::vector<sandy::ir::kernel_ir::OpKind> compiledOpKinds;
+    std::vector<sandy::ir::kernel_ir::ValueId> compiledOutputs;
     std::vector<sandy::core::TensorDesc> allocDescs;
     std::vector<sandy::engine::DeviceBufferId> deallocs;
     std::vector<sandy::core::TensorDesc> loads;
     std::vector<RunCall> runs;
     std::vector<sandy::engine::DeviceBufferId> reads;
+    std::unordered_map<sandy::engine::DeviceBufferId, sandy::core::TensorDesc> bufferDescs;
 };
 
 class EngineCompileTest : public ::testing::Test {
@@ -88,9 +109,17 @@ protected:
     }
 };
 
+sandy::engine::Engine make_engine(FakeDevice** fakePtr) {
+    auto fake = std::make_unique<FakeDevice>();
+    *fakePtr = fake.get();
+    std::vector<std::unique_ptr<sandy::engine::Device>> devices;
+    devices.push_back(std::move(fake));
+    return sandy::engine::Engine(std::move(devices));
+}
+
 } // namespace
 
-TEST_F(EngineCompileTest, CompileStoresDeviceProgramsInInvocPlan) {
+TEST_F(EngineCompileTest, CompileLowersAndCompilesKernelGraph) {
     sandy::ir::mid_ir::Graph graph;
     sandy::ir::mid_ir::Builder builder(graph);
     auto* x = builder.createInput(0, sandy::core::Shape({1, 2}), sandy::core::DType::F32);
@@ -100,38 +129,24 @@ TEST_F(EngineCompileTest, CompileStoresDeviceProgramsInInvocPlan) {
     sandy::ir::mid_ir::Value* outputs[] = {out};
     builder.setOutputs(outputs);
 
-    auto fake = std::make_unique<FakeDevice>();
-    auto* fakePtr = fake.get();
-    std::vector<std::unique_ptr<sandy::engine::Device>> devices;
-    devices.push_back(std::move(fake));
-    sandy::engine::Engine engine(std::move(devices));
+    FakeDevice* fakePtr = nullptr;
+    auto engine = make_engine(&fakePtr);
 
-    auto planResult = engine.compile(graph);
-    ASSERT_TRUE(planResult) << planResult.error();
-    auto plan = planResult.take();
+    auto compiledResult = engine.compile(graph);
+    ASSERT_TRUE(compiledResult) << compiledResult.error();
+    auto compiled = compiledResult.take();
 
-    ASSERT_EQ(fakePtr->compiledOps.size(), 3u);
-    EXPECT_EQ(fakePtr->compiledOps[0], reshaped->def);
-    EXPECT_EQ(fakePtr->compiledOps[1], tanh->def);
-    EXPECT_EQ(fakePtr->compiledOps[2], out->def);
-
-    ASSERT_EQ(plan->programs.size(), 3u);
-    EXPECT_EQ(plan->programs[0].id, 0u);
-    EXPECT_EQ(plan->programs[0].device, 0u);
-    EXPECT_EQ(plan->programs[0].deviceProgram, 100u);
-    EXPECT_EQ(plan->programs[0].opKind, sandy::ir::mid_ir::OpKind::Reshape);
-    EXPECT_EQ(plan->programs[1].id, 1u);
-    EXPECT_EQ(plan->programs[1].device, 0u);
-    EXPECT_EQ(plan->programs[1].deviceProgram, 101u);
-    EXPECT_EQ(plan->programs[1].opKind, sandy::ir::mid_ir::OpKind::Tanh);
-    EXPECT_EQ(plan->programs[2].id, 2u);
-    EXPECT_EQ(plan->programs[2].device, 0u);
-    EXPECT_EQ(plan->programs[2].deviceProgram, 102u);
-    EXPECT_EQ(plan->programs[2].opKind, sandy::ir::mid_ir::OpKind::ReLU);
-
-    EXPECT_EQ(plan->outputs, std::vector<sandy::engine::InvocValueId>({3}));
-    ASSERT_FALSE(plan->instructions.empty());
-    EXPECT_EQ(plan->instructions.back().kind, sandy::engine::InvocInstructionKind::StoreOutputs);
+    EXPECT_EQ(compiled->device, 0u);
+    EXPECT_EQ(compiled->deviceGraph, 100u);
+    EXPECT_EQ(fakePtr->compiledOpKinds, std::vector<sandy::ir::kernel_ir::OpKind>({
+        sandy::ir::kernel_ir::OpKind::Input,
+        sandy::ir::kernel_ir::OpKind::LayoutTransform,
+        sandy::ir::kernel_ir::OpKind::ElementwiseKernel,
+        sandy::ir::kernel_ir::OpKind::ElementwiseKernel,
+    }));
+    EXPECT_EQ(fakePtr->compiledOutputs, std::vector<sandy::ir::kernel_ir::ValueId>({3}));
+    ASSERT_NE(compiled->graph, nullptr);
+    EXPECT_EQ(compiled->graph->outputs(), std::vector<sandy::ir::kernel_ir::ValueId>({3}));
 }
 
 TEST_F(EngineCompileTest, CompileFailsWithoutDevices) {
@@ -142,9 +157,9 @@ TEST_F(EngineCompileTest, CompileFailsWithoutDevices) {
 
     sandy::engine::Engine engine(std::vector<std::unique_ptr<sandy::engine::Device>>{});
 
-    auto planResult = engine.compile(graph);
-    EXPECT_FALSE(planResult);
-    EXPECT_NE(planResult.error().find("no devices"), std::string::npos);
+    auto result = engine.compile(graph);
+    EXPECT_FALSE(result);
+    EXPECT_NE(result.error().find("no devices"), std::string::npos);
 }
 
 TEST_F(EngineCompileTest, CompilePropagatesDeviceCompileFailure) {
@@ -161,12 +176,12 @@ TEST_F(EngineCompileTest, CompilePropagatesDeviceCompileFailure) {
     devices.push_back(std::move(fake));
     sandy::engine::Engine engine(std::move(devices));
 
-    auto planResult = engine.compile(graph);
-    EXPECT_FALSE(planResult);
-    EXPECT_EQ(planResult.error(), "fake compile failed");
+    auto result = engine.compile(graph);
+    EXPECT_FALSE(result);
+    EXPECT_EQ(result.error(), "fake compile failed");
 }
 
-TEST_F(EngineCompileTest, RunInterpretsInvocPlanWithFakeDevice) {
+TEST_F(EngineCompileTest, RunExecutesKernelGraphWithFakeDevice) {
     sandy::ir::mid_ir::Graph graph;
     sandy::ir::mid_ir::Builder builder(graph);
     auto* x = builder.createInput(0, sandy::core::Shape({1}), sandy::core::DType::F32);
@@ -175,15 +190,11 @@ TEST_F(EngineCompileTest, RunInterpretsInvocPlanWithFakeDevice) {
     sandy::ir::mid_ir::Value* outputs[] = {out};
     builder.setOutputs(outputs);
 
-    auto fake = std::make_unique<FakeDevice>();
-    auto* fakePtr = fake.get();
-    std::vector<std::unique_ptr<sandy::engine::Device>> devices;
-    devices.push_back(std::move(fake));
-    sandy::engine::Engine engine(std::move(devices));
-
-    auto planResult = engine.compile(graph);
-    ASSERT_TRUE(planResult) << planResult.error();
-    auto plan = planResult.take();
+    FakeDevice* fakePtr = nullptr;
+    auto engine = make_engine(&fakePtr);
+    auto compiledResult = engine.compile(graph);
+    ASSERT_TRUE(compiledResult) << compiledResult.error();
+    auto compiled = compiledResult.take();
 
     std::vector<sandy::engine::TensorBufferPtr> inputs;
     inputs.push_back(std::make_shared<FakeTensorBuffer>(
@@ -193,12 +204,9 @@ TEST_F(EngineCompileTest, RunInterpretsInvocPlanWithFakeDevice) {
     weights["w"] = std::make_shared<FakeTensorBuffer>(
         sandy::core::TensorDesc("w", sandy::core::Shape({1}), sandy::core::DType::F32));
 
-    auto outputsResult = engine.run(*plan, inputs, weights);
+    auto outputsResult = engine.run(*compiled, inputs, weights);
     ASSERT_TRUE(outputsResult) << outputsResult.error();
-    auto runOutputs = outputsResult.take();
-
-    ASSERT_EQ(runOutputs.size(), 1u);
-    EXPECT_NE(runOutputs[0], nullptr);
+    ASSERT_EQ(outputsResult->size(), 1u);
 
     ASSERT_EQ(fakePtr->loads.size(), 2u);
     EXPECT_EQ(fakePtr->loads[0].name, "x");
@@ -208,7 +216,8 @@ TEST_F(EngineCompileTest, RunInterpretsInvocPlanWithFakeDevice) {
     EXPECT_EQ(fakePtr->allocDescs[0].shape, sandy::core::Shape({1}));
 
     ASSERT_EQ(fakePtr->runs.size(), 1u);
-    EXPECT_EQ(fakePtr->runs[0].program, 100u);
+    EXPECT_EQ(fakePtr->runs[0].graph, 100u);
+    EXPECT_EQ(fakePtr->runs[0].op, 2u);
     EXPECT_EQ(fakePtr->runs[0].inputs, std::vector<sandy::engine::DeviceBufferId>({200, 201}));
     EXPECT_EQ(fakePtr->runs[0].outputs, std::vector<sandy::engine::DeviceBufferId>({202}));
 
@@ -224,14 +233,11 @@ TEST_F(EngineCompileTest, RunReportsProfileEventsForKernels) {
     sandy::ir::mid_ir::Value* outputs[] = {out};
     builder.setOutputs(outputs);
 
-    auto fake = std::make_unique<FakeDevice>();
-    std::vector<std::unique_ptr<sandy::engine::Device>> devices;
-    devices.push_back(std::move(fake));
-    sandy::engine::Engine engine(std::move(devices));
-
-    auto planResult = engine.compile(graph);
-    ASSERT_TRUE(planResult) << planResult.error();
-    auto plan = planResult.take();
+    FakeDevice* fakePtr = nullptr;
+    auto engine = make_engine(&fakePtr);
+    auto compiledResult = engine.compile(graph);
+    ASSERT_TRUE(compiledResult) << compiledResult.error();
+    auto compiled = compiledResult.take();
 
     std::vector<sandy::engine::TensorBufferPtr> inputs;
     inputs.push_back(std::make_shared<FakeTensorBuffer>(
@@ -244,115 +250,58 @@ TEST_F(EngineCompileTest, RunReportsProfileEventsForKernels) {
         events.push_back(event);
     };
 
-    auto outputsResult = engine.run(*plan, inputs, weights, &options);
+    auto outputsResult = engine.run(*compiled, inputs, weights, &options);
     ASSERT_TRUE(outputsResult) << outputsResult.error();
 
     ASSERT_EQ(events.size(), 1u);
-    EXPECT_EQ(events[0].program, 0u);
+    EXPECT_EQ(events[0].opIndex, 1u);
+    EXPECT_EQ(events[0].op, 1u);
     EXPECT_EQ(events[0].device, 0u);
-    EXPECT_EQ(events[0].deviceProgram, 100u);
-    EXPECT_EQ(events[0].opKind, sandy::ir::mid_ir::OpKind::Tanh);
+    EXPECT_EQ(events[0].deviceGraph, 100u);
+    EXPECT_EQ(events[0].opKind, sandy::ir::kernel_ir::OpKind::ElementwiseKernel);
     EXPECT_EQ(events[0].inputCount, 1u);
     EXPECT_EQ(events[0].outputCount, 1u);
     EXPECT_GE(events[0].elapsedMs, 0.0);
 }
 
-TEST_F(EngineCompileTest, RunUsesStoreOutputsOrder) {
-    auto fake = std::make_unique<FakeDevice>();
-    auto* fakePtr = fake.get();
-    std::vector<std::unique_ptr<sandy::engine::Device>> devices;
-    devices.push_back(std::move(fake));
-    sandy::engine::Engine engine(std::move(devices));
-
-    sandy::engine::InvocPlan plan;
-    plan.instructions.push_back(sandy::engine::InvocInstruction::alloc({
-        0,
-        0,
-        sandy::core::TensorDesc(sandy::core::Shape({1}), sandy::core::DType::F32),
-    }));
-    plan.instructions.push_back(sandy::engine::InvocInstruction::alloc({
-        0,
-        1,
-        sandy::core::TensorDesc(sandy::core::Shape({1}), sandy::core::DType::F32),
-    }));
-    plan.instructions.push_back(sandy::engine::InvocInstruction::store_outputs({0, {1, 0}, {}}));
-    plan.outputs = {0, 1};
-
-    std::vector<sandy::engine::TensorBufferPtr> inputs;
-    sandy::engine::TensorMap weights;
-
-    auto result = engine.run(plan, inputs, weights);
-    ASSERT_TRUE(result) << result.error();
-    EXPECT_EQ(result->size(), 2u);
-    EXPECT_EQ(fakePtr->reads, std::vector<sandy::engine::DeviceBufferId>({201, 200}));
-    EXPECT_EQ(fakePtr->deallocs, std::vector<sandy::engine::DeviceBufferId>({201, 200}));
-}
-
 TEST_F(EngineCompileTest, RunFailsForMissingInputIndex) {
-    auto fake = std::make_unique<FakeDevice>();
-    std::vector<std::unique_ptr<sandy::engine::Device>> devices;
-    devices.push_back(std::move(fake));
-    sandy::engine::Engine engine(std::move(devices));
+    sandy::ir::mid_ir::Graph graph;
+    sandy::ir::mid_ir::Builder builder(graph);
+    auto* x = builder.createInput(1, sandy::core::Shape({1}), sandy::core::DType::F32);
+    builder.setOutputs(std::span<sandy::ir::mid_ir::Value* const>(&x, 1));
 
-    sandy::engine::InvocPlan plan;
-    plan.instructions.push_back(sandy::engine::InvocInstruction::load_input({0, 1, 0}));
-    plan.instructions.push_back(sandy::engine::InvocInstruction::store_outputs({0, {0}, {}}));
-    plan.outputs = {0};
+    FakeDevice* fakePtr = nullptr;
+    auto engine = make_engine(&fakePtr);
+    auto compiledResult = engine.compile(graph);
+    ASSERT_TRUE(compiledResult) << compiledResult.error();
+    auto compiled = compiledResult.take();
 
     std::vector<sandy::engine::TensorBufferPtr> inputs;
     inputs.push_back(std::make_shared<FakeTensorBuffer>(
         sandy::core::TensorDesc("x", sandy::core::Shape({1}), sandy::core::DType::F32)));
     sandy::engine::TensorMap weights;
 
-    auto result = engine.run(plan, inputs, weights);
+    auto result = engine.run(*compiled, inputs, weights);
     EXPECT_FALSE(result);
     EXPECT_NE(result.error().find("input index out of range"), std::string::npos);
 }
 
 TEST_F(EngineCompileTest, RunFailsForMissingWeight) {
-    auto fake = std::make_unique<FakeDevice>();
-    std::vector<std::unique_ptr<sandy::engine::Device>> devices;
-    devices.push_back(std::move(fake));
-    sandy::engine::Engine engine(std::move(devices));
+    sandy::ir::mid_ir::Graph graph;
+    sandy::ir::mid_ir::Builder builder(graph);
+    auto* w = builder.createWeight("w", sandy::core::Shape({1}), sandy::core::DType::F32);
+    builder.setOutputs(std::span<sandy::ir::mid_ir::Value* const>(&w, 1));
 
-    sandy::engine::InvocPlan plan;
-    plan.instructions.push_back(sandy::engine::InvocInstruction::load_weight({0, "w", 0}));
-    plan.instructions.push_back(sandy::engine::InvocInstruction::store_outputs({0, {0}, {}}));
-    plan.outputs = {0};
+    FakeDevice* fakePtr = nullptr;
+    auto engine = make_engine(&fakePtr);
+    auto compiledResult = engine.compile(graph);
+    ASSERT_TRUE(compiledResult) << compiledResult.error();
+    auto compiled = compiledResult.take();
 
     std::vector<sandy::engine::TensorBufferPtr> inputs;
     sandy::engine::TensorMap weights;
 
-    auto result = engine.run(plan, inputs, weights);
+    auto result = engine.run(*compiled, inputs, weights);
     EXPECT_FALSE(result);
     EXPECT_NE(result.error().find("missing weight buffer: w"), std::string::npos);
-}
-
-TEST_F(EngineCompileTest, RunFailsForMissingProgram) {
-    auto fake = std::make_unique<FakeDevice>();
-    std::vector<std::unique_ptr<sandy::engine::Device>> devices;
-    devices.push_back(std::move(fake));
-    sandy::engine::Engine engine(std::move(devices));
-
-    sandy::engine::InvocPlan plan;
-    plan.instructions.push_back(sandy::engine::InvocInstruction::alloc({
-        0,
-        0,
-        sandy::core::TensorDesc(sandy::core::Shape({1}), sandy::core::DType::F32),
-    }));
-    plan.instructions.push_back(sandy::engine::InvocInstruction::run_kernel({
-        0,
-        42,
-        {},
-        {0},
-    }));
-    plan.instructions.push_back(sandy::engine::InvocInstruction::store_outputs({0, {0}, {}}));
-    plan.outputs = {0};
-
-    std::vector<sandy::engine::TensorBufferPtr> inputs;
-    sandy::engine::TensorMap weights;
-
-    auto result = engine.run(plan, inputs, weights);
-    EXPECT_FALSE(result);
-    EXPECT_NE(result.error().find("missing program: 42"), std::string::npos);
 }

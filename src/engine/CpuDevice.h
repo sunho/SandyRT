@@ -1,10 +1,11 @@
 #pragma once
 
 #include "Device.h"
-#include "MidIR.h"
+#include "KernelIR.h"
 
 #include <cstdint>
 #include <optional>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -12,7 +13,7 @@ namespace sandy::engine {
 
 class CpuDevice final : public Device {
 public:
-    Result<DeviceProgramId> compile(const ir::mid_ir::Op& op) override;
+    Result<DeviceCompiledGraphId> compile(const ir::kernel_ir::Graph& graph) override;
 
     Result<DeviceBufferId> alloc(core::TensorDesc desc) override;
     Result<void> dealloc(DeviceBufferId buffer) override;
@@ -20,7 +21,8 @@ public:
     Result<DeviceBufferId> load(core::TensorBuffer& src) override;
 
     Result<void> run(
-        DeviceProgramId program,
+        DeviceCompiledGraphId graph,
+        ir::kernel_ir::OpId op,
         std::span<const DeviceBufferId> inputs,
         std::span<const DeviceBufferId> outputs) override;
 
@@ -33,17 +35,39 @@ private:
         std::optional<core::TensorBuffer::Access> borrowed;
     };
 
-    struct CpuDeviceProgram {
-        ir::mid_ir::OpKind kind = ir::mid_ir::OpKind::NUM_KINDS;
-        ir::mid_ir::AttrMap attrs;
-        std::vector<core::TensorDesc> inputDescs;
-        std::vector<core::TensorDesc> outputDescs;
+    struct CpuDeviceKernel {
+        ir::kernel_ir::OpKind kind = ir::kernel_ir::OpKind::Input;
+        size_t inputCount = 0;
+        size_t outputCount = 0;
+
+        ir::kernel_ir::LayoutTransformKind layoutTransform =
+            ir::kernel_ir::LayoutTransformKind::Contiguous;
+        std::vector<int64_t> dims;
+
+        ir::kernel_ir::ScalarOp scalarOp = ir::kernel_ir::ScalarOp::Constant;
+        double constant = 0.0;
+
+        bool transposeLhs = false;
+        bool transposeRhs = false;
+        int64_t axis = -1;
+        int64_t window = 0;
+        double scale = -1.0;
+        double theta = 10000.0;
+        int64_t rotaryDim = -1;
+        bool splitHalf = false;
+        ir::kernel_ir::NormKind norm = ir::kernel_ir::NormKind::RMSNorm;
+        double epsilon = 0.0;
+        std::string customName;
+    };
+
+    struct CpuDeviceGraph {
+        std::unordered_map<ir::kernel_ir::OpId, CpuDeviceKernel> kernels;
     };
 
     DeviceBufferId nextBufferId_ = 1;
-    DeviceProgramId nextProgramId_ = 1;
+    DeviceCompiledGraphId nextGraphId_ = 1;
     std::unordered_map<DeviceBufferId, CpuDeviceBuffer> buffers_;
-    std::unordered_map<DeviceProgramId, CpuDeviceProgram> programs_;
+    std::unordered_map<DeviceCompiledGraphId, CpuDeviceGraph> graphs_;
 };
 
 } // namespace sandy::engine
