@@ -131,6 +131,45 @@ TEST(KernelIRGraphTest, VerifyRejectsInvalidGraphOutput) {
               std::string::npos);
 }
 
+TEST(KernelIRGraphTest, VerifyTracksDeviceTransfer) {
+    kernel_ir::Graph graph;
+
+    auto input = graph.addValue(tensor_type({2, 3}), "x");
+    graph.addOp<kernel_ir::InputOp>(
+        kernel_ir::InputSource{kernel_ir::InputSourceKind::Argument, 0, ""},
+        input);
+
+    auto output = graph.addValue(tensor_type({2, 3}), "x_on_device_1");
+    graph.addOp<kernel_ir::DeviceTransferOp>(0, 1, input, output);
+    graph.setOutputs({output});
+
+    auto result = graph.verify();
+    ASSERT_TRUE(result) << result.error();
+
+    testing::internal::CaptureStdout();
+    graph.dump();
+    auto dump = testing::internal::GetCapturedStdout();
+
+    EXPECT_NE(dump.find("device_transfer(%0)"), std::string::npos);
+    EXPECT_NE(dump.find("source_device=0 target_device=1"), std::string::npos);
+}
+
+TEST(KernelIRGraphTest, VerifyRejectsSameDeviceTransfer) {
+    kernel_ir::Graph graph;
+
+    auto input = graph.addValue(tensor_type({2, 3}));
+    graph.addOp<kernel_ir::InputOp>(
+        kernel_ir::InputSource{kernel_ir::InputSourceKind::Argument, 0, ""},
+        input);
+    auto output = graph.addValue(tensor_type({2, 3}));
+    graph.addOp<kernel_ir::DeviceTransferOp>(0, 0, input, output);
+    graph.setOutputs({output});
+
+    auto result = graph.verify();
+    EXPECT_FALSE(result);
+    EXPECT_NE(result.error().find("source and target are equal"), std::string::npos);
+}
+
 TEST_F(MidIRToKernelIRTest, LowersInputAndWeight) {
     mid_ir::Graph midGraph;
     mid_ir::Builder builder(midGraph);

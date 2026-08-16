@@ -17,6 +17,7 @@ namespace sandy::ir::kernel_ir {
 
 using ValueId = uint32_t;
 using OpId = uint32_t;
+using DeviceId = uint32_t;
 
 static constexpr OpId kInvalidOpId = std::numeric_limits<OpId>::max();
 
@@ -53,6 +54,7 @@ struct Value {
 
 enum class OpKind {
     Input,
+    DeviceTransfer,
     LayoutTransform,
     ElementwiseKernel,
     ReductionKernel,
@@ -169,6 +171,31 @@ public:
 
 private:
     InputSource source_;
+    std::array<ValueId, 1> outputs_;
+};
+
+class DeviceTransferOp final : public Op {
+public:
+    DeviceTransferOp(
+        OpId id,
+        DeviceId sourceDevice,
+        DeviceId targetDevice,
+        ValueId input,
+        ValueId output);
+
+    DeviceId sourceDevice() const { return sourceDevice_; }
+    DeviceId targetDevice() const { return targetDevice_; }
+
+    std::span<const ValueId> inputs() const override { return inputs_; }
+    std::span<const ValueId> outputs() const override { return outputs_; }
+
+    const char* name() const override { return "device_transfer"; }
+    Result<void> verify(const Graph& graph) const override;
+
+private:
+    DeviceId sourceDevice_ = 0;
+    DeviceId targetDevice_ = 0;
+    std::array<ValueId, 1> inputs_;
     std::array<ValueId, 1> outputs_;
 };
 

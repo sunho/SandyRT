@@ -16,6 +16,7 @@ namespace sandy::engine {
 namespace {
 
 using ir::kernel_ir::Graph;
+using ir::kernel_ir::DeviceTransferOp;
 using ir::kernel_ir::InputOp;
 using ir::kernel_ir::InputSourceKind;
 using ir::kernel_ir::LayoutTransformKind;
@@ -132,6 +133,12 @@ Result<core::TensorDesc> resolve_output_desc(
     switch (op.kind()) {
         case OpKind::Input:
             return make_error("input op output descriptor is bound externally");
+        case OpKind::DeviceTransfer: {
+            auto input = lookup_runtime_desc(descs, op.inputs()[0]);
+            if (!input)
+                return make_error(input.error());
+            return desc_with_shape(graph, output, input->shape);
+        }
         case OpKind::ElementwiseKernel: {
             auto inputs = op.inputs();
             if (inputs.empty())
@@ -252,18 +259,26 @@ Result<core::TensorDesc> resolve_output_desc(
 }
 
 Result<void> dealloc_value(
-        Device& device,
+        std::vector<std::unique_ptr<Device>>& devices,
         ValueId value,
         std::unordered_map<ValueId, DeviceBufferId>& buffers,
-        std::unordered_map<ValueId, core::TensorDesc>& descs) {
+        std::unordered_map<ValueId, core::TensorDesc>& descs,
+        std::unordered_map<ValueId, uint32_t>& bufferDevices) {
     auto buffer = lookup_runtime_buffer(buffers, value);
     if (!buffer)
         return make_error(buffer.error());
-    auto dealloc = device.dealloc(buffer.take());
+    auto deviceIt = bufferDevices.find(value);
+    if (deviceIt == bufferDevices.end())
+        return make_error("missing runtime device for value: " + std::to_string(value));
+    auto device = lookup_device(devices, deviceIt->second);
+    if (!device)
+        return make_error(device.error());
+    auto dealloc = (*device)->dealloc(buffer.take());
     if (!dealloc)
         return make_error(dealloc.error());
     buffers.erase(value);
     descs.erase(value);
+    bufferDevices.erase(value);
     return {};
 }
 
@@ -312,6 +327,7 @@ Result<std::vector<TensorBufferPtr>> Engine::run(
 
     std::unordered_map<ValueId, DeviceBufferId> buffers;
     std::unordered_map<ValueId, core::TensorDesc> descs;
+    std::unordered_map<ValueId, uint32_t> bufferDevices;
     std::vector<size_t> remainingUses(graph.values().size(), 0);
     std::vector<bool> isOutput(graph.values().size(), false);
     for (const auto& value : graph.values())
@@ -320,6 +336,39 @@ Result<std::vector<TensorBufferPtr>> Engine::run(
         if (output < isOutput.size())
             isOutput[output] = true;
     }
+
+    auto finish_op_lifetimes = [&](const Op& finishedOp) -> Result<void> {
+        for (auto input : finishedOp.inputs()) {
+            if (remainingUses[input] == 0)
+                return make_error("KernelIR value use count underflow");
+            remainingUses[input]--;
+            if (remainingUses[input] == 0 && !isOutput[input]) {
+                auto dealloc = dealloc_value(
+                    devices_,
+                    input,
+                    buffers,
+                    descs,
+                    bufferDevices);
+                if (!dealloc)
+                    return make_error(dealloc.error());
+            }
+        }
+
+        for (auto output : finishedOp.outputs()) {
+            if (remainingUses[output] == 0 && !isOutput[output]) {
+                auto dealloc = dealloc_value(
+                    devices_,
+                    output,
+                    buffers,
+                    descs,
+                    bufferDevices);
+                if (!dealloc)
+                    return make_error(dealloc.error());
+            }
+        }
+
+        return {};
+    };
 
     for (size_t opIndex = 0; opIndex < graph.ops().size(); opIndex++) {
         const auto& op = *graph.ops()[opIndex];
@@ -364,12 +413,48 @@ Result<std::vector<TensorBufferPtr>> Engine::run(
                 return make_error(loaded.error());
             buffers[output] = loaded.take();
             descs[output] = host->desc();
+            bufferDevices[output] = compiled.device;
 
-            if (remainingUses[output] == 0 && !isOutput[output]) {
-                auto dealloc = dealloc_value(device, output, buffers, descs);
-                if (!dealloc)
-                    return make_error(dealloc.error());
+            auto finish = finish_op_lifetimes(op);
+            if (!finish)
+                return make_error(finish.error());
+            continue;
+        }
+
+        if (op.kind() == OpKind::DeviceTransfer) {
+            const auto& transfer = static_cast<const DeviceTransferOp&>(op);
+            auto sourceDevice = lookup_device(devices_, transfer.sourceDevice());
+            if (!sourceDevice)
+                return make_error(sourceDevice.error());
+            auto targetDevice = lookup_device(devices_, transfer.targetDevice());
+            if (!targetDevice)
+                return make_error(targetDevice.error());
+
+            auto input = transfer.inputs()[0];
+            auto output = transfer.outputs()[0];
+            auto inputBuffer = lookup_runtime_buffer(buffers, input);
+            if (!inputBuffer)
+                return make_error(inputBuffer.error());
+            auto inputDeviceIt = bufferDevices.find(input);
+            if (inputDeviceIt == bufferDevices.end())
+                return make_error("missing runtime device for value: " + std::to_string(input));
+            if (inputDeviceIt->second != transfer.sourceDevice()) {
+                return make_error("device transfer source does not match runtime value device");
             }
+
+            auto host = (*sourceDevice)->read(inputBuffer.take());
+            if (!host)
+                return make_error(host.error());
+            auto loaded = (*targetDevice)->load(**host);
+            if (!loaded)
+                return make_error(loaded.error());
+            buffers[output] = loaded.take();
+            descs[output] = (*host)->desc();
+            bufferDevices[output] = transfer.targetDevice();
+
+            auto finish = finish_op_lifetimes(op);
+            if (!finish)
+                return make_error(finish.error());
             continue;
         }
 
@@ -383,6 +468,7 @@ Result<std::vector<TensorBufferPtr>> Engine::run(
                 return make_error(buffer.error());
             buffers[output] = buffer.take();
             descs[output] = std::move(descValue);
+            bufferDevices[output] = compiled.device;
         }
 
         std::vector<DeviceBufferId> inputBuffers;
@@ -391,6 +477,12 @@ Result<std::vector<TensorBufferPtr>> Engine::run(
             auto buffer = lookup_runtime_buffer(buffers, input);
             if (!buffer)
                 return make_error(buffer.error());
+            auto inputDeviceIt = bufferDevices.find(input);
+            if (inputDeviceIt == bufferDevices.end())
+                return make_error("missing runtime device for value: " + std::to_string(input));
+            if (inputDeviceIt->second != compiled.device) {
+                return make_error("KernelIR op input is not on execution device");
+            }
             inputBuffers.push_back(buffer.take());
         }
 
@@ -422,24 +514,9 @@ Result<std::vector<TensorBufferPtr>> Engine::run(
         if (!runResult)
             return make_error(runResult.error());
 
-        for (auto input : op.inputs()) {
-            if (remainingUses[input] == 0)
-                return make_error("KernelIR value use count underflow");
-            remainingUses[input]--;
-            if (remainingUses[input] == 0 && !isOutput[input]) {
-                auto dealloc = dealloc_value(device, input, buffers, descs);
-                if (!dealloc)
-                    return make_error(dealloc.error());
-            }
-        }
-
-        for (auto output : op.outputs()) {
-            if (remainingUses[output] == 0 && !isOutput[output]) {
-                auto dealloc = dealloc_value(device, output, buffers, descs);
-                if (!dealloc)
-                    return make_error(dealloc.error());
-            }
-        }
+        auto finish = finish_op_lifetimes(op);
+        if (!finish)
+            return make_error(finish.error());
     }
 
     std::vector<TensorBufferPtr> outputs;
@@ -449,7 +526,13 @@ Result<std::vector<TensorBufferPtr>> Engine::run(
         auto buffer = lookup_runtime_buffer(buffers, value);
         if (!buffer)
             return make_error(buffer.error());
-        auto output = device.read(buffer.take());
+        auto outputDeviceIt = bufferDevices.find(value);
+        if (outputDeviceIt == bufferDevices.end())
+            return make_error("missing runtime device for value: " + std::to_string(value));
+        auto outputDevice = lookup_device(devices_, outputDeviceIt->second);
+        if (!outputDevice)
+            return make_error(outputDevice.error());
+        auto output = (*outputDevice)->read(buffer.take());
         if (!output)
             return make_error(output.error());
         outputs.push_back(output.take());
@@ -462,18 +545,30 @@ Result<std::vector<TensorBufferPtr>> Engine::run(
     }
 
     for (auto value : uniqueOutputs) {
-        auto dealloc = dealloc_value(device, value, buffers, descs);
+        auto dealloc = dealloc_value(
+            devices_,
+            value,
+            buffers,
+            descs,
+            bufferDevices);
         if (!dealloc)
             return make_error(dealloc.error());
     }
 
     for (auto it = buffers.begin(); it != buffers.end();) {
         auto value = it->first;
-        auto dealloc = device.dealloc(it->second);
+        auto deviceIt = bufferDevices.find(value);
+        if (deviceIt == bufferDevices.end())
+            return make_error("missing runtime device for value: " + std::to_string(value));
+        auto leftoverDevice = lookup_device(devices_, deviceIt->second);
+        if (!leftoverDevice)
+            return make_error(leftoverDevice.error());
+        auto dealloc = (*leftoverDevice)->dealloc(it->second);
         if (!dealloc)
             return make_error(dealloc.error());
         it = buffers.erase(it);
         descs.erase(value);
+        bufferDevices.erase(value);
     }
 
     return outputs;

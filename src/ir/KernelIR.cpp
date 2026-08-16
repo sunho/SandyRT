@@ -43,6 +43,12 @@ std::string type_string(const ValueType& type) {
     return out;
 }
 
+bool same_value_type(const ValueType& lhs, const ValueType& rhs) {
+    return lhs.kind == rhs.kind &&
+           lhs.dtype == rhs.dtype &&
+           lhs.shape == rhs.shape;
+}
+
 std::string values_string(std::span<const ValueId> values) {
     std::string out;
     for (size_t i = 0; i < values.size(); ++i) {
@@ -228,6 +234,11 @@ std::string op_attr_string(const Op& op) {
             const auto& input = static_cast<const InputOp&>(op);
             return " source=" + input_source_string(input.source());
         }
+        case OpKind::DeviceTransfer: {
+            const auto& transfer = static_cast<const DeviceTransferOp&>(op);
+            return " source_device=" + std::to_string(transfer.sourceDevice()) +
+                   " target_device=" + std::to_string(transfer.targetDevice());
+        }
         case OpKind::LayoutTransform: {
             const auto& layout = static_cast<const LayoutTransformOp&>(op);
             return " kind=" + std::string(layout_transform_name(layout.transform())) +
@@ -285,6 +296,7 @@ std::string op_attr_string(const Op& op) {
 const char* op_kind_name(OpKind kind) {
     switch (kind) {
         case OpKind::Input: return "input";
+        case OpKind::DeviceTransfer: return "device_transfer";
         case OpKind::LayoutTransform: return "layout_transform";
         case OpKind::ElementwiseKernel: return "elementwise_kernel";
         case OpKind::ReductionKernel: return "reduction_kernel";
@@ -491,6 +503,32 @@ Result<void> InputOp::verify(const Graph& graph) const {
                 return make_error(op_ref(id()) + " input source name is empty");
             }
             break;
+    }
+    return {};
+}
+
+DeviceTransferOp::DeviceTransferOp(
+    OpId id,
+    DeviceId sourceDevice,
+    DeviceId targetDevice,
+    ValueId input,
+    ValueId output)
+    : Op(id, OpKind::DeviceTransfer),
+      sourceDevice_(sourceDevice),
+      targetDevice_(targetDevice),
+      inputs_{input},
+      outputs_{output}
+{}
+
+Result<void> DeviceTransferOp::verify(const Graph& graph) const {
+    if (auto result = verify_common_op_shape(graph, *this, 1, 1); !result) {
+        return result;
+    }
+    if (sourceDevice_ == targetDevice_) {
+        return make_error(op_ref(id()) + " device transfer source and target are equal");
+    }
+    if (!same_value_type(graph.value(inputs_[0]).type, graph.value(outputs_[0]).type)) {
+        return make_error(op_ref(id()) + " device transfer input/output types differ");
     }
     return {};
 }

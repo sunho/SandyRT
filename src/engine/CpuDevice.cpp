@@ -139,6 +139,7 @@ Result<DeviceCompiledGraphId> CpuDevice::compile(const ir::kernel_ir::Graph& gra
 
         switch (op.kind()) {
             case ir::kernel_ir::OpKind::Input:
+            case ir::kernel_ir::OpKind::DeviceTransfer:
                 break;
             case ir::kernel_ir::OpKind::LayoutTransform: {
                 const auto& layout = static_cast<const ir::kernel_ir::LayoutTransformOp&>(op);
@@ -290,6 +291,8 @@ Result<void> CpuDevice::run(
     switch (kernel.kind) {
         case ir::kernel_ir::OpKind::Input:
             return make_error("cpu device cannot run input boundary op");
+        case ir::kernel_ir::OpKind::DeviceTransfer:
+            return make_error("cpu device cannot run device transfer boundary op");
         case ir::kernel_ir::OpKind::ElementwiseKernel: {
             auto out = outputRef(0);
             if (!out) return make_error(out.error());
