@@ -1,6 +1,7 @@
 add_library(IRLib
   BuiltinLowering.cpp
   HighIR.cpp
+  KernelIR.cpp
   MidIR.cpp
   MidIRMaterializer.cpp
   MidIRPass.cpp
