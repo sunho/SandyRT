@@ -4,6 +4,7 @@
 #include <memory>
 #include <span>
 #include <utility>
+#include <vector>
 
 namespace sandy::device {
 
@@ -35,6 +36,8 @@ CudaDevice::CudaDevice(int cudaDevice)
     : cudaDevice_(cudaDevice) {}
 
 CudaDevice::~CudaDevice() {
+    pagedTensors_.clear();
+    pagedPools_.clear();
     if (stream_) {
         cudaSetDevice(cudaDevice_);
         cudaStreamDestroy(stream_);
@@ -64,6 +67,13 @@ Result<DeviceCompiledGraphId> CudaDevice::compile(const ir::kernel_ir::Graph& gr
     auto verify = graph.verify();
     if (!verify)
         return make_error(verify.error());
+
+    for (const auto& value : graph.values()) {
+        if (value.type.kind == ir::kernel_ir::ValueKind::PagedTensor) {
+            return make_error(
+                "cuda device KernelIR runner does not support paged tensor values yet");
+        }
+    }
 
     CudaDeviceGraph compiled;
     for (const auto& opPtr : graph.ops()) {

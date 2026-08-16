@@ -78,8 +78,6 @@ private:
 
     struct CpuPagedPool {
         DevicePagedPoolDesc desc;
-        int64_t outerElementCount = 0;
-        int64_t innerElementCount = 0;
         int64_t pageElementCount = 0;
         size_t pageBytes = 0;
         core::FixedPagePool pages;

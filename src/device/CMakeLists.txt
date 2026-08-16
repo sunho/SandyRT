@@ -10,6 +10,7 @@ if(SANDY_ENABLE_CUDA)
     PRIVATE
     cuda/CudaRuntime.cpp
     cuda/CudaDevice.cpp
+    cuda/CudaPagedTensor.cpp
     cuda/CudaKernels.cu
   )
 endif()

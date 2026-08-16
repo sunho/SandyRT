@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CudaKernels.h"
+#include "CudaPagedTensor.h"
 #include "Device.h"
 #include "KernelIR.h"
 
@@ -26,6 +27,16 @@ public:
     Result<void> dealloc(DeviceBufferId buffer) override;
 
     Result<DeviceBufferId> load(core::TensorBuffer& src) override;
+
+    Result<DevicePagedPoolId> createPagedPool(DevicePagedPoolDesc desc) override;
+    Result<void> destroyPagedPool(DevicePagedPoolId pool) override;
+    Result<DevicePagedTensorId> allocPaged(
+        DevicePagedPoolId pool,
+        core::Shape logicalShape) override;
+    Result<void> deallocPaged(DevicePagedTensorId tensor) override;
+    Result<void> reservePaged(DevicePagedTensorId tensor, int64_t pageCount) override;
+    Result<void> appendPaged(DevicePagedTensorId dst, core::TensorBuffer& denseChunk) override;
+    Result<DevicePagedTensorMeta> pagedMeta(DevicePagedTensorId tensor) const override;
 
     Result<void> run(
         DeviceCompiledGraphId graph,
@@ -69,13 +80,19 @@ private:
     Result<void> ensure_stream();
     Result<void> set_device() const;
     Result<CudaDeviceBufferView> buffer_view(DeviceBufferId buffer, bool writable);
+    Result<CudaDevicePagedTensorView> paged_tensor_view(DevicePagedTensorId tensor) const;
+    Result<void> sync_paged_tensor_table(DevicePagedTensorId tensor);
 
     int cudaDevice_ = 0;
     cudaStream_t stream_ = nullptr;
     DeviceBufferId nextBufferId_ = 1;
     DeviceCompiledGraphId nextGraphId_ = 1;
+    DevicePagedPoolId nextPagedPoolId_ = 1;
+    DevicePagedTensorId nextPagedTensorId_ = 1;
     std::unordered_map<DeviceBufferId, CudaDeviceBuffer> buffers_;
     std::unordered_map<DeviceCompiledGraphId, CudaDeviceGraph> graphs_;
+    std::unordered_map<DevicePagedPoolId, CudaPagedTensorPool> pagedPools_;
+    std::unordered_map<DevicePagedTensorId, CudaPagedTensor> pagedTensors_;
 };
 
 } // namespace sandy::device

@@ -340,8 +340,6 @@ Result<DevicePagedPoolId> CpuDevice::createPagedPool(DevicePagedPoolDesc desc) {
 
     CpuPagedPool pool;
     pool.desc = std::move(desc);
-    pool.outerElementCount = *outer;
-    pool.innerElementCount = *inner;
     pool.pageElementCount = pageElementCount;
     pool.pageBytes = static_cast<size_t>(pageElementCount) * elementSize;
 
@@ -481,11 +479,24 @@ Result<void> CpuDevice::appendPaged(
     if (!reserved)
         return make_error(reserved.error());
 
+    auto prefixCount = checked_product(
+        pool.desc.templateDesc.shape,
+        0,
+        static_cast<int>(pool.desc.growDim));
+    if (!prefixCount)
+        return make_error(prefixCount.error());
+    auto trailingCount = checked_product(
+        pool.desc.templateDesc.shape,
+        static_cast<int>(pool.desc.growDim) + 1,
+        pool.desc.templateDesc.shape.rank());
+    if (!trailingCount)
+        return make_error(trailingCount.error());
+
     auto elementSize = core::dtype_size(chunkDesc.dtype);
-    auto innerBytes = static_cast<size_t>(pool.innerElementCount) * elementSize;
+    auto trailingBytes = static_cast<size_t>(*trailingCount) * elementSize;
     auto source = (*access).data();
 
-    for (int64_t outer = 0; outer < pool.outerElementCount; outer++) {
+    for (int64_t prefix = 0; prefix < *prefixCount; prefix++) {
         for (int64_t chunkGrow = 0; chunkGrow < chunkGrowLength; chunkGrow++) {
             auto dstGrow = oldGrowLength + chunkGrow;
             auto dstPageOrdinal = dstGrow / pool.desc.pageSize;
@@ -497,13 +508,13 @@ Result<void> CpuDevice::appendPaged(
                 return make_error(page.error());
 
             auto sourceElement =
-                (outer * chunkGrowLength + chunkGrow) * pool.innerElementCount;
+                (prefix * chunkGrowLength + chunkGrow) * *trailingCount;
             auto dstElement =
-                (outer * pool.desc.pageSize + dstGrowInPage) * pool.innerElementCount;
+                (prefix * pool.desc.pageSize + dstGrowInPage) * *trailingCount;
             std::memcpy(
                 page->data() + static_cast<size_t>(dstElement) * elementSize,
                 source.data() + static_cast<size_t>(sourceElement) * elementSize,
-                innerBytes);
+                trailingBytes);
         }
     }
 

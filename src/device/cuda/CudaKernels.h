@@ -21,6 +21,12 @@ struct CudaDeviceBufferView {
     size_t bytes = 0;
 };
 
+struct CudaDevicePagedTensorView {
+    void** pageTable = nullptr;
+    DevicePagedTensorMeta meta;
+    size_t pageBytes = 0;
+};
+
 struct CudaLaunchContext {
     int cudaDevice = 0;
     cudaStream_t stream = nullptr;
