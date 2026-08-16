@@ -1224,7 +1224,7 @@ Expected behavior:
 5. Add KernelIR and lowering unit tests.
 6. Change `Device.h` to use `kernel_ir::Graph`, `DeviceCompiledGraphId`, and `run(graphHandle, opId, views...)`.
 7. Add `CompiledKernelGraph` type to engine.
-8. Rewrite `Engine::compile` to lower MidIR to KernelIR and call `device.compile(kernelGraph)`.
+8. Rewrite `Engine::compile` to lower MidIR to KernelIR and call `device.compile(kernelGraph)`. (do rest of mid ir to kernel ir impl here)
 9. Rewrite `Engine::run` to execute KernelIR directly.
 10. Implement use-count deallocation in `Engine::run`.
 11. Port `CpuDevice` to emulate KernelIR.

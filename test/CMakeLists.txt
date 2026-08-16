@@ -51,6 +51,7 @@ set_target_properties(load_safetensors PROPERTIES
 )
 
 add_executable(mid_ir_tests
+  ir/KernelIRTest.cpp
   ir/MidIRTest.cpp
 )
 

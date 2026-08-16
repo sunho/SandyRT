@@ -5,6 +5,7 @@ add_library(IRLib
   MidIR.cpp
   MidIRMaterializer.cpp
   MidIRPass.cpp
+  MidIRToKernelIR.cpp
 )
 
 target_include_directories(IRLib
