@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Allocator.h"
 #include "Device.h"
 #include "KernelIR.h"
 
@@ -19,6 +20,16 @@ public:
     Result<void> dealloc(DeviceBufferId buffer) override;
 
     Result<DeviceBufferId> load(core::TensorBuffer& src) override;
+
+    Result<DevicePagedPoolId> createPagedPool(DevicePagedPoolDesc desc) override;
+    Result<void> destroyPagedPool(DevicePagedPoolId pool) override;
+    Result<DevicePagedTensorId> allocPaged(
+        DevicePagedPoolId pool,
+        core::Shape logicalShape) override;
+    Result<void> deallocPaged(DevicePagedTensorId tensor) override;
+    Result<void> reservePaged(DevicePagedTensorId tensor, int64_t pageCount) override;
+    Result<void> appendPaged(DevicePagedTensorId dst, core::TensorBuffer& denseChunk) override;
+    Result<DevicePagedTensorMeta> pagedMeta(DevicePagedTensorId tensor) const override;
 
     Result<void> run(
         DeviceCompiledGraphId graph,
@@ -65,10 +76,30 @@ private:
         std::unordered_map<ir::kernel_ir::OpId, CpuDeviceKernel> kernels;
     };
 
+    struct CpuPagedPool {
+        DevicePagedPoolDesc desc;
+        int64_t outerElementCount = 0;
+        int64_t innerElementCount = 0;
+        int64_t pageElementCount = 0;
+        size_t pageBytes = 0;
+        core::FixedPagePool pages;
+    };
+
+    struct CpuPagedTensor {
+        DevicePagedPoolId pool = 0;
+        core::Shape logicalShape;
+        int64_t growLength = 0;
+        std::vector<uint32_t> pageIndices;
+    };
+
     DeviceBufferId nextBufferId_ = 1;
     DeviceCompiledGraphId nextGraphId_ = 1;
+    DevicePagedPoolId nextPagedPoolId_ = 1;
+    DevicePagedTensorId nextPagedTensorId_ = 1;
     std::unordered_map<DeviceBufferId, CpuDeviceBuffer> buffers_;
     std::unordered_map<DeviceCompiledGraphId, CpuDeviceGraph> graphs_;
+    std::unordered_map<DevicePagedPoolId, CpuPagedPool> pagedPools_;
+    std::unordered_map<DevicePagedTensorId, CpuPagedTensor> pagedTensors_;
 };
 
 } // namespace sandy::device

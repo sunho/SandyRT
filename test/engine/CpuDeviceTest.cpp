@@ -1,3 +1,4 @@
+#include "Allocator.h"
 #include "CpuDevice.h"
 #include "MidIRCpuInterpreter.h"
 #include "MidIRToKernelIR.h"
@@ -88,6 +89,19 @@ sandy::ir::kernel_ir::ValueType tensor_type(
     };
 }
 
+sandy::ir::kernel_ir::ValueType paged_tensor_type(
+        sandy::core::Shape shape,
+        sandy::core::DType dtype,
+        int64_t growDim,
+        int64_t pageSize) {
+    return sandy::ir::kernel_ir::ValueType{
+        sandy::ir::kernel_ir::ValueKind::PagedTensor,
+        dtype,
+        std::move(shape),
+        sandy::ir::kernel_ir::PagedTensorMeta{growDim, pageSize},
+    };
+}
+
 sandy::device::DeviceTensorView tensor_view(
         sandy::device::CpuDevice& device,
         sandy::device::DeviceBufferId buffer,
@@ -101,6 +115,32 @@ sandy::device::DeviceTensorView tensor_view(
 
 } // namespace
 
+TEST(CoreAllocatorTest, FixedPagePoolAllocatesAndReusesPages) {
+    sandy::core::FixedPagePool pool;
+    auto init = pool.initialize(16, 1, 2);
+    ASSERT_TRUE(init) << init.error();
+    EXPECT_EQ(pool.page_count(), 1u);
+    EXPECT_EQ(pool.free_page_count(), 1u);
+
+    auto first = pool.allocate();
+    ASSERT_TRUE(first) << first.error();
+    EXPECT_EQ(*first, 0u);
+
+    auto second = pool.allocate();
+    ASSERT_TRUE(second) << second.error();
+    EXPECT_EQ(*second, 1u);
+
+    auto third = pool.allocate();
+    EXPECT_FALSE(third);
+    EXPECT_NE(third.error().find("capacity"), std::string::npos);
+
+    auto freed = pool.deallocate(*first);
+    ASSERT_TRUE(freed) << freed.error();
+    auto reused = pool.allocate();
+    ASSERT_TRUE(reused) << reused.error();
+    EXPECT_EQ(*reused, *first);
+}
+
 TEST_F(CpuDeviceTest, LoadReadAndDeallocBuffer) {
     sandy::device::CpuDevice device;
     auto host = make_f32_buffer("x", sandy::core::Shape({2}), {1.0f, 2.0f});
@@ -113,6 +153,121 @@ TEST_F(CpuDeviceTest, LoadReadAndDeallocBuffer) {
     EXPECT_TRUE(dealloc) << dealloc.error();
     auto readAfterDealloc = device.read(*loaded);
     EXPECT_FALSE(readAfterDealloc);
+}
+
+TEST_F(CpuDeviceTest, PagedPoolAllocReserveAppendAndMeta) {
+    sandy::device::CpuDevice device;
+    sandy::device::DevicePagedPoolDesc poolDesc;
+    poolDesc.templateDesc = sandy::core::TensorDesc(
+        sandy::core::Shape({2, 3, sandy::core::Shape::kDynamic, 4}),
+        sandy::core::DType::F32);
+    poolDesc.growDim = 2;
+    poolDesc.pageSize = 2;
+    poolDesc.initialPages = 1;
+    poolDesc.maxPages = 4;
+
+    auto pool = device.createPagedPool(poolDesc);
+    ASSERT_TRUE(pool) << pool.error();
+
+    auto tensor = device.allocPaged(
+        *pool,
+        sandy::core::Shape({2, 3, 0, 4}));
+    ASSERT_TRUE(tensor) << tensor.error();
+
+    auto meta = device.pagedMeta(*tensor);
+    ASSERT_TRUE(meta) << meta.error();
+    EXPECT_EQ(meta->growLength, 0);
+    EXPECT_EQ(meta->pageCount, 0);
+    EXPECT_EQ(meta->pageElementCount, 2 * 3 * 2 * 4);
+
+    auto chunk = make_f32_buffer(
+        "chunk",
+        sandy::core::Shape({2, 3, 3, 4}),
+        {
+            0.0f, 1.0f, 2.0f, 3.0f,
+            4.0f, 5.0f, 6.0f, 7.0f,
+            8.0f, 9.0f, 10.0f, 11.0f,
+            12.0f, 13.0f, 14.0f, 15.0f,
+            16.0f, 17.0f, 18.0f, 19.0f,
+            20.0f, 21.0f, 22.0f, 23.0f,
+            24.0f, 25.0f, 26.0f, 27.0f,
+            28.0f, 29.0f, 30.0f, 31.0f,
+            32.0f, 33.0f, 34.0f, 35.0f,
+            36.0f, 37.0f, 38.0f, 39.0f,
+            40.0f, 41.0f, 42.0f, 43.0f,
+            44.0f, 45.0f, 46.0f, 47.0f,
+            48.0f, 49.0f, 50.0f, 51.0f,
+            52.0f, 53.0f, 54.0f, 55.0f,
+            56.0f, 57.0f, 58.0f, 59.0f,
+            60.0f, 61.0f, 62.0f, 63.0f,
+            64.0f, 65.0f, 66.0f, 67.0f,
+            68.0f, 69.0f, 70.0f, 71.0f,
+        });
+
+    auto append = device.appendPaged(*tensor, *chunk);
+    ASSERT_TRUE(append) << append.error();
+
+    meta = device.pagedMeta(*tensor);
+    ASSERT_TRUE(meta) << meta.error();
+    EXPECT_EQ(meta->growLength, 3);
+    EXPECT_EQ(meta->logicalDesc.shape, sandy::core::Shape({2, 3, 3, 4}));
+    EXPECT_EQ(meta->growDim, 2);
+    EXPECT_EQ(meta->pageSize, 2);
+    EXPECT_EQ(meta->pageCount, 2);
+    EXPECT_EQ(meta->pageElementCount, 48);
+
+    EXPECT_TRUE(device.deallocPaged(*tensor));
+    EXPECT_TRUE(device.destroyPagedPool(*pool));
+}
+
+TEST_F(CpuDeviceTest, PagedPoolAppendRejectsShapeMismatch) {
+    sandy::device::CpuDevice device;
+    sandy::device::DevicePagedPoolDesc poolDesc;
+    poolDesc.templateDesc = sandy::core::TensorDesc(
+        sandy::core::Shape({2, sandy::core::Shape::kDynamic, 4}),
+        sandy::core::DType::F32);
+    poolDesc.growDim = 1;
+    poolDesc.pageSize = 2;
+    poolDesc.maxPages = 4;
+
+    auto pool = device.createPagedPool(poolDesc);
+    ASSERT_TRUE(pool) << pool.error();
+    auto tensor = device.allocPaged(*pool, sandy::core::Shape({2, 0, 4}));
+    ASSERT_TRUE(tensor) << tensor.error();
+    auto chunk = make_f32_buffer(
+        "bad",
+        sandy::core::Shape({3, 1, 4}),
+        {0.0f, 1.0f, 2.0f, 3.0f, 4.0f, 5.0f,
+         6.0f, 7.0f, 8.0f, 9.0f, 10.0f, 11.0f});
+
+    auto append = device.appendPaged(*tensor, *chunk);
+    EXPECT_FALSE(append);
+    EXPECT_NE(append.error().find("non-grow dimension"), std::string::npos);
+
+    EXPECT_TRUE(device.deallocPaged(*tensor));
+    EXPECT_TRUE(device.destroyPagedPool(*pool));
+}
+
+TEST_F(CpuDeviceTest, CompileRejectsPagedTensorValue) {
+    sandy::ir::kernel_ir::Graph graph;
+    auto cache = graph.addValue(
+        paged_tensor_type(
+            sandy::core::Shape({2, sandy::core::Shape::kDynamic, 4}),
+            sandy::core::DType::F32,
+            1,
+            2));
+    graph.addOp<sandy::ir::kernel_ir::InputOp>(
+        sandy::ir::kernel_ir::InputSource{
+            sandy::ir::kernel_ir::InputSourceKind::Argument,
+            0,
+            ""},
+        cache);
+    graph.setOutputs({cache});
+
+    sandy::device::CpuDevice device;
+    auto compiled = device.compile(graph);
+    EXPECT_FALSE(compiled);
+    EXPECT_NE(compiled.error().find("paged tensor values yet"), std::string::npos);
 }
 
 TEST_F(CpuDeviceTest, DefaultViewRejectsDynamicShape) {

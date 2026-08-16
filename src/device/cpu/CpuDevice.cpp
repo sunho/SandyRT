@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <span>
 #include <string>
@@ -33,6 +34,76 @@ Result<size_t> tensor_byte_size(const core::TensorDesc& desc) {
     if (numel < 0)
         return make_error("cpu device buffer must have static shape");
     return static_cast<size_t>(numel) * core::dtype_size(desc.dtype);
+}
+
+Result<int64_t> checked_product(
+        const core::Shape& shape,
+        int begin,
+        int end) {
+    int64_t product = 1;
+    for (int i = begin; i < end; i++) {
+        auto dim = shape.dim(i);
+        if (dim <= 0)
+            return make_error("paged tensor pool dimensions must be static and positive");
+        if (product > std::numeric_limits<int64_t>::max() / dim)
+            return make_error("paged tensor element count overflow");
+        product *= dim;
+    }
+    return product;
+}
+
+Result<void> validate_paged_pool_desc(const DevicePagedPoolDesc& desc) {
+    const auto& shape = desc.templateDesc.shape;
+    if (shape.rank() <= 0)
+        return make_error("paged tensor pool rank must be >= 1");
+    if (desc.growDim < 0 || desc.growDim >= shape.rank())
+        return make_error("paged tensor pool grow_dim out of range");
+    if (desc.pageSize <= 0)
+        return make_error("paged tensor pool page_size must be > 0");
+    if (desc.initialPages < 0)
+        return make_error("paged tensor pool initial page count must be >= 0");
+    if (desc.maxPages >= 0 && desc.initialPages > desc.maxPages)
+        return make_error("paged tensor pool initial page count exceeds max page count");
+
+    for (int i = 0; i < shape.rank(); i++) {
+        auto dim = shape.dim(i);
+        if (i == desc.growDim) {
+            if (dim != core::Shape::kDynamic && dim < 0)
+                return make_error("paged tensor pool grow dimension must be dynamic or non-negative");
+            continue;
+        }
+        if (dim <= 0)
+            return make_error("paged tensor pool non-grow dimensions must be static and positive");
+    }
+    return {};
+}
+
+Result<void> validate_paged_logical_shape(
+        const DevicePagedPoolDesc& pool,
+        const core::Shape& logicalShape) {
+    const auto& templateShape = pool.templateDesc.shape;
+    if (logicalShape.rank() != templateShape.rank())
+        return make_error("paged tensor logical shape rank mismatch");
+    for (int i = 0; i < logicalShape.rank(); i++) {
+        auto dim = logicalShape.dim(i);
+        if (dim < 0)
+            return make_error("paged tensor logical shape must be concrete");
+        if (i == pool.growDim)
+            continue;
+        if (dim != templateShape.dim(i))
+            return make_error("paged tensor logical shape non-grow dimension mismatch");
+    }
+    return {};
+}
+
+int64_t ceil_div(int64_t value, int64_t divisor) {
+    return (value + divisor - 1) / divisor;
+}
+
+core::Shape shape_with_grow_length(core::Shape shape, int64_t growDim, int64_t growLength) {
+    auto dims = shape.dims();
+    dims[static_cast<size_t>(growDim)] = growLength;
+    return core::Shape(std::move(dims));
 }
 
 struct SimpleElementwiseKernel {
@@ -122,6 +193,13 @@ Result<DeviceCompiledGraphId> CpuDevice::compile(const ir::kernel_ir::Graph& gra
     auto verify = graph.verify();
     if (!verify)
         return make_error(verify.error());
+
+    for (const auto& value : graph.values()) {
+        if (value.type.kind == ir::kernel_ir::ValueKind::PagedTensor) {
+            return make_error(
+                "cpu device KernelIR runner does not support paged tensor values yet");
+        }
+    }
 
     CpuDeviceGraph compiled;
     for (const auto& opPtr : graph.ops()) {
@@ -234,6 +312,228 @@ Result<DeviceBufferId> CpuDevice::load(core::TensorBuffer& src) {
     auto id = nextBufferId_++;
     buffers_[id] = std::move(buffer);
     return id;
+}
+
+Result<DevicePagedPoolId> CpuDevice::createPagedPool(DevicePagedPoolDesc desc) {
+    auto valid = validate_paged_pool_desc(desc);
+    if (!valid)
+        return make_error(valid.error());
+
+    auto outer = checked_product(desc.templateDesc.shape, 0, static_cast<int>(desc.growDim));
+    if (!outer)
+        return make_error(outer.error());
+    auto inner = checked_product(
+        desc.templateDesc.shape,
+        static_cast<int>(desc.growDim) + 1,
+        desc.templateDesc.shape.rank());
+    if (!inner)
+        return make_error(inner.error());
+    if (*outer > std::numeric_limits<int64_t>::max() / desc.pageSize)
+        return make_error("paged tensor page element count overflow");
+    auto outerPage = *outer * desc.pageSize;
+    if (outerPage > std::numeric_limits<int64_t>::max() / *inner)
+        return make_error("paged tensor page element count overflow");
+    auto pageElementCount = outerPage * *inner;
+    auto elementSize = core::dtype_size(desc.templateDesc.dtype);
+    if (pageElementCount > static_cast<int64_t>(std::numeric_limits<size_t>::max() / elementSize))
+        return make_error("paged tensor page byte size overflow");
+
+    CpuPagedPool pool;
+    pool.desc = std::move(desc);
+    pool.outerElementCount = *outer;
+    pool.innerElementCount = *inner;
+    pool.pageElementCount = pageElementCount;
+    pool.pageBytes = static_cast<size_t>(pageElementCount) * elementSize;
+
+    auto maxPages = pool.desc.maxPages < 0 ? 0 : static_cast<size_t>(pool.desc.maxPages);
+    auto initialized = pool.pages.initialize(
+        pool.pageBytes,
+        static_cast<size_t>(pool.desc.initialPages),
+        maxPages);
+    if (!initialized)
+        return make_error(initialized.error());
+
+    auto id = nextPagedPoolId_++;
+    pagedPools_[id] = std::move(pool);
+    return id;
+}
+
+Result<void> CpuDevice::destroyPagedPool(DevicePagedPoolId pool) {
+    auto it = pagedPools_.find(pool);
+    if (it == pagedPools_.end())
+        return make_error("cpu device paged pool not found");
+    for (const auto& item : pagedTensors_) {
+        if (item.second.pool == pool)
+            return make_error("cpu device paged pool still has live tensors");
+    }
+    pagedPools_.erase(it);
+    return {};
+}
+
+Result<DevicePagedTensorId> CpuDevice::allocPaged(
+        DevicePagedPoolId poolId,
+        core::Shape logicalShape) {
+    auto poolIt = pagedPools_.find(poolId);
+    if (poolIt == pagedPools_.end())
+        return make_error("cpu device paged pool not found");
+
+    auto valid = validate_paged_logical_shape(poolIt->second.desc, logicalShape);
+    if (!valid)
+        return make_error(valid.error());
+
+    CpuPagedTensor tensor;
+    tensor.pool = poolId;
+    tensor.growLength = logicalShape.dim(static_cast<int>(poolIt->second.desc.growDim));
+    tensor.logicalShape = std::move(logicalShape);
+
+    auto id = nextPagedTensorId_++;
+    pagedTensors_[id] = std::move(tensor);
+
+    auto requiredPages = ceil_div(
+        pagedTensors_[id].growLength,
+        poolIt->second.desc.pageSize);
+    auto reserved = reservePaged(id, requiredPages);
+    if (!reserved) {
+        pagedTensors_.erase(id);
+        return make_error(reserved.error());
+    }
+    return id;
+}
+
+Result<void> CpuDevice::deallocPaged(DevicePagedTensorId tensorId) {
+    auto tensorIt = pagedTensors_.find(tensorId);
+    if (tensorIt == pagedTensors_.end())
+        return make_error("cpu device paged tensor not found");
+    auto poolIt = pagedPools_.find(tensorIt->second.pool);
+    if (poolIt == pagedPools_.end())
+        return make_error("cpu device paged pool not found");
+
+    for (auto page : tensorIt->second.pageIndices) {
+        auto deallocated = poolIt->second.pages.deallocate(page);
+        if (!deallocated)
+            return make_error(deallocated.error());
+    }
+    pagedTensors_.erase(tensorIt);
+    return {};
+}
+
+Result<void> CpuDevice::reservePaged(DevicePagedTensorId tensorId, int64_t pageCount) {
+    if (pageCount < 0)
+        return make_error("cpu device paged tensor reserve page count must be >= 0");
+    auto tensorIt = pagedTensors_.find(tensorId);
+    if (tensorIt == pagedTensors_.end())
+        return make_error("cpu device paged tensor not found");
+    auto poolIt = pagedPools_.find(tensorIt->second.pool);
+    if (poolIt == pagedPools_.end())
+        return make_error("cpu device paged pool not found");
+
+    auto& pages = tensorIt->second.pageIndices;
+    while (static_cast<int64_t>(pages.size()) < pageCount) {
+        auto page = poolIt->second.pages.allocate();
+        if (!page)
+            return make_error(page.error());
+        pages.push_back(*page);
+    }
+    return {};
+}
+
+Result<void> CpuDevice::appendPaged(
+        DevicePagedTensorId tensorId,
+        core::TensorBuffer& denseChunk) {
+    auto tensorIt = pagedTensors_.find(tensorId);
+    if (tensorIt == pagedTensors_.end())
+        return make_error("cpu device paged tensor not found");
+    auto poolIt = pagedPools_.find(tensorIt->second.pool);
+    if (poolIt == pagedPools_.end())
+        return make_error("cpu device paged pool not found");
+
+    auto access = denseChunk.access();
+    if (!access)
+        return make_error(access.error());
+    const auto& chunkDesc = (*access).desc();
+    const auto& pool = poolIt->second;
+    auto valid = validate_paged_logical_shape(pool.desc, chunkDesc.shape);
+    if (!valid)
+        return make_error(valid.error());
+    if (chunkDesc.dtype != pool.desc.templateDesc.dtype) {
+        return make_error("cpu device paged append dtype mismatch");
+    }
+
+    int growDim = static_cast<int>(pool.desc.growDim);
+    auto chunkGrowLength = chunkDesc.shape.dim(growDim);
+    if (chunkGrowLength <= 0)
+        return make_error("cpu device paged append grow dimension must be > 0");
+
+    auto chunkNumel = chunkDesc.shape.numel();
+    if (chunkNumel < 0)
+        return make_error("cpu device paged append chunk shape must be concrete");
+    auto expectedBytes = static_cast<size_t>(chunkNumel) * core::dtype_size(chunkDesc.dtype);
+    if ((*access).data().size() != expectedBytes)
+        return make_error("cpu device paged append chunk byte size mismatch");
+
+    auto& tensor = tensorIt->second;
+    auto oldGrowLength = tensor.growLength;
+    if (oldGrowLength > std::numeric_limits<int64_t>::max() - chunkGrowLength)
+        return make_error("cpu device paged append grow length overflow");
+    auto newGrowLength = oldGrowLength + chunkGrowLength;
+    auto requiredPages = ceil_div(newGrowLength, pool.desc.pageSize);
+    auto reserved = reservePaged(tensorId, requiredPages);
+    if (!reserved)
+        return make_error(reserved.error());
+
+    auto elementSize = core::dtype_size(chunkDesc.dtype);
+    auto innerBytes = static_cast<size_t>(pool.innerElementCount) * elementSize;
+    auto source = (*access).data();
+
+    for (int64_t outer = 0; outer < pool.outerElementCount; outer++) {
+        for (int64_t chunkGrow = 0; chunkGrow < chunkGrowLength; chunkGrow++) {
+            auto dstGrow = oldGrowLength + chunkGrow;
+            auto dstPageOrdinal = dstGrow / pool.desc.pageSize;
+            auto dstGrowInPage = dstGrow % pool.desc.pageSize;
+            auto pageIndex = tensor.pageIndices[static_cast<size_t>(dstPageOrdinal)];
+
+            auto page = poolIt->second.pages.page(pageIndex);
+            if (!page)
+                return make_error(page.error());
+
+            auto sourceElement =
+                (outer * chunkGrowLength + chunkGrow) * pool.innerElementCount;
+            auto dstElement =
+                (outer * pool.desc.pageSize + dstGrowInPage) * pool.innerElementCount;
+            std::memcpy(
+                page->data() + static_cast<size_t>(dstElement) * elementSize,
+                source.data() + static_cast<size_t>(sourceElement) * elementSize,
+                innerBytes);
+        }
+    }
+
+    tensor.growLength = newGrowLength;
+    tensor.logicalShape = shape_with_grow_length(
+        pool.desc.templateDesc.shape,
+        pool.desc.growDim,
+        newGrowLength);
+    return {};
+}
+
+Result<DevicePagedTensorMeta> CpuDevice::pagedMeta(DevicePagedTensorId tensorId) const {
+    auto tensorIt = pagedTensors_.find(tensorId);
+    if (tensorIt == pagedTensors_.end())
+        return make_error("cpu device paged tensor not found");
+    auto poolIt = pagedPools_.find(tensorIt->second.pool);
+    if (poolIt == pagedPools_.end())
+        return make_error("cpu device paged pool not found");
+
+    DevicePagedTensorMeta meta;
+    meta.pool = tensorIt->second.pool;
+    meta.logicalDesc = core::TensorDesc(
+        tensorIt->second.logicalShape,
+        poolIt->second.desc.templateDesc.dtype);
+    meta.growDim = poolIt->second.desc.growDim;
+    meta.pageSize = poolIt->second.desc.pageSize;
+    meta.growLength = tensorIt->second.growLength;
+    meta.pageCount = static_cast<int64_t>(tensorIt->second.pageIndices.size());
+    meta.pageElementCount = poolIt->second.pageElementCount;
+    return meta;
 }
 
 Result<TensorBufferPtr> CpuDevice::read(DeviceTensorView src) {

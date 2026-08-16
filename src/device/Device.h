@@ -23,6 +23,16 @@ public:
 
     virtual Result<DeviceBufferId> load(core::TensorBuffer& src) = 0;
 
+    virtual Result<DevicePagedPoolId> createPagedPool(DevicePagedPoolDesc desc);
+    virtual Result<void> destroyPagedPool(DevicePagedPoolId pool);
+    virtual Result<DevicePagedTensorId> allocPaged(
+        DevicePagedPoolId pool,
+        core::Shape logicalShape);
+    virtual Result<void> deallocPaged(DevicePagedTensorId tensor);
+    virtual Result<void> reservePaged(DevicePagedTensorId tensor, int64_t pageCount);
+    virtual Result<void> appendPaged(DevicePagedTensorId dst, core::TensorBuffer& denseChunk);
+    virtual Result<DevicePagedTensorMeta> pagedMeta(DevicePagedTensorId tensor) const;
+
     virtual Result<std::vector<int64_t>> defaultStrides(const core::Shape& shape) const;
     virtual Result<TensorViewDesc> defaultView(core::TensorDesc desc) const;
     virtual Result<bool> isDefaultView(const TensorViewDesc& view) const;

@@ -5,6 +5,34 @@
 
 namespace sandy::device {
 
+Result<DevicePagedPoolId> Device::createPagedPool(DevicePagedPoolDesc) {
+    return make_error("device does not support paged tensor pools");
+}
+
+Result<void> Device::destroyPagedPool(DevicePagedPoolId) {
+    return make_error("device does not support paged tensor pools");
+}
+
+Result<DevicePagedTensorId> Device::allocPaged(DevicePagedPoolId, core::Shape) {
+    return make_error("device does not support paged tensors");
+}
+
+Result<void> Device::deallocPaged(DevicePagedTensorId) {
+    return make_error("device does not support paged tensors");
+}
+
+Result<void> Device::reservePaged(DevicePagedTensorId, int64_t) {
+    return make_error("device does not support paged tensors");
+}
+
+Result<void> Device::appendPaged(DevicePagedTensorId, core::TensorBuffer&) {
+    return make_error("device does not support paged tensors");
+}
+
+Result<DevicePagedTensorMeta> Device::pagedMeta(DevicePagedTensorId) const {
+    return make_error("device does not support paged tensors");
+}
+
 Result<std::vector<int64_t>> Device::defaultStrides(const core::Shape& shape) const {
     if (shape.has_dynamic())
         return make_error("cannot compute default strides for dynamic shape");

@@ -1,4 +1,5 @@
 add_library(CoreLib
+  Allocator.cpp
   Tensor.cpp
   TensorBuffer.cpp
   TensorCalc.cpp
