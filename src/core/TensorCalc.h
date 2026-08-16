@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <span>
+#include <vector>
 
 namespace sandy::core {
 
@@ -13,9 +14,13 @@ struct TensorRef {
 
     TensorDesc desc;
     std::span<const uint8_t> bytes;
+    std::vector<int64_t> strides;
+    int64_t storageOffset = 0;
     LoadFloatFn loadFloat = nullptr;
 
-    float load_float(size_t index) const { return loadFloat(bytes, index); }
+    size_t storage_index(size_t index) const;
+    bool is_contiguous() const;
+    float load_float(size_t index) const { return loadFloat(bytes, storage_index(index)); }
 };
 
 struct MutableTensorRef {
@@ -24,17 +29,31 @@ struct MutableTensorRef {
 
     TensorDesc desc;
     std::span<uint8_t> bytes;
+    std::vector<int64_t> strides;
+    int64_t storageOffset = 0;
     LoadFloatFn loadFloat = nullptr;
     StoreFloatFn storeFloat = nullptr;
 
-    float load_float(size_t index) const { return loadFloat(bytes, index); }
+    size_t storage_index(size_t index) const;
+    bool is_contiguous() const;
+    float load_float(size_t index) const { return loadFloat(bytes, storage_index(index)); }
     void store_float(size_t index, float value) const {
-        storeFloat(bytes, index, value);
+        storeFloat(bytes, storage_index(index), value);
     }
 };
 
 Result<TensorRef> make_tensor_ref(TensorDesc desc, std::span<const uint8_t> bytes);
+Result<TensorRef> make_tensor_ref(
+    TensorDesc desc,
+    std::span<const uint8_t> bytes,
+    std::span<const int64_t> strides,
+    int64_t storageOffset);
 Result<MutableTensorRef> make_mutable_tensor_ref(TensorDesc desc, std::span<uint8_t> bytes);
+Result<MutableTensorRef> make_mutable_tensor_ref(
+    TensorDesc desc,
+    std::span<uint8_t> bytes,
+    std::span<const int64_t> strides,
+    int64_t storageOffset);
 
 Result<void> linear(
     TensorRef x,

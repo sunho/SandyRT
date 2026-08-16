@@ -8,6 +8,7 @@
 
 #include <cstdint>
 #include <span>
+#include <vector>
 
 namespace sandy::engine {
 
@@ -22,13 +23,17 @@ public:
 
     virtual Result<DeviceBufferId> load(core::TensorBuffer& src) = 0;
 
+    virtual Result<std::vector<int64_t>> defaultStrides(const core::Shape& shape) const;
+    virtual Result<TensorViewDesc> defaultView(core::TensorDesc desc) const;
+    virtual Result<bool> isDefaultView(const TensorViewDesc& view) const;
+
     virtual Result<void> run(
         DeviceCompiledGraphId graph,
         ir::kernel_ir::OpId op,
-        std::span<const DeviceBufferId> inputs,
-        std::span<const DeviceBufferId> outputs) = 0;
+        std::span<const DeviceTensorView> inputs,
+        std::span<const DeviceTensorView> outputs) = 0;
 
-    virtual Result<TensorBufferPtr> read(DeviceBufferId src) = 0;
+    virtual Result<TensorBufferPtr> read(DeviceTensorView src) = 0;
 };
 
 } // namespace sandy::engine

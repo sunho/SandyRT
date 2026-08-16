@@ -4,6 +4,7 @@
 #include "TensorCalc.h"
 
 #include <algorithm>
+#include <cstring>
 #include <memory>
 #include <span>
 #include <string>
@@ -235,22 +236,55 @@ Result<DeviceBufferId> CpuDevice::load(core::TensorBuffer& src) {
     return id;
 }
 
+Result<TensorBufferPtr> CpuDevice::read(DeviceTensorView src) {
+    auto it = buffers_.find(src.buffer);
+    if (it == buffers_.end())
+        return make_error("cpu device buffer not found");
+    auto data = it->second.borrowed ? it->second.borrowed->data() : std::span<const uint8_t>(it->second.data);
+    auto source = core::make_tensor_ref(
+        src.view.desc,
+        data,
+        src.view.strides,
+        src.view.storageOffset);
+    if (!source)
+        return make_error(source.error());
+
+    auto numel = src.view.desc.shape.numel();
+    if (numel < 0)
+        return make_error("cpu device cannot read dynamic view");
+    std::vector<uint8_t> outData(
+        static_cast<size_t>(numel) * core::dtype_size(src.view.desc.dtype));
+
+    auto elementSize = core::dtype_size(src.view.desc.dtype);
+    for (size_t i = 0; i < static_cast<size_t>(numel); i++) {
+        auto storageIndex = source->storage_index(i);
+        std::memcpy(
+            outData.data() + i * elementSize,
+            data.data() + storageIndex * elementSize,
+            elementSize);
+    }
+
+    TensorBufferPtr buffer = std::make_shared<CpuTensorBuffer>(
+        src.view.desc,
+        std::move(outData));
+    return buffer;
+}
+
 Result<TensorBufferPtr> CpuDevice::read(DeviceBufferId src) {
     auto it = buffers_.find(src);
     if (it == buffers_.end())
         return make_error("cpu device buffer not found");
-    auto data = it->second.borrowed ? it->second.borrowed->data() : std::span<const uint8_t>(it->second.data);
-    TensorBufferPtr buffer = std::make_shared<CpuTensorBuffer>(
-        it->second.desc,
-        std::vector<uint8_t>(data.begin(), data.end()));
-    return buffer;
+    auto view = defaultView(it->second.desc);
+    if (!view)
+        return make_error(view.error());
+    return read(DeviceTensorView{src, view.take()});
 }
 
 Result<void> CpuDevice::run(
         DeviceCompiledGraphId graphId,
         ir::kernel_ir::OpId opId,
-        std::span<const DeviceBufferId> inputs,
-        std::span<const DeviceBufferId> outputs) {
+        std::span<const DeviceTensorView> inputs,
+        std::span<const DeviceTensorView> outputs) {
     auto graphIt = graphs_.find(graphId);
     if (graphIt == graphs_.end())
         return make_error("cpu device compiled graph not found");
@@ -265,20 +299,28 @@ Result<void> CpuDevice::run(
         return make_error("cpu device output arity mismatch");
 
     auto inputRef = [&](size_t index) -> Result<core::TensorRef> {
-        auto it = buffers_.find(inputs[index]);
+        auto it = buffers_.find(inputs[index].buffer);
         if (it == buffers_.end())
             return make_error("cpu device input buffer not found");
         auto data = it->second.borrowed ? it->second.borrowed->data() : std::span<const uint8_t>(it->second.data);
-        return core::make_tensor_ref(it->second.desc, data);
+        return core::make_tensor_ref(
+            inputs[index].view.desc,
+            data,
+            inputs[index].view.strides,
+            inputs[index].view.storageOffset);
     };
 
     auto outputRef = [&](size_t index) -> Result<core::MutableTensorRef> {
-        auto it = buffers_.find(outputs[index]);
+        auto it = buffers_.find(outputs[index].buffer);
         if (it == buffers_.end())
             return make_error("cpu device output buffer not found");
         if (it->second.borrowed)
             return make_error("cpu device output buffer is not writable");
-        return core::make_mutable_tensor_ref(it->second.desc, it->second.data);
+        return core::make_mutable_tensor_ref(
+            outputs[index].view.desc,
+            it->second.data,
+            outputs[index].view.strides,
+            outputs[index].view.storageOffset);
     };
 
     switch (kernel.kind) {

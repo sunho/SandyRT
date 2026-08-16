@@ -88,6 +88,17 @@ sandy::ir::kernel_ir::ValueType tensor_type(
     };
 }
 
+sandy::engine::DeviceTensorView tensor_view(
+        sandy::engine::CpuDevice& device,
+        sandy::engine::DeviceBufferId buffer,
+        sandy::core::TensorDesc desc) {
+    auto view = device.defaultView(std::move(desc));
+    return sandy::engine::DeviceTensorView{
+        buffer,
+        view.take(),
+    };
+}
+
 } // namespace
 
 TEST_F(CpuDeviceTest, LoadReadAndDeallocBuffer) {
@@ -102,6 +113,15 @@ TEST_F(CpuDeviceTest, LoadReadAndDeallocBuffer) {
     EXPECT_TRUE(dealloc) << dealloc.error();
     auto readAfterDealloc = device.read(*loaded);
     EXPECT_FALSE(readAfterDealloc);
+}
+
+TEST_F(CpuDeviceTest, DefaultViewRejectsDynamicShape) {
+    sandy::engine::CpuDevice device;
+    auto view = device.defaultView(
+        sandy::core::TensorDesc(sandy::core::Shape({sandy::core::Shape::kDynamic, 2}),
+                                sandy::core::DType::F32));
+    EXPECT_FALSE(view);
+    EXPECT_NE(view.error().find("dynamic shape"), std::string::npos);
 }
 
 TEST_F(CpuDeviceTest, RunReshapeF32) {
@@ -128,8 +148,12 @@ TEST_F(CpuDeviceTest, RunReshapeF32) {
     auto outBuffer = device.alloc(sandy::core::TensorDesc(out->shape, out->dtype));
     ASSERT_TRUE(outBuffer) << outBuffer.error();
 
-    std::vector<sandy::engine::DeviceBufferId> inputs = {*xBuffer};
-    std::vector<sandy::engine::DeviceBufferId> outputs = {*outBuffer};
+    std::vector<sandy::engine::DeviceTensorView> inputs = {
+        tensor_view(device, *xBuffer, xHost->desc()),
+    };
+    std::vector<sandy::engine::DeviceTensorView> outputs = {
+        tensor_view(device, *outBuffer, sandy::core::TensorDesc(out->shape, out->dtype)),
+    };
     auto run = device.run(*compiled, op, inputs, outputs);
     ASSERT_TRUE(run) << run.error();
 
@@ -163,8 +187,13 @@ TEST_F(CpuDeviceTest, RunAddF32) {
     auto outBuffer = device.alloc(sandy::core::TensorDesc(out->shape, out->dtype));
     ASSERT_TRUE(outBuffer) << outBuffer.error();
 
-    std::vector<sandy::engine::DeviceBufferId> inputs = {*lhsBuffer, *rhsBuffer};
-    std::vector<sandy::engine::DeviceBufferId> outputs = {*outBuffer};
+    std::vector<sandy::engine::DeviceTensorView> inputs = {
+        tensor_view(device, *lhsBuffer, lhsHost->desc()),
+        tensor_view(device, *rhsBuffer, rhsHost->desc()),
+    };
+    std::vector<sandy::engine::DeviceTensorView> outputs = {
+        tensor_view(device, *outBuffer, sandy::core::TensorDesc(out->shape, out->dtype)),
+    };
     auto run = device.run(*compiled, op, inputs, outputs);
     ASSERT_TRUE(run) << run.error();
 
@@ -203,8 +232,14 @@ TEST_F(CpuDeviceTest, RunLinearF32) {
     auto outBuffer = device.alloc(sandy::core::TensorDesc(out->shape, out->dtype));
     ASSERT_TRUE(outBuffer) << outBuffer.error();
 
-    std::vector<sandy::engine::DeviceBufferId> inputs = {*xBuffer, *weightBuffer, *biasBuffer};
-    std::vector<sandy::engine::DeviceBufferId> outputs = {*outBuffer};
+    std::vector<sandy::engine::DeviceTensorView> inputs = {
+        tensor_view(device, *xBuffer, xHost->desc()),
+        tensor_view(device, *weightBuffer, weightHost->desc()),
+        tensor_view(device, *biasBuffer, biasHost->desc()),
+    };
+    std::vector<sandy::engine::DeviceTensorView> outputs = {
+        tensor_view(device, *outBuffer, sandy::core::TensorDesc(out->shape, out->dtype)),
+    };
     auto run = device.run(*compiled, op, inputs, outputs);
     ASSERT_TRUE(run) << run.error();
 
@@ -236,8 +271,12 @@ TEST_F(CpuDeviceTest, RunTanhF32) {
     auto outBuffer = device.alloc(sandy::core::TensorDesc(out->shape, out->dtype));
     ASSERT_TRUE(outBuffer) << outBuffer.error();
 
-    std::vector<sandy::engine::DeviceBufferId> inputs = {*xBuffer};
-    std::vector<sandy::engine::DeviceBufferId> outputs = {*outBuffer};
+    std::vector<sandy::engine::DeviceTensorView> inputs = {
+        tensor_view(device, *xBuffer, xHost->desc()),
+    };
+    std::vector<sandy::engine::DeviceTensorView> outputs = {
+        tensor_view(device, *outBuffer, sandy::core::TensorDesc(out->shape, out->dtype)),
+    };
     auto run = device.run(*compiled, op, inputs, outputs);
     ASSERT_TRUE(run) << run.error();
 

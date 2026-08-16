@@ -23,10 +23,11 @@ public:
     Result<void> run(
         DeviceCompiledGraphId graph,
         ir::kernel_ir::OpId op,
-        std::span<const DeviceBufferId> inputs,
-        std::span<const DeviceBufferId> outputs) override;
+        std::span<const DeviceTensorView> inputs,
+        std::span<const DeviceTensorView> outputs) override;
 
-    Result<TensorBufferPtr> read(DeviceBufferId src) override;
+    Result<TensorBufferPtr> read(DeviceTensorView src) override;
+    Result<TensorBufferPtr> read(DeviceBufferId src);
 
 private:
     struct CpuDeviceBuffer {

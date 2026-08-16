@@ -16,7 +16,7 @@ namespace sandy::engine {
 
 struct CudaDeviceBufferView {
     void* data = nullptr;
-    core::TensorDesc desc;
+    TensorViewDesc view;
     size_t bytes = 0;
 };
 

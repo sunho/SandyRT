@@ -1,4 +1,5 @@
 add_library(EngineLib
+  Device.cpp
   Engine.cpp
   DeviceWiseCopier.cpp
   CpuDevice.cpp

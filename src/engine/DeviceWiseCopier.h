@@ -10,17 +10,17 @@ class DeviceWiseCopier {
 public:
     virtual ~DeviceWiseCopier() = default;
 
-    virtual Result<DeviceBufferId> copy(
-        Device& source,
-        DeviceBufferId sourceBuffer,
+    virtual Result<DeviceTensorView> copy(
+        Device& sourceDevice,
+        DeviceTensorView sourceView,
         Device& target) = 0;
 };
 
 class HostBounceDeviceWiseCopier final : public DeviceWiseCopier {
 public:
-    Result<DeviceBufferId> copy(
-        Device& source,
-        DeviceBufferId sourceBuffer,
+    Result<DeviceTensorView> copy(
+        Device& sourceDevice,
+        DeviceTensorView sourceView,
         Device& target) override;
 };
 

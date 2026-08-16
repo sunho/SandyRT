@@ -261,14 +261,21 @@ Result<CudaDeviceBufferView> CudaDevice::buffer_view(DeviceBufferId buffer, bool
             writable ? "cuda device output buffer not found"
                      : "cuda device input buffer not found");
     }
-    return CudaDeviceBufferView{it->second.data, it->second.desc, it->second.bytes};
+    auto view = defaultView(it->second.desc);
+    if (!view)
+        return make_error(view.error());
+    return CudaDeviceBufferView{
+        it->second.data,
+        view.take(),
+        it->second.bytes,
+    };
 }
 
 Result<void> CudaDevice::run(
         DeviceCompiledGraphId graphId,
         ir::kernel_ir::OpId opId,
-        std::span<const DeviceBufferId> inputs,
-        std::span<const DeviceBufferId> outputs) {
+        std::span<const DeviceTensorView> inputs,
+        std::span<const DeviceTensorView> outputs) {
     auto stream = ensure_stream();
     if (!stream)
         return make_error(stream.error());
@@ -289,19 +296,23 @@ Result<void> CudaDevice::run(
     std::vector<CudaDeviceBufferView> inputViews;
     inputViews.reserve(inputs.size());
     for (auto input : inputs) {
-        auto view = buffer_view(input, false);
+        auto view = buffer_view(input.buffer, false);
         if (!view)
             return make_error(view.error());
-        inputViews.push_back(view.take());
+        auto viewValue = view.take();
+        viewValue.view = input.view;
+        inputViews.push_back(std::move(viewValue));
     }
 
     std::vector<CudaDeviceBufferView> outputViews;
     outputViews.reserve(outputs.size());
     for (auto output : outputs) {
-        auto view = buffer_view(output, true);
+        auto view = buffer_view(output.buffer, true);
         if (!view)
             return make_error(view.error());
-        outputViews.push_back(view.take());
+        auto viewValue = view.take();
+        viewValue.view = output.view;
+        outputViews.push_back(std::move(viewValue));
     }
 
     CudaLaunchContext context{
@@ -359,11 +370,11 @@ Result<void> CudaDevice::run(
     return make_error("cuda device cannot run unknown op kind");
 }
 
-Result<TensorBufferPtr> CudaDevice::read(DeviceBufferId src) {
+Result<TensorBufferPtr> CudaDevice::read(DeviceTensorView src) {
     auto stream = ensure_stream();
     if (!stream)
         return make_error(stream.error());
-    auto it = buffers_.find(src);
+    auto it = buffers_.find(src.buffer);
     if (it == buffers_.end())
         return make_error("cuda device buffer not found");
 
@@ -385,9 +396,19 @@ Result<TensorBufferPtr> CudaDevice::read(DeviceBufferId src) {
     }
 
     TensorBufferPtr buffer = std::make_shared<CudaHostTensorBuffer>(
-        it->second.desc,
+        src.view.desc,
         std::move(data));
     return buffer;
+}
+
+Result<TensorBufferPtr> CudaDevice::read(DeviceBufferId src) {
+    auto it = buffers_.find(src);
+    if (it == buffers_.end())
+        return make_error("cuda device buffer not found");
+    auto view = defaultView(it->second.desc);
+    if (!view)
+        return make_error(view.error());
+    return read(DeviceTensorView{src, view.take()});
 }
 
 } // namespace sandy::engine

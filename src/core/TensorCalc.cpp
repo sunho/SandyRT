@@ -22,6 +22,8 @@ namespace sandy::core {
 
 namespace {
 
+std::vector<int64_t> strides_for(const Shape& shape);
+
 float load_f32(std::span<const uint8_t> data, size_t index) {
     float value = 0.0f;
     std::memcpy(&value, data.data() + index * sizeof(float), sizeof(float));
@@ -72,16 +74,40 @@ MutableTensorRef::StoreFloatFn float_storer_for(DType dtype) {
 Result<void> require_bytes(
         std::span<const uint8_t> data,
         const TensorDesc& desc,
+        std::span<const int64_t> strides,
+        int64_t storageOffset,
         const std::string& name) {
     auto numel = desc.shape.numel();
     if (numel < 0)
         return make_error(name + " must have static shape");
 
-    auto expected = static_cast<size_t>(numel) * dtype_size(desc.dtype);
-    if (data.size() != expected)
+    if (static_cast<int>(strides.size()) != desc.shape.rank())
+        return make_error(name + " strides rank mismatch");
+    if (storageOffset < 0)
+        return make_error(name + " storage offset must be non-negative");
+
+    int64_t maxStorageIndex = storageOffset;
+    for (int i = 0; i < desc.shape.rank(); i++) {
+        if (strides[static_cast<size_t>(i)] < 0)
+            return make_error(name + " strides must be non-negative");
+        if (desc.shape.dim(i) > 0) {
+            maxStorageIndex += (desc.shape.dim(i) - 1) *
+                strides[static_cast<size_t>(i)];
+        }
+    }
+
+    auto expected = static_cast<size_t>(maxStorageIndex + 1) * dtype_size(desc.dtype);
+    if (data.size() < expected)
         return make_error(name + " byte size mismatch");
 
     return {};
+}
+
+Result<void> require_bytes(
+        std::span<const uint8_t> data,
+        const TensorDesc& desc,
+        const std::string& name) {
+    return require_bytes(data, desc, strides_for(desc.shape), 0, name);
 }
 
 Result<void> require_float_tensor(const TensorRef& ref, const std::string& name) {
@@ -122,14 +148,15 @@ int64_t numel_or_error(const Shape& shape, const std::string& name) {
 }
 
 int64_t read_index(const TensorRef& ids, size_t index) {
+    size_t storageIndex = ids.storage_index(index);
     if (ids.desc.dtype == DType::I32) {
         int32_t value = 0;
-        std::memcpy(&value, ids.bytes.data() + index * sizeof(int32_t), sizeof(int32_t));
+        std::memcpy(&value, ids.bytes.data() + storageIndex * sizeof(int32_t), sizeof(int32_t));
         return value;
     }
 
     int64_t value = 0;
-    std::memcpy(&value, ids.bytes.data() + index * sizeof(int64_t), sizeof(int64_t));
+    std::memcpy(&value, ids.bytes.data() + storageIndex * sizeof(int64_t), sizeof(int64_t));
     return value;
 }
 
@@ -412,7 +439,7 @@ bool can_use_fast_matmul(
 void copy_tensor_to_f32(TensorRef src, std::vector<float>& dst) {
     auto numel = src.desc.shape.numel();
     dst.resize(static_cast<size_t>(numel));
-    if (src.desc.dtype == DType::F32) {
+    if (src.desc.dtype == DType::F32 && src.is_contiguous()) {
         std::memcpy(dst.data(), src.bytes.data(), dst.size() * sizeof(float));
         return;
     }
@@ -421,7 +448,7 @@ void copy_tensor_to_f32(TensorRef src, std::vector<float>& dst) {
 }
 
 void store_f32_to_output(std::span<const float> src, MutableTensorRef out) {
-    if (out.desc.dtype == DType::F32) {
+    if (out.desc.dtype == DType::F32 && out.is_contiguous()) {
         std::memcpy(out.bytes.data(), src.data(), src.size() * sizeof(float));
         return;
     }
@@ -535,22 +562,103 @@ Result<void> binary_elementwise(
 
 } // namespace
 
+size_t TensorRef::storage_index(size_t index) const {
+    if (desc.shape.rank() == 0)
+        return static_cast<size_t>(storageOffset);
+
+    size_t storage = static_cast<size_t>(storageOffset);
+    size_t remaining = index;
+    auto logicalStrides = strides_for(desc.shape);
+    for (int axis = 0; axis < desc.shape.rank(); axis++) {
+        auto logicalStride = static_cast<size_t>(logicalStrides[static_cast<size_t>(axis)]);
+        size_t coord = logicalStride == 0 ? 0 : remaining / logicalStride;
+        if (logicalStride != 0)
+            remaining %= logicalStride;
+        storage += coord * static_cast<size_t>(strides[static_cast<size_t>(axis)]);
+    }
+    return storage;
+}
+
+bool TensorRef::is_contiguous() const {
+    return storageOffset == 0 && strides == strides_for(desc.shape);
+}
+
+size_t MutableTensorRef::storage_index(size_t index) const {
+    if (desc.shape.rank() == 0)
+        return static_cast<size_t>(storageOffset);
+
+    size_t storage = static_cast<size_t>(storageOffset);
+    size_t remaining = index;
+    auto logicalStrides = strides_for(desc.shape);
+    for (int axis = 0; axis < desc.shape.rank(); axis++) {
+        auto logicalStride = static_cast<size_t>(logicalStrides[static_cast<size_t>(axis)]);
+        size_t coord = logicalStride == 0 ? 0 : remaining / logicalStride;
+        if (logicalStride != 0)
+            remaining %= logicalStride;
+        storage += coord * static_cast<size_t>(strides[static_cast<size_t>(axis)]);
+    }
+    return storage;
+}
+
+bool MutableTensorRef::is_contiguous() const {
+    return storageOffset == 0 && strides == strides_for(desc.shape);
+}
+
 Result<TensorRef> make_tensor_ref(TensorDesc desc, std::span<const uint8_t> bytes) {
-    auto byteCheck = require_bytes(bytes, desc, "tensor ref");
+    auto strides = strides_for(desc.shape);
+    auto byteCheck = require_bytes(bytes, desc, strides, 0, "tensor ref");
     if (!byteCheck) return make_error(byteCheck.error());
-    return TensorRef{std::move(desc), bytes, float_loader_for(desc.dtype)};
+    auto dtype = desc.dtype;
+    return TensorRef{std::move(desc), bytes, std::move(strides), 0, float_loader_for(dtype)};
+}
+
+Result<TensorRef> make_tensor_ref(
+        TensorDesc desc,
+        std::span<const uint8_t> bytes,
+        std::span<const int64_t> strides,
+        int64_t storageOffset) {
+    auto byteCheck = require_bytes(bytes, desc, strides, storageOffset, "tensor ref");
+    if (!byteCheck) return make_error(byteCheck.error());
+    auto dtype = desc.dtype;
+    return TensorRef{
+        std::move(desc),
+        bytes,
+        std::vector<int64_t>(strides.begin(), strides.end()),
+        storageOffset,
+        float_loader_for(dtype)};
 }
 
 Result<MutableTensorRef> make_mutable_tensor_ref(
         TensorDesc desc,
         std::span<uint8_t> bytes) {
-    auto byteCheck = require_bytes(bytes, desc, "mutable tensor ref");
+    auto strides = strides_for(desc.shape);
+    auto byteCheck = require_bytes(bytes, desc, strides, 0, "mutable tensor ref");
     if (!byteCheck) return make_error(byteCheck.error());
+    auto dtype = desc.dtype;
     return MutableTensorRef{
         std::move(desc),
         bytes,
-        float_loader_for(desc.dtype),
-        float_storer_for(desc.dtype)};
+        std::move(strides),
+        0,
+        float_loader_for(dtype),
+        float_storer_for(dtype)};
+}
+
+Result<MutableTensorRef> make_mutable_tensor_ref(
+        TensorDesc desc,
+        std::span<uint8_t> bytes,
+        std::span<const int64_t> strides,
+        int64_t storageOffset) {
+    auto byteCheck = require_bytes(bytes, desc, strides, storageOffset, "mutable tensor ref");
+    if (!byteCheck) return make_error(byteCheck.error());
+    auto dtype = desc.dtype;
+    return MutableTensorRef{
+        std::move(desc),
+        bytes,
+        std::vector<int64_t>(strides.begin(), strides.end()),
+        storageOffset,
+        float_loader_for(dtype),
+        float_storer_for(dtype)};
 }
 
 Result<void> linear(
@@ -786,10 +894,11 @@ Result<void> reshape(TensorRef x, MutableTensorRef out) {
         return make_error("reshape tensors must have static shape");
     if (inputNumel != outputNumel)
         return make_error("reshape element count mismatch");
-    if (x.bytes.size() != out.bytes.size())
+    if (x.desc.shape.numel() != out.desc.shape.numel())
         return make_error("reshape byte size mismatch");
 
-    std::memcpy(out.bytes.data(), x.bytes.data(), x.bytes.size());
+    for (size_t i = 0; i < static_cast<size_t>(inputNumel); i++)
+        out.store_float(i, x.load_float(i));
     return {};
 }
 
