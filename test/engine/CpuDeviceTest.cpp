@@ -1,4 +1,5 @@
 #include "CpuDevice.h"
+#include "MidIRCpuInterpreter.h"
 #include "MidIRToKernelIR.h"
 #include "MidIR.h"
 
@@ -311,4 +312,37 @@ TEST_F(CpuDeviceTest, CompileRejectsChainedBinaryElementwiseKernel) {
     auto compiled = device.compile(graph);
     EXPECT_FALSE(compiled);
     EXPECT_NE(compiled.error().find("binary kernel must be a single op"), std::string::npos);
+}
+
+TEST_F(CpuDeviceTest, DebugMidIRCpuInterpreterRunsOldPerOpDispatch) {
+    sandy::ir::mid_ir::Graph graph;
+    sandy::ir::mid_ir::Builder builder(graph);
+    auto* lhs = builder.createInput(0, sandy::core::Shape({2}), sandy::core::DType::F32);
+    auto* rhs = builder.createInput(1, sandy::core::Shape({2}), sandy::core::DType::F32);
+    auto* out = builder.createAdd(lhs, rhs);
+
+    auto lhsBytes = f32_bytes({1.0f, 2.0f});
+    auto rhsBytes = f32_bytes({3.0f, 4.0f});
+    std::vector<uint8_t> outBytes(2 * sizeof(float));
+
+    auto lhsRef = sandy::core::make_tensor_ref(
+        sandy::core::TensorDesc(lhs->shape, lhs->dtype),
+        lhsBytes);
+    ASSERT_TRUE(lhsRef) << lhsRef.error();
+    auto rhsRef = sandy::core::make_tensor_ref(
+        sandy::core::TensorDesc(rhs->shape, rhs->dtype),
+        rhsBytes);
+    ASSERT_TRUE(rhsRef) << rhsRef.error();
+    auto outRef = sandy::core::make_mutable_tensor_ref(
+        sandy::core::TensorDesc(out->shape, out->dtype),
+        outBytes);
+    ASSERT_TRUE(outRef) << outRef.error();
+
+    std::vector<sandy::core::TensorRef> inputs = {*lhsRef, *rhsRef};
+    std::vector<sandy::core::MutableTensorRef> outputs = {*outRef};
+    auto run = sandy::engine::debug::runMidIROpOnCpu(*out->def, inputs, outputs);
+    ASSERT_TRUE(run) << run.error();
+
+    EXPECT_FLOAT_EQ(read_f32(outBytes, 0), 4.0f);
+    EXPECT_FLOAT_EQ(read_f32(outBytes, 1), 6.0f);
 }

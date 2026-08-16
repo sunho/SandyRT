@@ -378,7 +378,7 @@ def write_input(path: pathlib.Path, ids: list[int], max_seq: int) -> int:
     real_ids = ids[-max_seq:] if max_seq > 0 else list(ids)
     real_ids = real_ids or [EOS_ID]
     token_index = len(real_ids) - 1
-    input_data = require_numpy().asarray([real_ids], dtype="<i8").tobytes()
+    input_data = struct.pack(f"<{len(real_ids)}q", *real_ids)
     write_safetensors(path, [
         bytes_tensor("input_ids", "I64", [1, len(real_ids)], input_data),
     ])

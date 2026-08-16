@@ -117,7 +117,13 @@ def main() -> int:
         return result.returncode
 
     generated = parse_generated(result.stdout)
-    tokenizer = gemma4e4b.load_tokenizer(artifacts, args.model_id)
+    if not generated:
+        return 0
+    try:
+        tokenizer = gemma4e4b.load_tokenizer(artifacts, args.model_id)
+    except Exception as exc:
+        print(f"[decode] skipped: {exc}", file=sys.stderr)
+        return 0
     pieces = decode_tokens(tokenizer, generated)
     print(f"[generated_decoded] {pieces!r}")
     print(f"[generated_text] {tokenizer.decode(generated)!r}")

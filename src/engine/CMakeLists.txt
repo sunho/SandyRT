@@ -1,7 +1,7 @@
 add_library(EngineLib
   Engine.cpp
   CpuDevice.cpp
-  InvocPlanner.cpp
+  MidIRCpuInterpreter.cpp
 )
 
 target_include_directories(EngineLib
