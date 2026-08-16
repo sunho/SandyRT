@@ -393,9 +393,39 @@ def load_tokenizer(artifacts: pathlib.Path, model_id: str):
     return AutoTokenizer.from_pretrained(artifacts if artifacts.exists() else model_id)
 
 
-def encode_prompt(prompt: str, artifacts: pathlib.Path, model_id: str) -> list[int]:
+def load_chat_template(artifacts: pathlib.Path) -> str:
+    candidates = [
+        artifacts / "chat_template.jinja",
+        repo_root() / "experiments/gemma4_e4b/chat_template.jinja",
+    ]
+    for path in candidates:
+        if path.exists():
+            return path.read_text()
+    raise RuntimeError("missing Gemma4 chat template")
+
+
+def encode_prompt(prompt: str, artifacts: pathlib.Path, model_id: str) -> tuple[list[int], str]:
     tokenizer = load_tokenizer(artifacts, model_id)
-    return list(tokenizer.encode(prompt, add_special_tokens=False))
+    if tokenizer.chat_template is None:
+        tokenizer.chat_template = load_chat_template(artifacts)
+    messages = [{"role": "user", "content": prompt}]
+    rendered = tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+    ids = tokenizer.apply_chat_template(
+        messages,
+        tokenize=True,
+        add_generation_prompt=True,
+    )
+    if hasattr(ids, "keys") and "input_ids" in ids:
+        ids = ids["input_ids"]
+    if hasattr(ids, "tolist"):
+        ids = ids.tolist()
+    if ids and isinstance(ids[0], list):
+        ids = ids[0]
+    return list(ids), rendered
 
 
 def download_snapshot(artifacts: pathlib.Path, model_id: str) -> None:
@@ -467,7 +497,11 @@ def main() -> int:
 
     convert_weights(pathlib.Path(hf_weights), sandy_weights, args.force_convert)
 
-    ids = args.ids if args.ids is not None else encode_prompt(args.prompt, artifacts, args.model_id)
+    rendered_prompt = None
+    if args.ids is not None:
+        ids = args.ids
+    else:
+        ids, rendered_prompt = encode_prompt(args.prompt, artifacts, args.model_id)
     if args.keep_input:
         input_path = artifacts / "input_latest.safetensors"
     else:
@@ -476,6 +510,8 @@ def main() -> int:
         input_path = pathlib.Path(tmp_name)
     token_index = write_input(input_path, ids, args.max_seq)
 
+    if rendered_prompt is not None:
+        print(f"[chat] rendered prompt:\n{rendered_prompt}")
     print(f"[tokenizer] ids: {ids}")
     print(f"[input] next-token logits position: {token_index}")
     print(f"[input] safetensors: {input_path}")

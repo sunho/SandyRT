@@ -13,6 +13,11 @@
 #include <Accelerate/Accelerate.h>
 #endif
 
+#if defined(SANDY_MATMUL_CUBLAS)
+#include <cublas_v2.h>
+#include <cuda_runtime_api.h>
+#endif
+
 namespace sandy::core {
 
 namespace {
@@ -191,6 +196,203 @@ size_t matmul_batch_offset(
     }
     return sourceOffset;
 }
+
+#if defined(SANDY_MATMUL_CUBLAS)
+const char* cublas_status_name(cublasStatus_t status) {
+    switch (status) {
+        case CUBLAS_STATUS_SUCCESS: return "CUBLAS_STATUS_SUCCESS";
+        case CUBLAS_STATUS_NOT_INITIALIZED: return "CUBLAS_STATUS_NOT_INITIALIZED";
+        case CUBLAS_STATUS_ALLOC_FAILED: return "CUBLAS_STATUS_ALLOC_FAILED";
+        case CUBLAS_STATUS_INVALID_VALUE: return "CUBLAS_STATUS_INVALID_VALUE";
+        case CUBLAS_STATUS_ARCH_MISMATCH: return "CUBLAS_STATUS_ARCH_MISMATCH";
+        case CUBLAS_STATUS_MAPPING_ERROR: return "CUBLAS_STATUS_MAPPING_ERROR";
+        case CUBLAS_STATUS_EXECUTION_FAILED: return "CUBLAS_STATUS_EXECUTION_FAILED";
+        case CUBLAS_STATUS_INTERNAL_ERROR: return "CUBLAS_STATUS_INTERNAL_ERROR";
+        case CUBLAS_STATUS_NOT_SUPPORTED: return "CUBLAS_STATUS_NOT_SUPPORTED";
+        case CUBLAS_STATUS_LICENSE_ERROR: return "CUBLAS_STATUS_LICENSE_ERROR";
+    }
+    return "CUBLAS_STATUS_UNKNOWN";
+}
+
+Result<void> cuda_check(cudaError_t status, const std::string& context) {
+    if (status == cudaSuccess)
+        return {};
+    return make_error(context + ": " + cudaGetErrorString(status));
+}
+
+Result<void> cublas_check(cublasStatus_t status, const std::string& context) {
+    if (status == CUBLAS_STATUS_SUCCESS)
+        return {};
+    return make_error(context + ": " + cublas_status_name(status));
+}
+
+class CudaAllocation {
+public:
+    CudaAllocation() = default;
+    CudaAllocation(const CudaAllocation&) = delete;
+    CudaAllocation& operator=(const CudaAllocation&) = delete;
+    ~CudaAllocation() {
+        if (ptr_)
+            cudaFree(ptr_);
+    }
+
+    Result<void> alloc(size_t bytes) {
+        if (bytes == 0)
+            return {};
+        return cuda_check(cudaMalloc(&ptr_, bytes), "cudaMalloc");
+    }
+
+    void* get() const { return ptr_; }
+
+private:
+    void* ptr_ = nullptr;
+};
+
+class CublasHandle {
+public:
+    CublasHandle() = default;
+    CublasHandle(const CublasHandle&) = delete;
+    CublasHandle& operator=(const CublasHandle&) = delete;
+    ~CublasHandle() {
+        if (handle_)
+            cublasDestroy(handle_);
+    }
+
+    Result<void> create() {
+        return cublas_check(cublasCreate(&handle_), "cublasCreate");
+    }
+
+    cublasHandle_t get() const { return handle_; }
+
+private:
+    cublasHandle_t handle_ = nullptr;
+};
+
+bool cublas_runtime_available() {
+    int deviceCount = 0;
+    auto status = cudaGetDeviceCount(&deviceCount);
+    if (status != cudaSuccess) {
+        cudaGetLastError();
+        return false;
+    }
+    return deviceCount > 0;
+}
+
+bool cublas_int_dims_ok(int64_t rows, int64_t n, int64_t k, int64_t lhsLd, int64_t rhsLd) {
+    int64_t maxInt = std::numeric_limits<int>::max();
+    return rows <= maxInt && n <= maxInt && k <= maxInt &&
+           lhsLd <= maxInt && rhsLd <= maxInt;
+}
+
+Result<cudaDataType_t> cublas_data_type_for(DType dtype) {
+    switch (dtype) {
+        case DType::F32:
+            return CUDA_R_32F;
+        case DType::BF16:
+            return CUDA_R_16BF;
+        default:
+            return make_error("cuBLAS matmul unsupported dtype");
+    }
+}
+
+bool cublas_can_fallback(cublasStatus_t status) {
+    return status == CUBLAS_STATUS_NOT_SUPPORTED ||
+           status == CUBLAS_STATUS_ARCH_MISMATCH;
+}
+
+Result<bool> matmul_cublas(
+        TensorRef lhs,
+        TensorRef rhs,
+        bool transpose_lhs,
+        bool transpose_rhs,
+        int64_t m,
+        int64_t k,
+        int64_t n,
+        int64_t batchNumel,
+        MutableTensorRef out) {
+    if (lhs.desc.dtype != rhs.desc.dtype || lhs.desc.dtype != out.desc.dtype)
+        return false;
+    auto dataType = cublas_data_type_for(lhs.desc.dtype);
+    if (!dataType)
+        return false;
+    cudaDataType_t cudaType = dataType.take();
+    if (!cublas_runtime_available())
+        return false;
+
+    int lhsRank = lhs.desc.shape.rank();
+    int rhsRank = rhs.desc.shape.rank();
+    bool flattenSharedRhs = !transpose_lhs && rhsRank == 2;
+    if (!flattenSharedRhs && batchNumel != 1)
+        return false;
+
+    int64_t rows = flattenSharedRhs ? batchNumel * m : m;
+    int64_t lhsLd = lhs.desc.shape.dim(lhsRank - 1);
+    int64_t rhsLd = rhs.desc.shape.dim(rhsRank - 1);
+    if (!cublas_int_dims_ok(rows, n, k, lhsLd, rhsLd))
+        return false;
+
+    CudaAllocation lhsDevice;
+    CudaAllocation rhsDevice;
+    CudaAllocation outDevice;
+    auto lhsAlloc = lhsDevice.alloc(lhs.bytes.size());
+    if (!lhsAlloc) return make_error(lhsAlloc.error());
+    auto rhsAlloc = rhsDevice.alloc(rhs.bytes.size());
+    if (!rhsAlloc) return make_error(rhsAlloc.error());
+    auto outAlloc = outDevice.alloc(out.bytes.size());
+    if (!outAlloc) return make_error(outAlloc.error());
+
+    auto lhsCopy = cuda_check(
+        cudaMemcpy(lhsDevice.get(), lhs.bytes.data(), lhs.bytes.size(), cudaMemcpyHostToDevice),
+        "cudaMemcpy lhs host-to-device");
+    if (!lhsCopy) return make_error(lhsCopy.error());
+    auto rhsCopy = cuda_check(
+        cudaMemcpy(rhsDevice.get(), rhs.bytes.data(), rhs.bytes.size(), cudaMemcpyHostToDevice),
+        "cudaMemcpy rhs host-to-device");
+    if (!rhsCopy) return make_error(rhsCopy.error());
+
+    CublasHandle handle;
+    auto handleCreate = handle.create();
+    if (!handleCreate) return make_error(handleCreate.error());
+
+    float alpha = 1.0f;
+    float beta = 0.0f;
+    cublasOperation_t lhsOp = transpose_lhs ? CUBLAS_OP_T : CUBLAS_OP_N;
+    cublasOperation_t rhsOp = transpose_rhs ? CUBLAS_OP_T : CUBLAS_OP_N;
+
+    auto gemmStatus = cublasGemmEx(
+        handle.get(),
+        rhsOp,
+        lhsOp,
+        static_cast<int>(n),
+        static_cast<int>(rows),
+        static_cast<int>(k),
+        &alpha,
+        rhsDevice.get(),
+        cudaType,
+        static_cast<int>(rhsLd),
+        lhsDevice.get(),
+        cudaType,
+        static_cast<int>(lhsLd),
+        &beta,
+        outDevice.get(),
+        cudaType,
+        static_cast<int>(n),
+        CUBLAS_COMPUTE_32F,
+        CUBLAS_GEMM_DEFAULT);
+    if (cublas_can_fallback(gemmStatus))
+        return false;
+    auto gemm = cublas_check(gemmStatus, "cublasGemmEx");
+    if (!gemm)
+        return make_error(gemm.error());
+
+    auto outCopy = cuda_check(
+        cudaMemcpy(out.bytes.data(), outDevice.get(), out.bytes.size(), cudaMemcpyDeviceToHost),
+        "cudaMemcpy output device-to-host");
+    if (!outCopy) return make_error(outCopy.error());
+
+    return true;
+}
+#endif
 
 #if defined(SANDY_MATMUL_FAST) && defined(__APPLE__)
 bool can_use_fast_matmul(
@@ -476,6 +678,23 @@ Result<void> matmul(
     int64_t batchNumel = batchShape.numel();
     if (batchNumel < 0)
         return make_error("matmul output must have static shape");
+
+#if defined(SANDY_MATMUL_CUBLAS)
+    auto cublas = matmul_cublas(
+        lhs,
+        rhs,
+        transpose_lhs,
+        transpose_rhs,
+        m,
+        lhsK,
+        n,
+        batchNumel,
+        out);
+    if (!cublas)
+        return make_error(cublas.error());
+    if (cublas.take())
+        return {};
+#endif
 
 #if defined(SANDY_MATMUL_FAST) && defined(__APPLE__)
     int64_t rows = batchNumel * m;

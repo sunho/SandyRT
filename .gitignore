@@ -2,6 +2,10 @@ build/
 build-opt/
 build-release/
 build-fast/
+build-cublas/
+build-cublas12/
+.cuda/
+.cuda12/
 external/googletest/
 experiments/mnist/data/
 experiments/mnist/.venv/
