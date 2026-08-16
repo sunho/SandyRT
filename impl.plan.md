@@ -1,37 +1,826 @@
-# Invocation Plan Refactor
+# KernelIR Direct Execution Plan
+
+## Context
+
+The current engine path compiles and executes MidIR through an `InvocPlan`.
+
+Current shape:
+
+```text
+MidIR Graph
+  -> InvocPlanner
+  -> InvocPlan
+  -> Engine interprets InvocPlan
+  -> Device compiles/runs individual MidIR ops
+```
+
+Target shape:
+
+```text
+MidIR Graph
+  -> KernelIR Graph
+  -> Engine compiles KernelIR Graph
+  -> Engine executes compiled KernelIR Graph directly
+  -> Device runs compiled KernelIR op by op
+```
+
+The major architectural change is removing the invocation IR. Allocation, deallocation, input loading, output collection, runtime shape resolution, and view handling become direct responsibilities of the engine runtime executor.
+
+KernelIR is a tensor graph, but it is not another high-level mathematical IR. KernelIR ops represent executable kernel boundaries or runtime boundary/view nodes. Fusion has already been decided before or during MidIR-to-KernelIR lowering.
+
+For this first implementation, keep lowering simple:
+
+```text
+one MidIR op -> one KernelIR op
+```
+
+No KernelIR fusion yet.
 
 ## Goals
 
-- Replace the current backend/program abstraction with a single `Engine` that owns device instances.
-- Introduce `InvocPlan` as the reusable compiled invocation artifact.
-- Make `InvocPlan` own compiled device programs directly. Do not add a separate `Executable`.
-- Keep fusion as a MidIR-side decision. Invocation planning only handles buffer planning and execution order.
-- Compile every executable MidIR op into one device program.
-- Treat reshape/view-like ops as zero-copy aliases in the invocation planner.
-- Refactor MidIR inputs from named inputs to positional inputs.
-- Keep device placement out of MidIR for this step. All ops use default device `0`.
+- Add a new KernelIR abstraction.
+- Represent KernelIR as a graph of logical tensor values and concrete op classes.
+- Make KernelIR inputs explicit through `InputOp`.
+- Represent graph outputs through `Graph::outputs`.
+- Keep KernelIR logical only: no strides, no byte sizes, no physical offsets, no device placement.
+- Lower MidIR to KernelIR with the simple one-MidIR-op-to-one-KernelIR-op rule.
+- Remove `InvocPlan` and `InvocPlanner`.
+- Make `Engine` execute compiled KernelIR graphs directly.
+- Make temporary buffers deallocate immediately after their last use.
+- Change device compilation from per-op MidIR compilation to whole-KernelIR-graph compilation.
+- Change device execution to run one compiled KernelIR op by op id.
+- Make `CpuDevice` emulate KernelIR.
+- Keep MidIR emulation available for debugging.
 
-## Non-Goals
+## Non-goals
 
-- Do not implement multi-device placement yet.
-- Do not implement cross-device copies yet.
-- Do not implement fusion in `InvocPlanner`.
-- Do not make buffers carry tensor shape. Tensor shape comes from MidIR value metadata and instruction descriptors.
-- Do not emit `StoreOutput`; outputs are explicit `InvocPlan::outputs`.
+- No KernelIR fusion in this pass.
+- No explicit device placement in KernelIR.
+- No multi-device execution.
+- No cross-device copies.
+- No TensorState or KV-cache state primitive yet.
+- No symbolic stride algebra.
+- No KernelIR physical layout model.
+- No paged tensor state.
+- No copy-on-write state handling.
 
-## Target Public API
+## Design rule
 
-`Engine` owns the devices and compiles graphs into `InvocPlan`.
+KernelIR owns logical execution structure.
+
+Engine runtime owns physical execution state.
+
+Device owns backend-specific compiled representation and low-level execution.
+
+```text
+KernelIR:
+  values, ops, input sources, output values, logical shapes/dtypes
+
+Engine runtime:
+  input/weight binding, allocation, views, strides, actual runtime shapes,
+  last-use tracking, deallocation, output reads
+
+Device:
+  compile KernelIR graph, run compiled op id with concrete buffers
+```
+
+## KernelIR abstraction
+
+Create:
+
+```text
+src/ir/KernelIR.h
+src/ir/KernelIR.cpp
+src/ir/MidIRToKernelIR.h
+src/ir/MidIRToKernelIR.cpp
+```
+
+Update:
+
+```text
+src/ir/CMakeLists.txt
+```
+
+### IDs
+
+```cpp
+namespace sandy::ir::kernel_ir {
+
+using ValueId = uint32_t;
+using OpId = uint32_t;
+
+static constexpr OpId kInvalidOpId = UINT32_MAX;
+
+}
+```
+
+### Value type
+
+KernelIR values are logical tensor or scalar values. They are not physical buffers.
+
+```cpp
+enum class ValueKind {
+    Tensor,
+    Scalar,
+};
+
+struct ValueType {
+    ValueKind kind = ValueKind::Tensor;
+    core::DType dtype = core::DType::F32;
+
+    // Only meaningful for tensor values.
+    // May contain core::Shape::kDynamic == -1.
+    core::Shape shape;
+};
+```
+
+Dynamic dims are allowed in KernelIR. KernelIR does not resolve actual runtime size.
+
+```text
+tensor<-1x-1x768xf32>
+```
+
+means:
+
+```text
+rank = 3
+dtype = f32
+dim 2 must be 768
+dims 0 and 1 are runtime-known
+```
+
+### Value
+
+```cpp
+struct Use {
+    OpId op = kInvalidOpId;
+    uint32_t operand = 0;
+};
+
+struct Def {
+    OpId op = kInvalidOpId;
+    uint32_t result = 0;
+};
+
+struct Value {
+    ValueId id = 0;
+    ValueType type;
+
+    Def def;
+    std::vector<Use> uses;
+
+    std::string debugName;
+};
+```
+
+All tensor inputs, weights, intermediate tensors, constants materialized as tensors, and final tensors are `Value`s.
+
+Graph outputs are explicitly stored in `Graph::outputs`.
+
+### Op kind
+
+KernelIR should only contain these ops for now:
+
+```cpp
+enum class OpKind {
+    Input,
+    LayoutTransform,
+    ElementwiseKernel,
+    ReductionKernel,
+    MatMulKernel,
+    GatherKernel,
+    SoftmaxKernel,
+    NormKernel,
+    RoPEKernel,
+    SlidingQueryKeyScoreKernel,
+    CustomKernel,
+};
+```
+
+No `TensorState`.
+
+No `Output` op. Outputs are a graph field.
+
+### Op base class
+
+Use concrete classes because op payloads are complex. Avoid a single large `std::variant` payload.
+
+```cpp
+class Graph;
+
+class Op {
+public:
+    Op(OpId id, OpKind kind) : id_(id), kind_(kind) {}
+    virtual ~Op() = default;
+
+    OpId id() const { return id_; }
+    OpKind kind() const { return kind_; }
+
+    virtual std::span<const ValueId> inputs() const = 0;
+    virtual std::span<const ValueId> outputs() const = 0;
+
+    virtual const char* name() const = 0;
+    virtual Result<void> verify(const Graph& graph) const = 0;
+
+private:
+    OpId id_;
+    OpKind kind_;
+};
+```
+
+This gives each op class proper typed fields while still allowing generic graph traversal through `inputs()` and `outputs()`.
+
+### Graph
+
+```cpp
+class Graph {
+public:
+    ValueId addValue(ValueType type, std::string debugName = "");
+
+    template <class OpT, class... Args>
+    OpT* addOp(Args&&... args);
+
+    const Value& value(ValueId id) const;
+    Value& value(ValueId id);
+
+    const std::vector<std::unique_ptr<Op>>& ops() const;
+
+    const std::vector<ValueId>& outputs() const;
+    void setOutputs(std::vector<ValueId> outputs);
+
+    Result<void> verify() const;
+    void dump() const;
+
+private:
+    std::vector<Value> values_;
+    std::vector<std::unique_ptr<Op>> ops_;
+    std::vector<ValueId> outputs_;
+
+    ValueId nextValueId_ = 0;
+    OpId nextOpId_ = 0;
+};
+```
+
+`Graph::addOp` must update:
+
+- each output value's `def`
+- each input value's `uses`
+
+The graph should preserve topological op order. MidIR lowering can emit ops in MidIR order.
+
+## Input op
+
+Inputs are explicit KernelIR ops.
+
+Examples:
+
+```text
+%x = Input(0)
+%y = Input(1)
+%w = Weight("layer.weight")
+```
+
+Use one `InputOp` with a typed source.
+
+```cpp
+enum class InputSourceKind {
+    Argument,
+    Weight,
+    External,
+};
+
+struct InputSource {
+    InputSourceKind kind = InputSourceKind::Argument;
+
+    // For Argument.
+    int64_t index = -1;
+
+    // For Weight / External.
+    std::string name;
+};
+
+class InputOp final : public Op {
+public:
+    InputOp(OpId id, InputSource source, ValueId output);
+
+    const InputSource& source() const { return source_; }
+
+    std::span<const ValueId> inputs() const override;
+    std::span<const ValueId> outputs() const override;
+
+    const char* name() const override { return "input"; }
+    Result<void> verify(const Graph& graph) const override;
+
+private:
+    InputSource source_;
+    std::array<ValueId, 1> outputs_;
+};
+```
+
+Lowering:
+
+- MidIR `Input(index)` -> KernelIR `InputOp { Argument, index }`
+- MidIR `Weight(name)` -> KernelIR `InputOp { Weight, name }`
+
+These ops are not compiled as executable kernels. Engine handles them during runtime binding.
+
+## LayoutTransform op
+
+KernelIR does not store strides. Layout transform records logical intent.
+
+```cpp
+enum class LayoutTransformKind {
+    Reshape,
+    Transpose,
+    Permute,
+    Contiguous,
+};
+
+class LayoutTransformOp final : public Op {
+public:
+    LayoutTransformOp(
+        OpId id,
+        LayoutTransformKind transform,
+        ValueId input,
+        ValueId output,
+        std::vector<int64_t> dims);
+
+    LayoutTransformKind transform() const { return transform_; }
+    const std::vector<int64_t>& dims() const { return dims_; }
+
+    std::span<const ValueId> inputs() const override;
+    std::span<const ValueId> outputs() const override;
+
+    const char* name() const override { return "layout_transform"; }
+    Result<void> verify(const Graph& graph) const override;
+
+private:
+    LayoutTransformKind transform_;
+    std::array<ValueId, 1> inputs_;
+    std::array<ValueId, 1> outputs_;
+    std::vector<int64_t> dims_;
+};
+```
+
+Engine runtime may implement this as:
+
+- a zero-copy view, when possible
+- a materializing kernel/copy, when a backend requires contiguous data
+
+For the first implementation, CPU can either:
+
+- use view metadata internally, or
+- materialize into a new buffer using existing `core::reshape`, `core::transpose`, and `core::permute`
+
+Choose the simpler implementation first.
+
+## ElementwiseKernel op
+
+Elementwise fusion is represented inside a single op by scalar nodes.
+
+```cpp
+enum class BroadcastMode {
+    None,
+    RightAligned,
+};
+
+enum class ScalarOp {
+    Load,
+    Constant,
+
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Max,
+    Min,
+
+    Neg,
+    Sqrt,
+    Rsqrt,
+    Exp,
+    Log,
+    Tanh,
+    ReLU,
+
+    Cast,
+};
+
+using ScalarId = uint32_t;
+
+struct ElementwiseInput {
+    ValueId value = 0;
+    BroadcastMode broadcast = BroadcastMode::None;
+};
+
+struct ScalarNode {
+    ScalarId id = 0;
+    ScalarOp op = ScalarOp::Constant;
+    core::DType dtype = core::DType::F32;
+
+    // For Load.
+    uint32_t inputIndex = 0;
+
+    // For Constant.
+    double constant = 0.0;
+
+    std::vector<ScalarId> operands;
+};
+
+struct ElementwiseStore {
+    ValueId output = 0;
+    ScalarId value = 0;
+};
+
+class ElementwiseKernelOp final : public Op {
+public:
+    ElementwiseKernelOp(
+        OpId id,
+        std::vector<ElementwiseInput> elementwiseInputs,
+        std::vector<ValueId> outputs,
+        ValueId iterationValue,
+        std::vector<ScalarNode> scalars,
+        std::vector<ElementwiseStore> stores);
+
+    const std::vector<ElementwiseInput>& elementwiseInputs() const;
+    ValueId iterationValue() const;
+    const std::vector<ScalarNode>& scalars() const;
+    const std::vector<ElementwiseStore>& stores() const;
+
+    std::span<const ValueId> inputs() const override;
+    std::span<const ValueId> outputs() const override;
+
+    const char* name() const override { return "elementwise_kernel"; }
+    Result<void> verify(const Graph& graph) const override;
+
+private:
+    std::vector<ElementwiseInput> elementwiseInputs_;
+    std::vector<ValueId> inputs_;
+    std::vector<ValueId> outputs_;
+    ValueId iterationValue_;
+    std::vector<ScalarNode> scalars_;
+    std::vector<ElementwiseStore> stores_;
+};
+```
+
+Example scalar body:
+
+```text
+out = max(add(sub(x, y), z), 0)
+
+v0 = load input0
+v1 = load input1
+v2 = sub v0, v1
+v3 = load input2
+v4 = add v2, v3
+v5 = constant 0
+v6 = max v4, v5
+store output0, v6
+```
+
+For first lowering:
+
+- MidIR `Add` -> one `ElementwiseKernelOp` with `Add`
+- MidIR `Mul` -> one `ElementwiseKernelOp` with `Mul`
+- MidIR `ReLU` -> one `ElementwiseKernelOp` with `ReLU`
+- MidIR `Sqrt` -> one `ElementwiseKernelOp` with `Sqrt`
+- MidIR `Tanh` -> one `ElementwiseKernelOp` with `Tanh`
+- MidIR `Constant` -> one `ElementwiseKernelOp` that fills output with a scalar constant
+
+Broadcasting is marked on inputs using `BroadcastMode::RightAligned`. Actual broadcast indexing is resolved by the device/runtime from concrete shapes.
+
+## ReductionKernel op
+
+```cpp
+enum class ReduceOp {
+    Sum,
+    Max,
+    Min,
+    Prod,
+    Mean,
+};
+
+class ReductionKernelOp final : public Op {
+public:
+    ReductionKernelOp(
+        OpId id,
+        ReduceOp reduce,
+        ValueId input,
+        ValueId output,
+        std::vector<int64_t> axes,
+        bool keepDims);
+
+    ReduceOp reduce() const { return reduce_; }
+    const std::vector<int64_t>& axes() const { return axes_; }
+    bool keepDims() const { return keepDims_; }
+
+    std::span<const ValueId> inputs() const override;
+    std::span<const ValueId> outputs() const override;
+
+    const char* name() const override { return "reduction_kernel"; }
+    Result<void> verify(const Graph& graph) const override;
+
+private:
+    ReduceOp reduce_;
+    std::array<ValueId, 1> inputs_;
+    std::array<ValueId, 1> outputs_;
+    std::vector<int64_t> axes_;
+    bool keepDims_ = false;
+};
+```
+
+Current MidIR does not expose generic reduction ops, but this is needed for KernelIR completeness and future lowering.
+
+## MatMulKernel op
+
+```cpp
+class MatMulKernelOp final : public Op {
+public:
+    MatMulKernelOp(
+        OpId id,
+        ValueId lhs,
+        ValueId rhs,
+        ValueId output,
+        bool transposeLhs,
+        bool transposeRhs);
+
+    bool transposeLhs() const { return transposeLhs_; }
+    bool transposeRhs() const { return transposeRhs_; }
+
+    std::span<const ValueId> inputs() const override;
+    std::span<const ValueId> outputs() const override;
+
+    const char* name() const override { return "matmul_kernel"; }
+    Result<void> verify(const Graph& graph) const override;
+
+private:
+    std::array<ValueId, 2> inputs_;
+    std::array<ValueId, 1> outputs_;
+    bool transposeLhs_ = false;
+    bool transposeRhs_ = false;
+};
+```
+
+Lowering:
+
+- MidIR `MatMul` -> `MatMulKernelOp`
+- MidIR `Linear` -> `MatMulKernelOp` plus `ElementwiseKernelOp` for bias add, or a `CustomKernelOp` named `linear` if preserving old CPU behavior is easier initially
+
+Prefer the two-op lowering if tests remain manageable:
+
+```text
+linear(x, w, b)
+  -> matmul_kernel(x, w, transpose_rhs=true)
+  -> elementwise_kernel(add matmul_result, b)
+```
+
+This technically breaks the one-MidIR-op-to-one-KernelIR-op rule for `Linear`, so if strict one-to-one is required, use:
+
+```text
+Linear -> CustomKernelOp("linear")
+```
+
+For this implementation plan, use `CustomKernelOp("linear")` first to preserve the stated rule.
+
+## Remaining concrete ops
+
+Implement each as a concrete class.
+
+### GatherKernelOp
+
+For MidIR `Embedding`.
+
+```text
+inputs: ids, table
+outputs: output
+```
+
+### SoftmaxKernelOp
+
+For MidIR `Softmax`.
+
+```text
+inputs: x
+outputs: output
+fields: axis
+```
+
+### NormKernelOp
+
+For MidIR `RMSNorm` and `LayerNorm`.
+
+```cpp
+enum class NormKind {
+    RMSNorm,
+    LayerNorm,
+};
+```
+
+```text
+RMSNorm inputs: x, optional weight
+LayerNorm inputs: x, weight, bias
+outputs: output
+fields: kind, epsilon
+```
+
+### RoPEKernelOp
+
+For MidIR `RoPE`.
+
+```text
+inputs: x
+outputs: output
+fields: theta, rotary_dim, split_half
+```
+
+### SlidingQueryKeyScoreKernelOp
+
+For MidIR `SlidingQueryKeyScore`.
+
+```text
+inputs: q, k
+outputs: output
+fields: window, scale
+```
+
+### CustomKernelOp
+
+Escape hatch for one-to-one lowering and backend-specific kernels.
+
+```cpp
+class CustomKernelOp final : public Op {
+public:
+    CustomKernelOp(
+        OpId id,
+        std::string customName,
+        std::vector<ValueId> inputs,
+        std::vector<ValueId> outputs,
+        mid_ir::AttrMap attrs);
+
+    const std::string& customName() const { return customName_; }
+    const mid_ir::AttrMap& attrs() const { return attrs_; }
+
+    std::span<const ValueId> inputs() const override;
+    std::span<const ValueId> outputs() const override;
+
+    const char* name() const override { return "custom_kernel"; }
+    Result<void> verify(const Graph& graph) const override;
+
+private:
+    std::string customName_;
+    std::vector<ValueId> inputs_;
+    std::vector<ValueId> outputs_;
+    mid_ir::AttrMap attrs_;
+};
+```
+
+Use `CustomKernelOp` initially for MidIR ops whose existing CPU implementation is easier to preserve directly.
+
+Good initial custom names:
+
+```text
+linear
+```
+
+Avoid overusing custom ops once direct KernelIR classes exist.
+
+## MidIR to KernelIR lowering
+
+Create:
+
+```cpp
+namespace sandy::ir::kernel_ir {
+
+class MidIRToKernelIRLowering {
+public:
+    Result<std::unique_ptr<Graph>> lower(const mid_ir::Graph& graph);
+};
+
+}
+```
+
+### Lowering state
+
+```cpp
+std::unordered_map<const mid_ir::Value*, kernel_ir::ValueId> valueMap;
+```
+
+For every MidIR result, create a KernelIR value with:
+
+```cpp
+ValueType {
+    ValueKind::Tensor,
+    midValue->dtype,
+    midValue->shape
+}
+```
+
+### Lowering rules
+
+| MidIR op | KernelIR op |
+|---|---|
+| `Input` | `InputOp { Argument(index) }` |
+| `Weight` | `InputOp { Weight(name) }` |
+| `Constant` | `ElementwiseKernelOp` constant fill |
+| `Add` | `ElementwiseKernelOp` |
+| `Mul` | `ElementwiseKernelOp` |
+| `ReLU` | `ElementwiseKernelOp` |
+| `Sqrt` | `ElementwiseKernelOp` |
+| `Tanh` | `ElementwiseKernelOp` |
+| `MatMul` | `MatMulKernelOp` |
+| `Linear` | `CustomKernelOp("linear")` initially |
+| `Transpose` | `LayoutTransformOp(Transpose)` |
+| `Reshape` | `LayoutTransformOp(Reshape)` |
+| `Permute` | `LayoutTransformOp(Permute)` |
+| `SlidingQueryKeyScore` | `SlidingQueryKeyScoreKernelOp` |
+| `Softmax` | `SoftmaxKernelOp` |
+| `Embedding` | `GatherKernelOp` |
+| `RoPE` | `RoPEKernelOp` |
+| `RMSNorm` | `NormKernelOp(RMSNorm)` |
+| `LayerNorm` | `NormKernelOp(LayerNorm)` |
+
+After lowering all ops:
+
+```cpp
+kernelGraph->setOutputs(mapped MidIR graph.outputs());
+```
+
+### Broadcasting
+
+For binary elementwise ops:
+
+```text
+lhs.broadcast = RightAligned if lhs.shape != output.shape
+rhs.broadcast = RightAligned if rhs.shape != output.shape
+```
+
+It is also acceptable to mark both inputs `RightAligned`; runtime broadcast verification will accept equal shapes.
+
+KernelIR does not compute broadcast strides.
+
+### Constants
+
+MidIR `Constant` creates a tensor result. Lower it as an elementwise fill:
+
+```text
+constant fill over output shape
+```
+
+Scalar node:
+
+```text
+v0 = constant attr["value"]
+store output, v0
+```
+
+For rank-0 tensors, iteration shape is scalar. CPU runtime must handle `numel == 1`.
+
+## Remove InvocPlan
+
+Delete or stop using:
+
+```text
+src/engine/InvocPlan.h
+src/engine/InvocPlanner.h
+src/engine/InvocPlanner.cpp
+test/engine/InvocPlannerTest.cpp
+```
+
+Update:
+
+```text
+src/engine/CMakeLists.txt
+test/engine/CMakeLists.txt
+```
+
+Remove references to:
+
+```text
+InvocPlan
+InvocPlanDraft
+InvocProgram
+InvocInstruction
+InvocPlanner
+InvocValueId
+InvocProgramId
+```
+
+Replace with direct KernelIR compiled graph/runtime executor types.
+
+## New Engine API
+
+`Engine::compile` should lower MidIR to KernelIR and compile the KernelIR graph.
 
 ```cpp
 class Engine {
 public:
     explicit Engine(std::vector<std::unique_ptr<Device>> devices);
 
-    Result<std::unique_ptr<InvocPlan>> compile(const ir::mid_ir::Graph& graph);
+    Result<std::unique_ptr<CompiledKernelGraph>> compile(
+        const ir::mid_ir::Graph& graph);
 
     Result<std::vector<core::TensorBufferPtr>> run(
-        const InvocPlan& plan,
+        const CompiledKernelGraph& compiled,
         std::span<core::TensorBufferPtr const> inputs,
         const TensorMap& weights);
 
@@ -40,21 +829,41 @@ private:
 };
 ```
 
-`compile()` produces a reusable `InvocPlan`. `run()` interprets that plan with concrete input and weight buffers.
+`CompiledKernelGraph` owns the lowered KernelIR graph and the device-side compiled handle.
+
+```cpp
+struct CompiledKernelGraph {
+    std::unique_ptr<ir::kernel_ir::Graph> graph;
+    DeviceCompiledGraphId deviceGraph = 0;
+};
+```
+
+For now, use device `0` only.
 
 ## Device API
 
-`Device` is the only runtime/backend boundary.
+Change the device compile model from individual MidIR op compilation to whole KernelIR graph compilation.
 
 ```cpp
 using DeviceBufferId = uint32_t;
-using DeviceProgramId = uint32_t;
+using DeviceCompiledGraphId = uint32_t;
+
+struct DeviceBufferView {
+    DeviceBufferId buffer = 0;
+    core::TensorDesc desc;
+
+    // Runtime-resolved physical layout.
+    // KernelIR does not contain this.
+    std::vector<int64_t> strides;
+    int64_t offset = 0;
+};
 
 class Device {
 public:
     virtual ~Device() = default;
 
-    virtual Result<DeviceProgramId> compile(const ir::mid_ir::Op& op) = 0;
+    virtual Result<DeviceCompiledGraphId> compile(
+        const ir::kernel_ir::Graph& graph) = 0;
 
     virtual Result<DeviceBufferId> alloc(core::TensorDesc desc) = 0;
     virtual Result<void> dealloc(DeviceBufferId buffer) = 0;
@@ -62,827 +871,406 @@ public:
     virtual Result<DeviceBufferId> load(core::TensorBuffer& src) = 0;
 
     virtual Result<void> run(
-        DeviceProgramId program,
-        std::span<const DeviceBufferId> inputs,
-        std::span<const DeviceBufferId> outputs) = 0;
+        DeviceCompiledGraphId graph,
+        ir::kernel_ir::OpId op,
+        std::span<const DeviceBufferView> inputs,
+        std::span<const DeviceBufferView> outputs) = 0;
 
-    virtual Result<core::TensorBufferPtr> read(DeviceBufferId src) = 0;
+    virtual Result<core::TensorBufferPtr> read(DeviceBufferView src) = 0;
 };
 ```
 
-Notes:
+The device receives the compiled graph handle plus the KernelIR op id. This lets the device compile/cache whatever it wants for the whole graph while still executing one op at a time under engine control.
 
-- `load()` creates a device buffer from a host `TensorBuffer`.
-- `alloc()` creates an empty output/intermediate device buffer from a tensor descriptor.
-- `run()` receives already allocated output buffers.
-- `read()` copies a device buffer back to a host `TensorBuffer`.
-- There is no copy API yet because all planning uses device `0`.
+For CPU, `compile(graph)` may initially only store or clone metadata and return a handle. `run(handle, opId, ...)` dispatches to a KernelIR interpreter.
 
-## Invocation IR
+## Runtime executor without InvocPlan
 
-Invocation IDs are logical plan IDs. They are not device handles.
-
-```cpp
-using InvocDeviceId = uint32_t;
-using InvocValueId = uint32_t;
-using InvocProgramId = uint32_t;
-```
-
-Instruction kinds:
-
-```cpp
-enum class InvocInstructionKind {
-    Alloc,
-    Dealloc,
-    LoadInput,
-    LoadWeight,
-    RunKernel,
-};
-```
-
-Instruction payloads:
-
-```cpp
-struct InvocAlloc {
-    InvocDeviceId device;
-    InvocValueId value;
-    core::TensorDesc desc;
-};
-
-struct InvocDealloc {
-    InvocDeviceId device;
-    InvocValueId value;
-};
-
-struct InvocLoadInput {
-    InvocDeviceId device;
-    int64_t index;
-    InvocValueId value;
-};
-
-struct InvocLoadWeight {
-    InvocDeviceId device;
-    std::string name;
-    InvocValueId value;
-};
-
-struct InvocRunKernel {
-    InvocDeviceId device;
-    InvocProgramId program;
-    std::vector<InvocValueId> inputs;
-    std::vector<InvocValueId> outputs;
-};
-```
-
-Represent the variant with whichever local style is preferred:
-
-- `std::variant<...>` if acceptable.
-- One struct with all fields and kind-specific helpers if that better matches the repo style.
-
-Compiled programs live in `InvocPlan`.
-
-```cpp
-struct InvocProgram {
-    InvocProgramId id;
-    InvocDeviceId device;
-    DeviceProgramId deviceProgram;
-};
-
-struct InvocPlan {
-    std::vector<InvocProgram> programs;
-    std::vector<InvocInstruction> instructions;
-    std::vector<InvocValueId> outputs;
-};
-```
-
-During planning, there is an internal draft program source:
-
-```cpp
-struct InvocProgramSource {
-    InvocProgramId id;
-    InvocDeviceId device;
-    const ir::mid_ir::Op* op;
-};
-```
-
-This source form should not be the final reusable artifact. `Engine::compile()` consumes it and stores compiled `DeviceProgramId`s in `InvocPlan`.
-
-## MidIR Input Refactor
-
-Change MidIR input ops from string names to numeric indices.
-
-Current shape:
-
-```cpp
-builder.createInput("x", shape, dtype);
-```
-
-Target shape:
-
-```cpp
-builder.createInput(0, shape, dtype);
-builder.createInput(1, shape, dtype);
-```
-
-MidIR `Input` attributes:
-
-- remove or stop requiring `name`
-- add required integer attr `index`
-
-Builder API:
-
-```cpp
-Value* createInput(int64_t index, core::Shape shape, core::DType dtype);
-```
-
-Update all call sites:
-
-- tests
-- compiler materialization if it creates input ops
-- CPU runner
-- examples if they use input names directly
-
-Weights remain named:
-
-```cpp
-Value* createWeight(const std::string& name, core::Shape shape, core::DType dtype);
-```
-
-## Planner Draft
-
-`InvocPlanner` builds an internal uncompiled draft.
-
-```cpp
-class InvocPlanner {
-public:
-    explicit InvocPlanner(InvocDeviceId defaultDevice = 0);
-
-    Result<InvocPlanDraft> plan(const ir::mid_ir::Graph& graph);
-
-private:
-    InvocDeviceId defaultDevice_;
-};
-```
-
-Draft shape:
-
-```cpp
-struct InvocPlanDraft {
-    std::vector<InvocProgramSource> programSources;
-    std::vector<InvocInstruction> instructions;
-    std::vector<InvocValueId> outputs;
-};
-```
-
-The draft is an implementation detail used by `Engine::compile()`.
-
-## Planner Algorithm
-
-Walk `graph.entry()->ops` in order.
-
-Maintain:
-
-```cpp
-std::unordered_map<const ir::mid_ir::Value*, InvocValueId> valueIds;
-std::unordered_set<InvocValueId> materializedValues;
-std::unordered_set<InvocValueId> outputValues;
-```
-
-Also compute last use for each logical `InvocValueId`.
-
-### Input
-
-For `Input(index=N)`:
-
-1. Create a new `InvocValueId`.
-2. Map the MidIR result value to that ID.
-3. Emit:
-
-```cpp
-load_input(defaultDevice, N, value)
-```
-
-The loaded input buffer is a materialized value and should be deallocated after its last use unless it is also a graph output.
-
-### Weight
-
-For `Weight(name)`:
-
-1. Create a new `InvocValueId`.
-2. Map the MidIR result value to that ID.
-3. Emit:
-
-```cpp
-load_weight(defaultDevice, name, value)
-```
-
-The loaded weight buffer is a materialized value and should be deallocated after its last use unless it is also a graph output.
-
-### Reshape
-
-For `Reshape`:
-
-1. Lookup the operand value ID.
-2. Map the reshape result to the same value ID.
-3. Emit no `Alloc`.
-4. Emit no `RunKernel`.
-5. Emit no independent `Dealloc`.
-
-This means reshape is a zero-copy alias at the invocation level.
-
-The CPU device must reject reshape if asked to compile it, because reshape should not reach device programs.
-
-### Compute Ops
-
-For each non-input, non-weight, non-reshape executable op:
-
-1. Lookup operand value IDs.
-2. Create result value IDs.
-3. For each result, emit:
-
-```cpp
-alloc(defaultDevice, resultValue, TensorDesc(result.shape, result.dtype))
-```
-
-4. Create one program source:
-
-```cpp
-programSources.push_back({programId, defaultDevice, op});
-```
-
-5. Emit:
-
-```cpp
-run_kernel(defaultDevice, programId, operandValues, resultValues)
-```
-
-Every executable MidIR op gets exactly one program. Any future fusion happens before this planner sees the graph.
-
-### Outputs
-
-After walking ops:
-
-1. Map each `graph.outputs()` value through `valueIds`.
-2. Store those IDs in `draft.outputs`.
-3. Mark output IDs so planner does not emit normal dealloc before output read.
-
-No `StoreOutput` instruction is emitted.
-
-### Dealloc
-
-Use last-use information to emit `dealloc` after a materialized value's last use.
-
-Rules:
-
-- Only dealloc values that own a real device buffer.
-- Do not dealloc reshape aliases independently.
-- Do not dealloc graph output values in the instruction stream before read.
-- `Engine::run()` reads outputs after all instructions, then deallocs output buffers.
-
-Simple first implementation:
-
-- It is acceptable to emit all non-output deallocs at the end of the instruction stream.
-- Later improvement can move deallocs immediately after last use.
-
-## Engine Compile
-
-`Engine::compile(graph)`:
-
-1. Validate `devices_` is not empty.
-2. Run `InvocPlanner(0).plan(graph)`.
-3. Create an `InvocPlan`.
-4. Move/copy draft instructions and outputs into the final plan.
-5. For each `InvocProgramSource`:
-
-```cpp
-auto compiled = devices_[source.device]->compile(*source.op);
-```
-
-6. Append:
-
-```cpp
-InvocProgram{source.id, source.device, compiledDeviceProgram}
-```
-
-7. Return `std::unique_ptr<InvocPlan>`.
-
-Compile should fail if:
-
-- there are no devices
-- a program references an invalid device id
-- device compilation fails
-- planner emits an invalid op, e.g. reshape as a program
-
-## Engine Run
-
-`Engine::run(plan, inputs, weights)` interprets `plan.instructions`.
+Engine runtime walks `compiled.graph->ops()` in order.
 
 Runtime state:
 
 ```cpp
-std::unordered_map<InvocValueId, DeviceBufferId> buffers;
-std::unordered_map<InvocProgramId, InvocProgram> programs;
-```
-
-Instruction handling:
-
-### LoadInput
-
-1. Validate device id.
-2. Validate input index is in range.
-3. Validate input pointer is non-null.
-4. Call:
-
-```cpp
-devices_[device]->load(*inputs[index])
-```
-
-5. Store returned `DeviceBufferId` in `buffers[value]`.
-
-### LoadWeight
-
-1. Validate device id.
-2. Lookup `weights[name]`.
-3. Validate pointer is non-null.
-4. Call:
-
-```cpp
-devices_[device]->load(*weight)
-```
-
-5. Store returned `DeviceBufferId` in `buffers[value]`.
-
-### Alloc
-
-1. Validate device id.
-2. Call:
-
-```cpp
-devices_[device]->alloc(desc)
-```
-
-3. Store returned `DeviceBufferId` in `buffers[value]`.
-
-### RunKernel
-
-1. Lookup compiled `InvocProgram`.
-2. Validate instruction device matches program device.
-3. Translate all input/output `InvocValueId`s to `DeviceBufferId`s.
-4. Call:
-
-```cpp
-devices_[device]->run(program.deviceProgram, inputBuffers, outputBuffers)
-```
-
-### Dealloc
-
-1. Lookup `DeviceBufferId`.
-2. Call:
-
-```cpp
-devices_[device]->dealloc(buffer)
-```
-
-3. Remove value from runtime buffer map.
-
-### Output Read
-
-After all instructions:
-
-1. For each `plan.outputs` value:
-   - lookup the buffer
-   - determine its device
-   - call `devices_[device]->read(buffer)`
-   - append to output vector
-2. Dealloc output buffers after successful read.
-3. Return positional output vector.
-
-For the first version, because all values use device `0`, output device lookup can be simple. If needed, add a runtime map:
-
-```cpp
-std::unordered_map<InvocValueId, InvocDeviceId> valueDevices;
-```
-
-## CPU Device
-
-Replace `CpuInterpreterBackend` with `CpuDevice`.
-
-`CpuDevice` owns:
-
-- CPU device buffers
-- CPU device programs
-
-CPU buffer:
-
-```cpp
-struct CpuDeviceBuffer {
+struct RuntimeValue {
+    DeviceBufferId buffer = 0;
     core::TensorDesc desc;
-    std::vector<uint8_t> data;
+
+    std::vector<int64_t> strides;
+    int64_t offset = 0;
+
+    bool ownsBuffer = true;
+    bool isView = false;
+    DeviceBufferId baseBuffer = 0;
 };
+
+using RuntimeValueMap =
+    std::unordered_map<ir::kernel_ir::ValueId, RuntimeValue>;
 ```
 
-CPU program:
+### Execution flow
+
+For each op:
+
+```text
+InputOp:
+  Argument -> load inputs[index]
+  Weight   -> load weights[name]
+  External -> error for now unless external bindings are added
+
+LayoutTransformOp:
+  create view or materialize output
+
+Executable kernel op:
+  allocate output buffers
+  build DeviceBufferView arrays for inputs and outputs
+  device.run(compiled.deviceGraph, op.id(), inputViews, outputViews)
+
+After each op:
+  decrement remaining use counts for input values
+  deallocate any non-output temporary whose remaining use count becomes zero
+```
+
+### Use-count based deallocation
+
+Before execution, compute:
 
 ```cpp
-struct CpuDeviceProgram {
-    ir::mid_ir::OpKind kind;
-    ir::mid_ir::AttrMap attrs;
-    std::vector<core::TensorDesc> inputDescs;
-    std::vector<core::TensorDesc> outputDescs;
-};
+std::unordered_map<ValueId, int64_t> remainingUses;
+std::unordered_set<ValueId> graphOutputs;
 ```
 
-The program should copy enough op metadata during `compile(op)` so it is not dependent on temporary op state beyond the graph lifetime.
+Initialize:
 
-CPU device behavior:
+```text
+remainingUses[value] = value.uses.size()
+graphOutputs = graph.outputs()
+```
 
-- `compile(op)` stores one op's metadata.
-- `compile(Reshape)` returns error.
-- `alloc(desc)` creates a zero-filled mutable CPU buffer.
-- `load(tensor)` accesses the host tensor and copies bytes into a CPU buffer.
-- `run(program, inputs, outputs)` dispatches to existing CPU eval logic for exactly one op.
-- `read(buffer)` returns a host tensor buffer copy.
+After an op executes, for each input value:
 
-Reuse as much as possible from `CpuInterpreterBackend.cpp`:
+```text
+remainingUses[input]--
+if remainingUses[input] == 0 and input is not graph output:
+    dealloc runtime buffer if owned
+```
 
-- tensor ref helpers
-- contiguous stride helpers
-- attr helpers
-- `eval_linear`
-- `eval_relu`
-- `eval_add`
-- `eval_mul`
-- `eval_sqrt`
-- `eval_tanh`
-- `eval_matmul`
-- `eval_transpose`
-- `eval_permute`
-- `eval_sliding_query_key_score`
-- `eval_softmax`
-- `eval_embedding`
-- `eval_rope`
-- `eval_rms_norm`
-- `eval_layer_norm`
+Important cases:
 
-The existing graph interpreter loop should go away. Execution is now instruction-by-instruction in `Engine`.
+- Do not deallocate graph outputs before reading them.
+- Do not deallocate values backed by borrowed external memory unless the device contract says `load()` owns the loaded device buffer.
+- If a value is a view, dealloc only the owner/base buffer when all aliases are dead.
 
-## File Layout
+For first implementation, it is acceptable to materialize layout transforms instead of aliasing views. That makes ownership simple:
 
-Suggested engine files:
+```text
+every runtime value owns exactly one device buffer
+```
 
-- `src/engine/Device.h`
-- `src/engine/InvocPlan.h`
-- `src/engine/InvocPlanner.h`
-- `src/engine/InvocPlanner.cpp`
-- `src/engine/Engine.h`
-- `src/engine/Engine.cpp`
-- `src/engine/CpuDevice.h`
-- `src/engine/CpuDevice.cpp`
+Then add view aliasing later.
 
-Remove or retire:
+### Output collection
 
-- `src/engine/Backend.h`
-- `src/engine/CpuInterpreterBackend.h`
-- `src/engine/CpuInterpreterBackend.cpp`
+After all ops run:
+
+```text
+for value in graph.outputs:
+  read RuntimeValue as TensorBufferPtr
+```
+
+Then deallocate remaining owned device buffers, including outputs after read.
+
+## Runtime shape and allocation
+
+KernelIR values may contain dynamic dims. Allocation must use actual runtime descs.
+
+For first implementation, output shape resolution can mostly use KernelIR logical value types because existing MidIR inference often produces static shapes. Where `-1` appears, resolve conservatively from inputs.
+
+Recommended helpers:
+
+```cpp
+Result<core::TensorDesc> resolve_actual_desc(
+    const ir::kernel_ir::Graph& graph,
+    const ir::kernel_ir::Op& op,
+    ir::kernel_ir::ValueId output,
+    const RuntimeValueMap& values);
+```
+
+Initial rules:
+
+- If output logical shape has no dynamic dims, use it directly.
+- For elementwise outputs with dynamic dims, use `iterationValue` actual shape.
+- For layout transforms, compute actual output shape from actual input shape and transform attrs.
+- For matmul outputs, compute actual output shape from actual input shapes and transpose flags.
+- For softmax/norm/rope, output actual shape equals input actual shape.
+- For gather/embedding, compute from ids/table actual shapes.
+- For custom `linear`, compute from input and weight actual shapes.
+
+### Contiguous strides
+
+KernelIR has no strides.
+
+Engine/device runtime computes contiguous strides when allocating or loading:
+
+```cpp
+std::vector<int64_t> contiguous_strides(core::Shape actualShape);
+```
+
+For this first implementation, layout transforms can materialize contiguous outputs. That avoids needing view strides immediately.
+
+## CPU device changes
+
+Current `CpuDevice` compiles and runs MidIR ops. Change it to compile and run KernelIR.
+
+### Compile
+
+```cpp
+Result<DeviceCompiledGraphId> CpuDevice::compile(
+    const ir::kernel_ir::Graph& graph);
+```
+
+Initial CPU compile behavior:
+
+- Store a reference-safe copy or metadata snapshot of the KernelIR graph.
+- Return a graph handle.
+- No actual code generation required.
+
+### Run
+
+```cpp
+Result<void> CpuDevice::run(
+    DeviceCompiledGraphId graphId,
+    ir::kernel_ir::OpId opId,
+    std::span<const DeviceBufferView> inputs,
+    std::span<const DeviceBufferView> outputs);
+```
+
+CPU run behavior:
+
+- Look up compiled graph by `graphId`.
+- Find op by `opId`.
+- Dispatch on `kernel_ir::OpKind`.
+- Convert `DeviceBufferView` to `core::TensorRef` / `core::MutableTensorRef`.
+- Execute using existing `core::` tensor kernels where possible.
+
+### CPU KernelIR emulation mapping
+
+| KernelIR op | CPU implementation |
+|---|---|
+| `ElementwiseKernel` | scalar interpreter over output numel with runtime broadcasting |
+| `MatMulKernel` | `core::matmul` |
+| `CustomKernel("linear")` | `core::linear` |
+| `LayoutTransform` | `core::reshape`, `core::transpose`, `core::permute` if materialized |
+| `SoftmaxKernel` | `core::softmax` |
+| `GatherKernel` | `core::embedding` |
+| `RoPEKernel` | `core::rope` |
+| `NormKernel(RMSNorm)` | `core::rms_norm` |
+| `NormKernel(LayerNorm)` | `core::layer_norm` |
+| `SlidingQueryKeyScoreKernel` | `core::sliding_query_key_score` |
+
+### Elementwise CPU interpreter
+
+Implement enough scalar ops for current MidIR:
+
+```text
+Load
+Constant
+Add
+Mul
+Sqrt
+Tanh
+ReLU
+```
+
+Add `Sub`, `Div`, `Max`, etc. as straightforward follow-ups if already declared.
+
+Broadcasting:
+
+- Use actual input/output shapes.
+- Apply right-aligned broadcasting.
+- Compute input element index from output multidimensional index.
+- For broadcasted dimensions, use index `0`.
+
+No KernelIR strides are needed.
+
+## Keep MidIR emulation for debugging
+
+Do not delete old MidIR execution logic outright if it is useful for debugging.
+
+Move or preserve MidIR op emulation behind a clearly named debug helper, for example:
+
+```text
+src/engine/debug/MidIRInterpreter.h
+src/engine/debug/MidIRInterpreter.cpp
+```
+
+or:
+
+```text
+src/engine/MidIRDebugInterpreter.h
+src/engine/MidIRDebugInterpreter.cpp
+```
+
+The production `CpuDevice` should run KernelIR, but tests/debug tools can still compare:
+
+```text
+MidIR debug interpreter result
+vs
+KernelIR CPU result
+```
+
+This is useful while validating lowering.
+
+## Test plan
+
+### KernelIR graph tests
+
+Add:
+
+```text
+test/ir/KernelIRTest.cpp
+```
+
+Cover:
+
+- create input values and `InputOp`
+- set graph outputs
+- use-def chains update correctly
+- verifier catches missing defs
+- verifier catches invalid output ids
+- layout transform op stores dims
+- elementwise op stores scalar body and broadcast modes
+
+### MidIR to KernelIR lowering tests
+
+Add:
+
+```text
+test/ir/MidIRToKernelIRTest.cpp
+```
+
+Cover:
+
+- `Input(index)` lowers to `InputOp(Argument(index))`
+- `Weight(name)` lowers to `InputOp(Weight(name))`
+- `Add` lowers to `ElementwiseKernelOp`
+- broadcast add marks broadcast intent
+- `ReLU`, `Sqrt`, `Tanh`, `Mul` lower to elementwise kernels
+- `MatMul` lowers to `MatMulKernelOp`
+- `Linear` lowers to `CustomKernelOp("linear")`
+- `Reshape`, `Transpose`, `Permute` lower to `LayoutTransformOp`
+- graph outputs are preserved
+
+### Engine tests
 
 Update:
 
-- `src/engine/CMakeLists.txt`
-- tests that include `CpuInterpreterBackend.h`
-
-## Migration Steps
-
-1. Add `Device.h` and `InvocPlan.h` with basic types.
-2. Add `InvocPlanner` that emits plans for existing MidIR, initially still handling named input if needed.
-3. Refactor MidIR input API to positional `Input(index)`.
-4. Update compiler/tests/call sites for positional inputs.
-5. Replace `Backend` API in `Engine` with device-owned API.
-6. Implement `CpuDevice` by moving CPU backend logic.
-7. Make `Engine::compile()` return `InvocPlan`.
-8. Make `Engine::run()` interpret `InvocPlan`.
-9. Delete or stop building old backend classes.
-10. Tighten reshape behavior: planner aliases it, CPU device rejects it.
-11. Add tests and port existing engine tests.
-
-## Tests
-
-Add or update tests for:
-
-- MidIR builder creates `Input(index=0)` with integer attr.
-- Planner emits `LoadInput(0, value)` for input 0.
-- Planner emits `LoadWeight(name, value)` for weights.
-- Planner emits one `InvocProgram` and one `RunKernel` per executable compute op.
-- Planner emits no `Alloc`, no `InvocProgram`, and no `RunKernel` for reshape.
-- Planner maps reshape output to the operand value ID.
-- Planner exposes graph outputs through `InvocPlan::outputs`.
-- Engine compile compiles programs through owned devices.
-- Engine run interprets alloc/load/run/dealloc instructions.
-- Engine run accepts positional input array and named weight map.
-- Engine run returns positional output array.
-- CPU device rejects reshape compile.
-- Existing CPU numerical tests still pass through `Engine + CpuDevice`.
-
-## First Version Constraints
-
-- One device only: `devices_[0]`.
-- All `InvocProgram::device` and instruction device ids are `0`.
-- No cross-device copy instruction.
-- No fusion.
-- No delayed input loading optimization. Eager load at input/weight op order is fine.
-- Dealloc at end is acceptable before implementing precise last-use dealloc.
-
-## Step-By-Step Implementation Plan
-
-### 1. Add invocation and device type shells
-
-Add the new headers first without changing behavior:
-
-- `src/engine/Device.h`
-- `src/engine/InvocPlan.h`
-- `src/engine/InvocPlanner.h`
-- empty/minimal `src/engine/InvocPlanner.cpp`
-
-Define:
-
-- `DeviceBufferId`
-- `DeviceProgramId`
-- `InvocDeviceId`
-- `InvocValueId`
-- `InvocProgramId`
-- `Device`
-- `InvocInstruction`
-- `InvocProgram`
-- `InvocPlan`
-
-Update `src/engine/CMakeLists.txt` so these files build, but keep the old backend path compiling during this step.
-
-Verification:
-
-- project still builds
-- no runtime behavior changes
-
-### 2. Refactor MidIR input ops to positional indices
-
-Change `Builder::createInput` from:
-
-```cpp
-Value* createInput(const std::string& name, core::Shape shape, core::DType dtype);
+```text
+test/engine/EngineCompileTest.cpp
+test/engine/EngineTest.cpp
+test/engine/CpuDeviceTest.cpp
 ```
 
-to:
+Remove or replace:
 
-```cpp
-Value* createInput(int64_t index, core::Shape shape, core::DType dtype);
+```text
+test/engine/InvocPlannerTest.cpp
 ```
 
-Update MidIR input attrs:
+Cover:
 
-- remove input name requirement
-- add integer `index`
+- `Engine::compile(MidIR)` produces `CompiledKernelGraph`
+- CPU device receives one compiled KernelIR graph
+- engine loads inputs and weights
+- engine allocates outputs/intermediates
+- engine runs ops in graph order
+- temporaries are deallocated after last use
+- graph outputs are read correctly
+- existing numerical tests still pass
 
-Update all call sites and tests that create input ops.
+### Deallocation tests
 
-For compiler/materializer code that currently receives named inputs, assign stable indices at the graph boundary. Keep that mapping local to materialization or compiler code; MidIR itself should only see `index`.
+Add a fake device test that records:
 
-Verification:
-
-- `ir` tests pass
-- compiler materialization tests pass
-- no invocation behavior introduced yet
-
-### 3. Implement `InvocPlanner` without lifetime optimization
-
-Implement `InvocPlanner::plan(graph)` returning an internal draft:
-
-```cpp
-struct InvocPlanDraft {
-    std::vector<InvocProgramSource> programSources;
-    std::vector<InvocInstruction> instructions;
-    std::vector<InvocValueId> outputs;
-};
+```text
+load
+alloc
+run
+read
+dealloc
 ```
 
-Start with simple allocation/lifetime behavior:
+Verify:
 
-- emit `LoadInput` at input op position
-- emit `LoadWeight` at weight op position
-- alias `Reshape`
-- emit `Alloc` and `RunKernel` for every executable compute op
-- emit non-output `Dealloc` instructions at the end
-
-Do not compile device programs in the planner.
-
-Verification:
-
-- add `InvocPlannerTest`
-- assert instruction order for a simple `Input -> Linear -> Output`
-- assert `Reshape` emits no program and no run instruction
-- assert every non-view compute op gets one program source
-
-### 4. Add a fake/test device
-
-Before moving the CPU backend, add a small fake device in tests to validate `Engine` orchestration.
-
-The fake device should:
-
-- record compile calls
-- record alloc/load/run/dealloc/read calls
-- return deterministic fake ids
-- produce dummy host buffers from `read`
-
-This keeps engine tests independent from CPU numerical execution during the refactor.
-
-Verification:
-
-- fake device unit tests pass
-- no CPU backend changes yet
-
-### 5. Refactor `Engine` to own devices and compile `InvocPlan`
-
-Change `Engine` constructor to:
-
-```cpp
-explicit Engine(std::vector<std::unique_ptr<Device>> devices);
+```text
+x = Input(0)
+w = Weight("w")
+y = Add(x, w)
+z = Mul(y, y)
+output z
 ```
 
-Change compile API to:
+Expected behavior:
 
-```cpp
-Result<std::unique_ptr<InvocPlan>> compile(const ir::mid_ir::Graph& graph);
+- `y` is deallocated after `Mul`
+- `x` and `w` are deallocated after their last use
+- `z` is read before deallocation
+
+## Suggested implementation sequence
+
+1. Add `KernelIR.h/.cpp` with `Graph`, `Value`, `Op`, `InputOp`, and skeleton concrete op classes.
+2. Add KernelIR graph verifier and dump support.
+3. Add `MidIRToKernelIR.h/.cpp`.
+4. Implement lowering for `Input`, `Weight`, and simple unary/binary elementwise ops.
+5. Add KernelIR and lowering unit tests.
+6. Change `Device.h` to use `kernel_ir::Graph`, `DeviceCompiledGraphId`, and `run(graphHandle, opId, views...)`.
+7. Add `CompiledKernelGraph` type to engine.
+8. Rewrite `Engine::compile` to lower MidIR to KernelIR and call `device.compile(kernelGraph)`.
+9. Rewrite `Engine::run` to execute KernelIR directly.
+10. Implement use-count deallocation in `Engine::run`.
+11. Port `CpuDevice` to emulate KernelIR.
+12. Preserve old MidIR CPU emulation in a debug interpreter file/helper.
+13. Remove `InvocPlan` and `InvocPlanner` from build files.
+14. Update engine/device tests.
+15. Run the full test suite.
+
+## Migration notes
+
+Expect these files to change substantially:
+
+```text
+src/engine/Device.h
+src/engine/Engine.h
+src/engine/Engine.cpp
+src/engine/CpuDevice.h
+src/engine/CpuDevice.cpp
+src/engine/CMakeLists.txt
+src/ir/CMakeLists.txt
+test/engine/EngineCompileTest.cpp
+test/engine/CpuDeviceTest.cpp
+test/engine/EngineTest.cpp
+test/CMakeLists.txt
 ```
 
-Implementation:
+Expect these files to be removed or retired:
 
-1. validate device list is non-empty
-2. call `InvocPlanner(0).plan(graph)`
-3. compile each draft program source through `devices_[source.device]`
-4. store compiled `DeviceProgramId` in `InvocPlan::programs`
-5. move draft instructions and outputs into `InvocPlan`
-
-At this step, either keep old `Engine::create_plan/run` temporarily for compatibility or update all call sites at once.
-
-Verification:
-
-- fake device confirms one compile call per executable op
-- `InvocPlan` owns compiled program ids
-- no `Executable` type exists
-
-### 6. Implement `Engine::run(const InvocPlan&, ...)`
-
-Add:
-
-```cpp
-Result<std::vector<core::TensorBufferPtr>> run(
-    const InvocPlan& plan,
-    std::span<core::TensorBufferPtr const> inputs,
-    const TensorMap& weights);
+```text
+src/engine/InvocPlan.h
+src/engine/InvocPlanner.h
+src/engine/InvocPlanner.cpp
+test/engine/InvocPlannerTest.cpp
 ```
 
-Interpret instructions with:
+Do not remove MidIR itself. MidIR remains the semantic model graph and source of type inference.
 
-```cpp
-std::unordered_map<InvocValueId, DeviceBufferId> buffers;
-std::unordered_map<InvocValueId, InvocDeviceId> valueDevices;
-```
+Do not remove MidIR CPU emulation if it is useful for debugging. Move it out of production `CpuDevice`.
 
-Runtime behavior:
+## Final prompt
 
-- `LoadInput`: validate index and call `device.load`
-- `LoadWeight`: lookup weight by name and call `device.load`
-- `Alloc`: call `device.alloc`
-- `RunKernel`: lookup compiled program and buffer ids, then call `device.run`
-- `Dealloc`: call `device.dealloc` and erase runtime state
-- after instructions, read `plan.outputs` into a vector
-- dealloc output buffers after successful reads
+okay let's not add device for now. give the final implementation plan for:
+1. create the abstraction for the kernel ir
+2. implement mid ir to kernel ir lowering. keep it simple. follow one mid ir op = one kernel ir op rule.
+3. remove invoc plan. and implement the kernel ir running directly from the engine. you must deallocate the temporary buffer as soon as it's not needed by following the use graph. for cpu side remove the compile thingy; change it to compile (kernel ir graph) -> (compiled kernel ir graph handle) then when we run it we run it by device.run(compiled ir graph handle, op id, input buffers, outputs buffers) cpu device side will now emulate the kernel ir instead. (keep mid ir emulation somewhere tho we might use that for debugging)
 
-Verification:
+write this to impl.plan.md and give detailed context. keep this final prompt as the last section tho.
 
-- fake device confirms exact instruction interpretation
-- missing input index returns an error
-- missing weight returns an error
-- invalid program id returns an error
-
-### 7. Create `CpuDevice` skeleton
-
-Add:
-
-- `src/engine/CpuDevice.h`
-- `src/engine/CpuDevice.cpp`
-
-Implement only structural behavior first:
-
-- program table
-- buffer table
-- `compile(op)` copies op kind, attrs, input descs, and output descs
-- `alloc(desc)` creates a CPU buffer
-- `dealloc(id)` releases or marks buffer slot empty
-- `load(tensor)` copies host tensor bytes
-- `read(id)` returns a host tensor copy
-- `run(...)` returns "unsupported" initially
-
-Verification:
-
-- `CpuDevice` buffer lifecycle tests pass
-- `compile(Reshape)` returns error
-
-### 8. Move CPU op execution into `CpuDevice`
-
-Move reusable helpers from `CpuInterpreterBackend.cpp` into `CpuDevice.cpp`.
-
-Adapt execution from graph-level maps to direct program inputs/outputs:
-
-- program inputs are positional device buffer ids
-- program outputs are positional preallocated device buffer ids
-- op attrs are stored in the CPU program
-- output descs come from the compiled op metadata
-
-For each supported op, dispatch through existing tensor calc functions.
-
-Important:
-
-- do not execute `Input`
-- do not execute `Weight`
-- do not execute `Reshape`
-- `run()` should validate input/output arity against the compiled program
-
-Verification:
-
-- add direct `CpuDevice` tests for at least `Linear`, `Add`, and one unary op
-- verify CPU results match previous backend tests
-
-### 9. Port engine integration tests to `CpuDevice`
-
-Update tests that use:
-
-```cpp
-CpuInterpreterBackend
-Engine::create_plan
-BackendRunResult
-```
-
-to use:
-
-```cpp
-CpuDevice
-Engine::compile
-InvocPlan
-std::vector<core::TensorBufferPtr>
-```
-
-Update input setup from keyed input map to positional input vector/span.
-
-Weights remain `TensorMap`.
-
-Verification:
-
-- existing numerical engine tests pass through `Engine + CpuDevice`
-- output order matches `graph.outputs()`
-
-### 10. Remove old backend abstraction
-
-Once tests are ported:
-
-- remove `Backend.h`
-- remove `CpuInterpreterBackend.h`
-- remove `CpuInterpreterBackend.cpp`
-- remove `Plan`/`SimplePlan` from `Engine`
-- remove old `BackendBufferMap`/`BackendRunResult` APIs
-- update includes and CMake
-
-Verification:
-
-- `rg "Backend|CpuInterpreterBackend|create_plan|BackendRunResult"` only finds intentional historical references, if any
-- full test suite builds and runs
-
-### 11. Tighten planner lifetime handling
-
-After the basic execution path works, improve dealloc placement.
-
-Compute last use of materialized `InvocValueId`s and emit `Dealloc` immediately after last use when possible.
-
-Rules:
-
-- output values are not deallocated in the instruction stream
-- aliases do not dealloc independently
-- values reused by aliases must remain alive until the aliased output/consumer last use
-
-Verification:
-
-- planner tests assert dealloc appears after last consumer
-- reshape alias test verifies the source buffer is not deallocated before the alias output is read
-
-### 12. Final cleanup and consistency pass
-
-Clean up naming and docs:
-
-- make all public names use `InvocPlan`, not `Executable`
-- keep `InvocPlan` as the compiled artifact
-- ensure comments say fusion is MidIR-side
-- ensure reshape handling is documented in planner and CPU device tests
-
-Verification:
-
-- full test suite
-- `rg "Executable"` returns no implementation references
-- `rg "StoreOutput"` returns no implementation references
-- `rg "createInput\\(\""` finds no string-based MidIR input creation
+finally do the do the shape calculation at all. rely on mid ir shapes and use them as they are.
