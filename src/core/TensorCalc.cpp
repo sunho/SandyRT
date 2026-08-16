@@ -339,6 +339,8 @@ Result<bool> matmul_cublas(
         MutableTensorRef out) {
     if (lhs.desc.dtype != rhs.desc.dtype || lhs.desc.dtype != out.desc.dtype)
         return false;
+    if (!lhs.is_contiguous() || !rhs.is_contiguous() || !out.is_contiguous())
+        return false;
     auto dataType = cublas_data_type_for(lhs.desc.dtype);
     if (!dataType)
         return false;
