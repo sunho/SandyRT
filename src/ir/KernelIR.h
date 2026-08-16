@@ -24,6 +24,7 @@ static constexpr OpId kInvalidOpId = std::numeric_limits<OpId>::max();
 enum class ValueKind {
     Tensor,
     PagedTensor,
+    TensorTuple,
     Scalar,
 };
 
@@ -37,6 +38,7 @@ struct ValueType {
     core::DType dtype = core::DType::F32;
     core::Shape shape;
     PagedTensorMeta paged;
+    std::vector<ValueType> elements;
 };
 
 struct Use {
@@ -62,6 +64,7 @@ struct Value {
 
 enum class OpKind {
     Input,
+    TensorTupleCreate,
     DeviceTransfer,
     LayoutTransform,
     ElementwiseKernel,
@@ -167,6 +170,7 @@ struct InputSource {
     InputSourceKind kind = InputSourceKind::Argument;
     int64_t index = -1;
     std::string name;
+    int64_t tupleElement = -1;
 };
 
 class InputOp final : public Op {
@@ -183,6 +187,27 @@ public:
 
 private:
     InputSource source_;
+    std::array<ValueId, 1> outputs_;
+};
+
+class TensorTupleCreateOp final : public Op {
+public:
+    TensorTupleCreateOp(
+        OpId id,
+        std::vector<ValueId> inputs,
+        ValueId output,
+        DeviceId device = 0);
+
+    std::span<const ValueId> inputs() const override {
+        return {inputs_.data(), inputs_.size()};
+    }
+    std::span<const ValueId> outputs() const override { return outputs_; }
+
+    const char* name() const override { return "tensor_tuple_create"; }
+    Result<void> verify(const Graph& graph) const override;
+
+private:
+    std::vector<ValueId> inputs_;
     std::array<ValueId, 1> outputs_;
 };
 

@@ -7,6 +7,7 @@ namespace sandy::ir::high_ir {
 const char* typeName(Type type) {
     switch (type) {
         case Type::Tensor: return "tensor";
+        case Type::TensorTuple: return "tensor_tuple";
         case Type::Int: return "int";
         case Type::Float: return "float";
         case Type::String: return "string";
@@ -49,6 +50,25 @@ Value* Graph::addInput(const std::string& name) {
     return v;
 }
 
+Value* Graph::addTensorInput(
+        const std::string& name,
+        std::vector<int64_t> dims,
+        std::string dtype) {
+    auto& op = ops_.emplace_back();
+    op.kind = Op::Input;
+    op.inputName = name;
+    op.inputKind = InputKind::Tensor;
+    op.inputTensorDims = std::move(dims);
+    op.inputTensorDType = std::move(dtype);
+    auto* v = newValue(Type::Tensor);
+    v->tensorType.kind = TensorKind::Tensor;
+    v->tensorType.dims = op.inputTensorDims;
+    v->tensorType.dtype = op.inputTensorDType;
+    v->def = &op;
+    op.results.push_back(v);
+    return v;
+}
+
 Value* Graph::addPagedTensorInput(
         const std::string& name,
         std::vector<int64_t> dims,
@@ -60,6 +80,43 @@ Value* Graph::addPagedTensorInput(
     op.inputPagedTensorDims = std::move(dims);
     op.inputPagedTensorPageSize = pageSize;
     auto* v = newValue(Type::Tensor);
+    v->def = &op;
+    op.results.push_back(v);
+    return v;
+}
+
+Value* Graph::addPagedTensorInput(
+        const std::string& name,
+        std::vector<int64_t> dims,
+        std::string dtype,
+        int64_t pageSize) {
+    auto& op = ops_.emplace_back();
+    op.kind = Op::Input;
+    op.inputName = name;
+    op.inputKind = InputKind::PagedTensor;
+    op.inputPagedTensorDims = std::move(dims);
+    op.inputPagedTensorDType = std::move(dtype);
+    op.inputPagedTensorPageSize = pageSize;
+    auto* v = newValue(Type::Tensor);
+    v->tensorType.kind = TensorKind::PagedTensor;
+    v->tensorType.dims = op.inputPagedTensorDims;
+    v->tensorType.dtype = op.inputPagedTensorDType;
+    v->tensorType.pageSize = op.inputPagedTensorPageSize;
+    v->def = &op;
+    op.results.push_back(v);
+    return v;
+}
+
+Value* Graph::addTensorTupleInput(
+        const std::string& name,
+        std::vector<TensorType> elements) {
+    auto& op = ops_.emplace_back();
+    op.kind = Op::Input;
+    op.inputName = name;
+    op.inputKind = InputKind::TensorTuple;
+    op.inputTensorTupleElements = std::move(elements);
+    auto* v = newValue(Type::TensorTuple);
+    v->tupleElements = op.inputTensorTupleElements;
     v->def = &op;
     op.results.push_back(v);
     return v;
@@ -124,6 +181,44 @@ std::vector<Value*> Graph::addBuiltin(const std::string& name,
     return results;
 }
 
+Value* Graph::addTensorTupleCreate(const std::vector<Value*>& elements) {
+    auto& op = ops_.emplace_back();
+    op.kind = Op::TensorTupleCreate;
+    op.operands = elements;
+    auto* v = newValue(Type::TensorTuple);
+    v->tupleElements.reserve(elements.size());
+    for (auto* element : elements)
+        v->tupleElements.push_back(element->tensorType);
+    v->def = &op;
+    op.results.push_back(v);
+    return v;
+}
+
+Value* Graph::addTensorTupleAppend(Value* tuple, Value* element) {
+    auto& op = ops_.emplace_back();
+    op.kind = Op::TensorTupleAppend;
+    op.operands = {tuple, element};
+    auto* v = newValue(Type::TensorTuple);
+    v->tupleElements = tuple->tupleElements;
+    v->tupleElements.push_back(element->tensorType);
+    v->def = &op;
+    op.results.push_back(v);
+    return v;
+}
+
+Value* Graph::addTensorTupleGet(Value* tuple, int64_t index) {
+    auto& op = ops_.emplace_back();
+    op.kind = Op::TensorTupleGet;
+    op.operands = {tuple};
+    op.tupleIndex = index;
+    auto* v = newValue(Type::Tensor);
+    if (index >= 0 && static_cast<size_t>(index) < tuple->tupleElements.size())
+        v->tensorType = tuple->tupleElements[static_cast<size_t>(index)];
+    v->def = &op;
+    op.results.push_back(v);
+    return v;
+}
+
 void Graph::setOutputs(const std::vector<Value*>& outputs) {
     outputs_ = outputs;
 }
@@ -151,16 +246,32 @@ void Graph::dump() const {
             case Op::Input:
                 std::cout << "%" << op.results[0]->id
                           << " = ";
-                if (op.inputKind == InputKind::PagedTensor) {
+                if (op.inputKind == InputKind::TensorTuple) {
+                    std::cout << "tensor_tuple_input(\"" << op.inputName
+                              << "\", len=" << op.inputTensorTupleElements.size();
+                } else if (op.inputKind == InputKind::PagedTensor) {
                     std::cout << "paged_tensor_input(\"" << op.inputName << "\", dims=";
                     std::cout << "[";
                     for (size_t i = 0; i < op.inputPagedTensorDims.size(); i++) {
                         if (i > 0) std::cout << ", ";
                         std::cout << op.inputPagedTensorDims[i];
                     }
-                    std::cout << "], page_size=" << op.inputPagedTensorPageSize;
+                    std::cout << "]";
+                    if (!op.inputPagedTensorDType.empty())
+                        std::cout << ", dtype=" << op.inputPagedTensorDType;
+                    std::cout << ", page_size=" << op.inputPagedTensorPageSize;
                 } else {
                     std::cout << "input(\"" << op.inputName << "\"";
+                    if (!op.inputTensorDims.empty()) {
+                        std::cout << ", dims=[";
+                        for (size_t i = 0; i < op.inputTensorDims.size(); i++) {
+                            if (i > 0) std::cout << ", ";
+                            std::cout << op.inputTensorDims[i];
+                        }
+                        std::cout << "]";
+                    }
+                    if (!op.inputTensorDType.empty())
+                        std::cout << ", dtype=" << op.inputTensorDType;
                 }
                 std::cout << ") : tensor\n";
                 break;
@@ -198,6 +309,24 @@ void Graph::dump() const {
                     std::cout << typeName(op.results[i]->type);
                 }
                 std::cout << "\n";
+                break;
+            case Op::TensorTupleCreate:
+                std::cout << "%" << op.results[0]->id << " = tensor_tuple_create(";
+                for (size_t i = 0; i < op.operands.size(); i++) {
+                    if (i > 0) std::cout << ", ";
+                    std::cout << "%" << op.operands[i]->id;
+                }
+                std::cout << ") : tensor_tuple\n";
+                break;
+            case Op::TensorTupleAppend:
+                std::cout << "%" << op.results[0]->id << " = tensor_tuple_append(%"
+                          << op.operands[0]->id << ", %" << op.operands[1]->id
+                          << ") : tensor_tuple\n";
+                break;
+            case Op::TensorTupleGet:
+                std::cout << "%" << op.results[0]->id << " = tensor_tuple_get(%"
+                          << op.operands[0]->id << ", index=" << op.tupleIndex
+                          << ") : tensor\n";
                 break;
         }
     }

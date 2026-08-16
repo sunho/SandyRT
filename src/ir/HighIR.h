@@ -7,21 +7,36 @@
 
 namespace sandy::ir::high_ir {
 
-enum class Type { Tensor, Int, Float, String, IntList };
+enum class Type { Tensor, TensorTuple, Int, Float, String, IntList };
 
 const char* typeName(Type type);
 
 struct Op;
 
+enum class TensorKind {
+    Tensor,
+    PagedTensor,
+};
+
+struct TensorType {
+    TensorKind kind = TensorKind::Tensor;
+    std::vector<int64_t> dims;
+    std::string dtype;
+    int64_t pageSize = -1;
+};
+
 struct Value {
     int id;
     Type type;
+    TensorType tensorType;
+    std::vector<TensorType> tupleElements;
     Op* def = nullptr;
 };
 
 enum class InputKind {
     Tensor,
     PagedTensor,
+    TensorTuple,
 };
 
 struct Attr {
@@ -39,7 +54,17 @@ struct Attr {
 };
 
 struct Op {
-    enum Kind { Input, Builtin, Weight, IntConst, FloatConst, StringConst };
+    enum Kind {
+        Input,
+        Builtin,
+        Weight,
+        IntConst,
+        FloatConst,
+        StringConst,
+        TensorTupleCreate,
+        TensorTupleAppend,
+        TensorTupleGet,
+    };
     Kind kind;
     std::vector<Value*> results;
 
@@ -50,8 +75,13 @@ struct Op {
     std::string weightName;
     std::string inputName;
     InputKind inputKind = InputKind::Tensor;
+    std::vector<int64_t> inputTensorDims;
+    std::string inputTensorDType;
     std::vector<int64_t> inputPagedTensorDims;
+    std::string inputPagedTensorDType;
     int64_t inputPagedTensorPageSize = -1;
+    std::vector<TensorType> inputTensorTupleElements;
+    int64_t tupleIndex = -1;
 
     int64_t intVal = 0;
     double floatVal = 0.0;
@@ -61,9 +91,18 @@ struct Op {
 class Graph {
 public:
     Value* addInput(const std::string& name);
+    Value* addTensorInput(const std::string& name,
+                          std::vector<int64_t> dims,
+                          std::string dtype);
     Value* addPagedTensorInput(const std::string& name,
                                std::vector<int64_t> dims,
                                int64_t pageSize);
+    Value* addPagedTensorInput(const std::string& name,
+                               std::vector<int64_t> dims,
+                               std::string dtype,
+                               int64_t pageSize);
+    Value* addTensorTupleInput(const std::string& name,
+                               std::vector<TensorType> elements);
     Value* addWeight(const std::string& name);
     Value* addIntConst(int64_t val);
     Value* addFloatConst(double val);
@@ -72,6 +111,9 @@ public:
                                    const std::vector<Value*>& operands,
                                    const std::vector<Attr>& attrs,
                                    int numResults);
+    Value* addTensorTupleCreate(const std::vector<Value*>& elements);
+    Value* addTensorTupleAppend(Value* tuple, Value* element);
+    Value* addTensorTupleGet(Value* tuple, int64_t index);
 
     void setOutputs(const std::vector<Value*>& outputs);
     void dump() const;

@@ -10,6 +10,7 @@
 #include <span>
 #include <string>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace sandy::device {
@@ -211,6 +212,7 @@ Result<DeviceCompiledGraphId> CpuDevice::compile(const ir::kernel_ir::Graph& gra
 
         switch (op.kind()) {
             case ir::kernel_ir::OpKind::Input:
+            case ir::kernel_ir::OpKind::TensorTupleCreate:
             case ir::kernel_ir::OpKind::DeviceTransfer:
                 break;
             case ir::kernel_ir::OpKind::LayoutTransform: {
@@ -596,6 +598,22 @@ Result<void> CpuDevice::run(
         ir::kernel_ir::OpId opId,
         std::span<const DeviceTensorView> inputs,
         std::span<const DeviceTensorView> outputs) {
+    std::vector<DeviceRunValue> inputValues;
+    inputValues.reserve(inputs.size());
+    for (auto input : inputs)
+        inputValues.push_back(input);
+    std::vector<DeviceRunValue> outputValues;
+    outputValues.reserve(outputs.size());
+    for (auto output : outputs)
+        outputValues.push_back(output);
+    return run(graphId, opId, inputValues, outputValues);
+}
+
+Result<void> CpuDevice::run(
+        DeviceCompiledGraphId graphId,
+        ir::kernel_ir::OpId opId,
+        std::span<const DeviceRunValue> inputs,
+        std::span<const DeviceRunValue> outputs) {
     auto graphIt = graphs_.find(graphId);
     if (graphIt == graphs_.end())
         return make_error("cpu device compiled graph not found");
@@ -609,33 +627,52 @@ Result<void> CpuDevice::run(
     if (outputs.size() != kernel.outputCount)
         return make_error("cpu device output arity mismatch");
 
+    std::vector<DeviceTensorView> inputViews;
+    inputViews.reserve(inputs.size());
+    for (const auto& input : inputs) {
+        auto* view = std::get_if<DeviceTensorView>(&input);
+        if (!view)
+            return make_error("cpu device kernel input must be a dense tensor view");
+        inputViews.push_back(*view);
+    }
+
+    std::vector<DeviceTensorView> outputViews;
+    outputViews.reserve(outputs.size());
+    for (const auto& output : outputs) {
+        auto* view = std::get_if<DeviceTensorView>(&output);
+        if (!view)
+            return make_error("cpu device kernel output must be a dense tensor view");
+        outputViews.push_back(*view);
+    }
+
     auto inputRef = [&](size_t index) -> Result<core::TensorRef> {
-        auto it = buffers_.find(inputs[index].buffer);
+        auto it = buffers_.find(inputViews[index].buffer);
         if (it == buffers_.end())
             return make_error("cpu device input buffer not found");
         auto data = it->second.borrowed ? it->second.borrowed->data() : std::span<const uint8_t>(it->second.data);
         return core::make_tensor_ref(
-            inputs[index].view.desc,
+            inputViews[index].view.desc,
             data,
-            inputs[index].view.strides,
-            inputs[index].view.storageOffset);
+            inputViews[index].view.strides,
+            inputViews[index].view.storageOffset);
     };
 
     auto outputRef = [&](size_t index) -> Result<core::MutableTensorRef> {
-        auto it = buffers_.find(outputs[index].buffer);
+        auto it = buffers_.find(outputViews[index].buffer);
         if (it == buffers_.end())
             return make_error("cpu device output buffer not found");
         if (it->second.borrowed)
             return make_error("cpu device output buffer is not writable");
         return core::make_mutable_tensor_ref(
-            outputs[index].view.desc,
+            outputViews[index].view.desc,
             it->second.data,
-            outputs[index].view.strides,
-            outputs[index].view.storageOffset);
+            outputViews[index].view.strides,
+            outputViews[index].view.storageOffset);
     };
 
     switch (kernel.kind) {
         case ir::kernel_ir::OpKind::Input:
+        case ir::kernel_ir::OpKind::TensorTupleCreate:
             return make_error("cpu device cannot run input boundary op");
         case ir::kernel_ir::OpKind::DeviceTransfer:
             return make_error("cpu device cannot run device transfer boundary op");

@@ -50,6 +50,16 @@ std::string type_string(const ValueType& type) {
                    ", grow_dim=" + std::to_string(type.paged.growDim) +
                    ", page_size=" + std::to_string(type.paged.pageSize) + ">";
         }
+        case ValueKind::TensorTuple: {
+            std::string out = "tensor_tuple<";
+            for (size_t i = 0; i < type.elements.size(); i++) {
+                if (i != 0)
+                    out += ", ";
+                out += type_string(type.elements[i]);
+            }
+            out += ">";
+            return out;
+        }
         case ValueKind::Scalar:
             return "scalar<" + std::string(core::dtype_name(type.dtype)) + ">";
     }
@@ -57,40 +67,61 @@ std::string type_string(const ValueType& type) {
 }
 
 bool same_value_type(const ValueType& lhs, const ValueType& rhs) {
-    if (lhs.kind != rhs.kind || lhs.dtype != rhs.dtype || lhs.shape != rhs.shape)
+    if (lhs.kind != rhs.kind)
         return false;
-    if (lhs.kind != ValueKind::PagedTensor)
+    if (lhs.kind == ValueKind::TensorTuple) {
+        if (lhs.elements.size() != rhs.elements.size())
+            return false;
+        for (size_t i = 0; i < lhs.elements.size(); i++) {
+            if (!same_value_type(lhs.elements[i], rhs.elements[i]))
+                return false;
+        }
         return true;
-    return lhs.paged.growDim == rhs.paged.growDim &&
-           lhs.paged.pageSize == rhs.paged.pageSize;
+    }
+    if (lhs.dtype != rhs.dtype || lhs.shape != rhs.shape)
+        return false;
+    if (lhs.kind == ValueKind::PagedTensor) {
+        return lhs.paged.growDim == rhs.paged.growDim &&
+               lhs.paged.pageSize == rhs.paged.pageSize;
+    }
+    return true;
 }
 
-Result<void> verify_value_type(const Value& value) {
-    const auto& type = value.type;
+Result<void> verify_value_type_impl(const ValueType& type, const std::string& name) {
+    if (type.kind == ValueKind::TensorTuple) {
+        for (size_t i = 0; i < type.elements.size(); i++) {
+            auto result = verify_value_type_impl(
+                type.elements[i],
+                name + " tuple element " + std::to_string(i));
+            if (!result)
+                return result;
+        }
+        return {};
+    }
     if (type.kind != ValueKind::PagedTensor)
         return {};
 
     int rank = type.shape.rank();
     if (rank < 1) {
-        return make_error(value_ref(value.id) +
-                          " paged tensor rank must be >= 1");
+        return make_error(name + " paged tensor rank must be >= 1");
     }
     if (type.paged.growDim < 0 || type.paged.growDim >= rank) {
-        return make_error(value_ref(value.id) +
-                          " paged tensor grow_dim out of range");
+        return make_error(name + " paged tensor grow_dim out of range");
     }
     if (type.paged.pageSize <= 0) {
-        return make_error(value_ref(value.id) +
-                          " paged tensor page_size must be > 0");
+        return make_error(name + " paged tensor page_size must be > 0");
     }
     for (int i = 0; i < rank; ++i) {
         auto dim = type.shape.dim(i);
         if (dim != core::Shape::kDynamic && dim <= 0) {
-            return make_error(value_ref(value.id) +
-                              " paged tensor dimensions must be positive or dynamic");
+            return make_error(name + " paged tensor dimensions must be positive or dynamic");
         }
     }
     return {};
+}
+
+Result<void> verify_value_type(const Value& value) {
+    return verify_value_type_impl(value.type, value_ref(value.id));
 }
 
 std::string values_string(std::span<const ValueId> values) {
@@ -262,6 +293,10 @@ Result<void> verify_device_placement(const Graph& graph, const Op& op) {
 std::string input_source_string(const InputSource& source) {
     switch (source.kind) {
         case InputSourceKind::Argument:
+            if (source.tupleElement >= 0) {
+                return "arg(" + std::to_string(source.index) +
+                       ")[" + std::to_string(source.tupleElement) + "]";
+            }
             return "arg(" + std::to_string(source.index) + ")";
         case InputSourceKind::Weight:
             return "weight(\"" + source.name + "\")";
@@ -368,6 +403,7 @@ std::string op_attr_string(const Op& op) {
 const char* op_kind_name(OpKind kind) {
     switch (kind) {
         case OpKind::Input: return "input";
+        case OpKind::TensorTupleCreate: return "tensor_tuple_create";
         case OpKind::DeviceTransfer: return "device_transfer";
         case OpKind::LayoutTransform: return "layout_transform";
         case OpKind::ElementwiseKernel: return "elementwise_kernel";
@@ -585,6 +621,42 @@ Result<void> InputOp::verify(const Graph& graph) const {
                 return make_error(op_ref(id()) + " input source name is empty");
             }
             break;
+    }
+    return {};
+}
+
+TensorTupleCreateOp::TensorTupleCreateOp(
+        OpId id,
+        std::vector<ValueId> inputs,
+        ValueId output,
+        DeviceId device)
+    : Op(id, OpKind::TensorTupleCreate, device),
+      inputs_(std::move(inputs)),
+      outputs_{output}
+{}
+
+Result<void> TensorTupleCreateOp::verify(const Graph& graph) const {
+    if (auto result = verify_values_exist(graph, inputs(), "input", *this); !result) {
+        return result;
+    }
+    if (auto result = verify_values_exist(graph, outputs(), "output", *this); !result) {
+        return result;
+    }
+    const auto& outputType = graph.value(outputs_[0]).type;
+    if (outputType.kind != ValueKind::TensorTuple) {
+        return make_error(op_ref(id()) + " tensor tuple create output must be tuple");
+    }
+    if (outputType.elements.size() != inputs_.size()) {
+        return make_error(op_ref(id()) + " tensor tuple create type arity mismatch");
+    }
+    for (size_t i = 0; i < inputs_.size(); i++) {
+        const auto& inputType = graph.value(inputs_[i]).type;
+        if (inputType.kind == ValueKind::TensorTuple) {
+            return make_error(op_ref(id()) + " nested tensor tuples are not supported");
+        }
+        if (!same_value_type(inputType, outputType.elements[i])) {
+            return make_error(op_ref(id()) + " tensor tuple create element type mismatch");
+        }
     }
     return {};
 }

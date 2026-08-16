@@ -8,12 +8,39 @@ namespace {
 
 bool isTensorType(const TypeExpr& type) {
     return type.kind == TypeExpr::Simple &&
-           type.dims.empty() &&
            type.name == "Tensor";
 }
 
 bool isPagedTensorType(const TypeExpr& type) {
     return type.kind == TypeExpr::Simple && type.name == "PagedTensor";
+}
+
+bool isInferredTensorTupleType(const TypeExpr& type) {
+    return type.kind == TypeExpr::Slice && type.name == "Tensor";
+}
+
+bool isFixedTensorTupleType(const TypeExpr& type) {
+    return type.kind == TypeExpr::FixedTensorTuple &&
+           (type.name == "Tensor" || type.name == "PagedTensor");
+}
+
+ir::high_ir::TensorType tensorTypeFromTypeExpr(const TypeExpr& type) {
+    ir::high_ir::TensorType out;
+    out.kind = type.name == "PagedTensor"
+        ? ir::high_ir::TensorKind::PagedTensor
+        : ir::high_ir::TensorKind::Tensor;
+    out.dims = type.dims;
+    out.dtype = type.dtype;
+    out.pageSize = type.pageSize;
+    return out;
+}
+
+std::vector<ir::high_ir::TensorType> tupleElementsFromTypeExpr(const TypeExpr& type) {
+    std::vector<ir::high_ir::TensorType> elements;
+    auto element = tensorTypeFromTypeExpr(type);
+    for (int64_t i = 0; i < type.tupleLen; i++)
+        elements.push_back(element);
+    return elements;
 }
 
 } // namespace
@@ -37,16 +64,33 @@ void Interpreter::interpret() {
     std::vector<RuntimeValue> mainArgs;
     for (auto& param : mainFunc.params) {
         ir::high_ir::Value* input = nullptr;
-        if (isTensorType(param.type)) {
-            input = graph_.addInput(param.name);
+        if (isFixedTensorTupleType(param.type)) {
+            if (param.type.tupleLen < 0)
+                error("[]Tensor tuple input requires non-negative fixed length");
+            input = graph_.addTensorTupleInput(
+                param.name,
+                tupleElementsFromTypeExpr(param.type));
+        } else if (isTensorType(param.type)) {
+            if (param.type.dims.empty() && param.type.dtype.empty()) {
+                input = graph_.addInput(param.name);
+            } else {
+                input = graph_.addTensorInput(
+                    param.name,
+                    param.type.dims,
+                    param.type.dtype);
+            }
         } else if (isPagedTensorType(param.type)) {
             if (param.type.dims.empty())
                 error("PagedTensor parameter '" + param.name + "' requires shape, for example PagedTensor[[2, -1, 128], page_size=16]");
             if (param.type.pageSize <= 0)
                 error("PagedTensor parameter '" + param.name + "' requires positive page_size");
-            input = graph_.addPagedTensorInput(param.name, param.type.dims, param.type.pageSize);
+            input = graph_.addPagedTensorInput(
+                param.name,
+                param.type.dims,
+                param.type.dtype,
+                param.type.pageSize);
         } else {
-            error("main parameter '" + param.name + "' must have type Tensor or PagedTensor");
+            error("main parameter '" + param.name + "' must have type Tensor, PagedTensor, or [N]Tensor");
         }
         mainArgs.push_back(RuntimeValue::makeNode(input));
     }
@@ -60,6 +104,8 @@ void Interpreter::interpret() {
         graph_.setOutputs(outputs);
     } else if (result.kind == RuntimeValue::NodeVal) {
         graph_.setOutputs({result.nodeVal});
+    } else if (result.kind == RuntimeValue::TensorTuple) {
+        graph_.setOutputs({toGraphValue(result)});
     }
 }
 
@@ -133,7 +179,11 @@ void Interpreter::execAssign(const Stmt& stmt) {
 }
 
 void Interpreter::execVarDecl(const Stmt& stmt) {
-    setVar(stmt.name, RuntimeValue::makeVoid());
+    if (isInferredTensorTupleType(stmt.type)) {
+        setVar(stmt.name, RuntimeValue::makeTensorTuple({}));
+    } else {
+        setVar(stmt.name, RuntimeValue::makeVoid());
+    }
 }
 
 void Interpreter::execReturn(const Stmt& stmt) {
@@ -217,7 +267,29 @@ RuntimeValue Interpreter::evalExpr(const Expr& expr) {
         case Expr::Binary:  return evalBinary(expr);
         case Expr::Unary:   return evalUnary(expr);
         case Expr::Call:    return evalCall(expr);
-        case Expr::Index:   error("indexing not supported in interpreter");
+        case Expr::Index: {
+            RuntimeValue target = evalExpr(*expr.left);
+            RuntimeValue index = evalExpr(*expr.right);
+            if (index.kind != RuntimeValue::Int)
+                error("tuple index must be a compile-time int");
+            if (index.intVal < 0)
+                error("tuple index must be non-negative");
+            if (target.kind == RuntimeValue::TensorTuple) {
+                if (static_cast<size_t>(index.intVal) >= target.tensorTupleVals.size())
+                    error("tuple index out of range");
+                return RuntimeValue::makeNode(
+                    target.tensorTupleVals[static_cast<size_t>(index.intVal)]);
+            }
+            if (target.kind == RuntimeValue::NodeVal &&
+                target.nodeVal &&
+                target.nodeVal->type == ir::high_ir::Type::TensorTuple) {
+                if (static_cast<size_t>(index.intVal) >= target.nodeVal->tupleElements.size())
+                    error("tuple index out of range");
+                return RuntimeValue::makeNode(
+                    graph_.addTensorTupleGet(target.nodeVal, index.intVal));
+            }
+            error("indexing requires []Tensor or [N]Tensor");
+        }
     }
     error("unknown expression kind");
 }
@@ -226,6 +298,26 @@ RuntimeValue Interpreter::evalCall(const Expr& expr) {
     if (!expr.left || expr.left->kind != Expr::Ident)
         error("callee must be an identifier");
     std::string name = expr.left->sval;
+
+    if (name == "append") {
+        if (expr.args.size() != 2 || !expr.namedArgs.empty())
+            error("append expects tuple and one tensor");
+        RuntimeValue tuple = evalExpr(*expr.args[0]);
+        RuntimeValue element = evalExpr(*expr.args[1]);
+        auto* elementValue = toGraphValue(element);
+        if (tuple.kind == RuntimeValue::TensorTuple) {
+            auto values = tuple.tensorTupleVals;
+            values.push_back(elementValue);
+            return RuntimeValue::makeTensorTuple(std::move(values));
+        }
+        if (tuple.kind == RuntimeValue::NodeVal &&
+            tuple.nodeVal &&
+            tuple.nodeVal->type == ir::high_ir::Type::TensorTuple) {
+            return RuntimeValue::makeNode(
+                graph_.addTensorTupleAppend(tuple.nodeVal, elementValue));
+        }
+        error("append first argument must be []Tensor");
+    }
 
     if (name.size() > 2 && name[0] == '_' && name[1] == '_') {
         std::string builtinName = name.substr(2);
@@ -392,6 +484,8 @@ std::string Interpreter::interpolateString(const std::string& s) {
 ir::high_ir::Value* Interpreter::toGraphValue(const RuntimeValue& val) {
     switch (val.kind) {
         case RuntimeValue::NodeVal: return val.nodeVal;
+        case RuntimeValue::TensorTuple:
+            return graph_.addTensorTupleCreate(val.tensorTupleVals);
         case RuntimeValue::Int:     return graph_.addIntConst(val.intVal);
         case RuntimeValue::Float:   return graph_.addFloatConst(val.floatVal);
         case RuntimeValue::String:  return graph_.addStringConst(val.strVal);

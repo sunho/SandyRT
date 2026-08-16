@@ -124,6 +124,25 @@ func f(xs []Tensor) Tensor {
     EXPECT_EQ(prog.funcs[0].params[0].type.name, "Tensor");
 }
 
+TEST(Parser, FixedTensorTupleParamWithExplicitElementType) {
+    auto prog = parseSource(R"(
+func main(k [8]PagedTensor[[128], bf16, page_size=16]) []Tensor {
+    return k
+}
+)");
+    ASSERT_EQ(prog.funcs.size(), 1u);
+    ASSERT_EQ(prog.funcs[0].params.size(), 1u);
+    const auto& type = prog.funcs[0].params[0].type;
+    EXPECT_EQ(type.kind, TypeExpr::FixedTensorTuple);
+    EXPECT_EQ(type.tupleLen, 8);
+    EXPECT_EQ(type.name, "PagedTensor");
+    EXPECT_EQ(type.dims, (std::vector<int64_t>{128}));
+    EXPECT_EQ(type.dtype, "bf16");
+    EXPECT_EQ(type.pageSize, 16);
+    ASSERT_EQ(prog.funcs[0].returnTypes.size(), 1u);
+    EXPECT_EQ(prog.funcs[0].returnTypes[0].kind, TypeExpr::Slice);
+}
+
 TEST(Parser, VarDecl) {
     auto prog = parseSource(R"(
 func f() {

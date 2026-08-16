@@ -122,11 +122,25 @@ std::vector<Param> Parser::parseParams() {
 TypeExpr Parser::parseType() {
     if (check(TokenKind::LBracket)) {
         advance();
-        expect(TokenKind::RBracket, "expected ']' in slice type");
+        if (match(TokenKind::RBracket)) {
+            Token elem = expect(TokenKind::Ident, "expected element type");
+            if (hasError_) return TypeExpr::simple("");
+            return TypeExpr::slice(elem.value);
+        }
+
+        Token len = expect(TokenKind::IntLit, "expected fixed tuple length or ']'");
         if (hasError_) return TypeExpr::simple("");
-        Token elem = expect(TokenKind::Ident, "expected element type");
+        int64_t tupleLen = std::strtoll(len.value.c_str(), nullptr, 10);
+        expect(TokenKind::RBracket, "expected ']' after fixed tuple length");
         if (hasError_) return TypeExpr::simple("");
-        return TypeExpr::slice(elem.value);
+        TypeExpr elem = parseType();
+        if (hasError_) return TypeExpr::simple("");
+        if (elem.kind != TypeExpr::Simple ||
+            (elem.name != "Tensor" && elem.name != "PagedTensor")) {
+            reportError("fixed tuple element type must be Tensor or PagedTensor");
+            return elem;
+        }
+        return TypeExpr::fixedTensorTuple(tupleLen, std::move(elem));
     }
 
     Token name = expect(TokenKind::Ident, "expected type name");
@@ -139,22 +153,29 @@ TypeExpr Parser::parseType() {
         if (hasError_) return type;
         expect(TokenKind::RBracket, "expected ']' after type argument");
         if (hasError_) return type;
-        if (name.value == "PagedTensor") {
-            expect(TokenKind::Comma, "expected ', page_size=...' in PagedTensor type");
+        while (match(TokenKind::Comma)) {
+            Token arg = expect(TokenKind::Ident, "expected dtype or page_size in tensor type");
             if (hasError_) return type;
-            Token pageSizeName = expect(TokenKind::Ident, "expected page_size in PagedTensor type");
-            if (hasError_) return type;
-            if (pageSizeName.value != "page_size") {
-                reportError("expected page_size in PagedTensor type");
-                return type;
+            if (arg.value == "page_size") {
+                if (name.value != "PagedTensor") {
+                    reportError("page_size is only valid for PagedTensor");
+                    return type;
+                }
+                expect(TokenKind::Assign, "expected '=' after page_size in PagedTensor type");
+                if (hasError_) return type;
+                Token pageSize = expect(TokenKind::IntLit, "expected integer page size in PagedTensor type");
+                if (hasError_) return type;
+                type.pageSize = std::strtoll(pageSize.value.c_str(), nullptr, 10);
+            } else {
+                if (!type.dtype.empty()) {
+                    reportError("duplicate tensor dtype");
+                    return type;
+                }
+                type.dtype = arg.value;
             }
-            expect(TokenKind::Assign, "expected '=' after page_size in PagedTensor type");
-            if (hasError_) return type;
-            Token pageSize = expect(TokenKind::IntLit, "expected integer page size in PagedTensor type");
-            if (hasError_) return type;
-            type.pageSize = std::strtoll(pageSize.value.c_str(), nullptr, 10);
-        } else if (match(TokenKind::Comma)) {
-            reportError("unexpected type argument");
+        }
+        if (name.value == "PagedTensor" && type.pageSize <= 0) {
+            reportError("expected page_size in PagedTensor type");
             return type;
         }
         expect(TokenKind::RBracket, "expected ']' after type arguments");

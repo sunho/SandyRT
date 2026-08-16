@@ -15,6 +15,7 @@ const char* op_kind_name(OpKind kind) {
     switch (kind) {
         case OpKind::Input:     return "input";
         case OpKind::PagedTensorInput: return "paged_tensor_input";
+        case OpKind::TensorTupleCreate: return "tensor_tuple_create";
         case OpKind::Weight:    return "weight";
         case OpKind::Constant:  return "constant";
         case OpKind::Linear:    return "linear";
@@ -36,6 +37,35 @@ const char* op_kind_name(OpKind kind) {
         case OpKind::NUM_KINDS: return "?";
     }
     return "?";
+}
+
+ValueType ValueType::tensor(core::Shape shape, core::DType dtype) {
+    ValueType type;
+    type.shape = std::move(shape);
+    type.dtype = dtype;
+    type.kind = ValueKind::Tensor;
+    return type;
+}
+
+ValueType ValueType::paged_tensor(
+        core::Shape shape,
+        core::DType dtype,
+        int64_t growDim,
+        int64_t pageSize) {
+    ValueType type;
+    type.shape = std::move(shape);
+    type.dtype = dtype;
+    type.kind = ValueKind::PagedTensor;
+    type.growDim = growDim;
+    type.pageSize = pageSize;
+    return type;
+}
+
+ValueType ValueType::tensor_tuple(std::vector<ValueType> elements) {
+    ValueType type;
+    type.kind = ValueKind::TensorTuple;
+    type.elements = std::move(elements);
+    return type;
 }
 
 // === AttrValue ===
@@ -876,12 +906,20 @@ bool Graph::eraseOp(Op* op) {
     return true;
 }
 
-Value* Graph::newValue(core::Shape shape, core::DType dtype) {
+Value* Graph::newValue(ValueType type) {
     auto& v = values_.emplace_back();
     v.id = nextId_++;
-    v.shape = std::move(shape);
-    v.dtype = dtype;
+    v.kind = type.kind;
+    v.shape = std::move(type.shape);
+    v.dtype = type.dtype;
+    v.growDim = type.growDim;
+    v.pageSize = type.pageSize;
+    v.elements = std::move(type.elements);
     return &v;
+}
+
+Value* Graph::newValue(core::Shape shape, core::DType dtype) {
+    return newValue(ValueType::tensor(std::move(shape), dtype));
 }
 
 static void printAttrVal(const AttrValue& a) {
@@ -924,8 +962,13 @@ void Graph::dump() const {
 
         for (size_t i = 0; i < op->results.size(); i++) {
             if (i > 0) std::cout << ", ";
-            std::cout << core::dtype_name(op->results[i]->dtype)
-                      << op->results[i]->shape.str();
+            if (op->results[i]->kind == ValueKind::TensorTuple) {
+                std::cout << "tensor_tuple<" << op->results[i]->elements.size()
+                          << ">";
+            } else {
+                std::cout << core::dtype_name(op->results[i]->dtype)
+                          << op->results[i]->shape.str();
+            }
         }
         std::cout << "\n";
     }
@@ -973,7 +1016,7 @@ std::vector<Value*> Builder::createOp(OpKind kind,
 
     std::vector<Value*> results;
     for (auto& rt : result_types) {
-        auto* v = graph_.newValue(std::move(rt.shape), rt.dtype);
+        auto* v = graph_.newValue(std::move(rt));
         v->def = &op;
         op.results.push_back(v);
         results.push_back(v);
@@ -984,9 +1027,19 @@ std::vector<Value*> Builder::createOp(OpKind kind,
 }
 
 Value* Builder::createInput(int64_t index, core::Shape shape, core::DType dtype) {
+    return createInput(index, std::move(shape), dtype, -1);
+}
+
+Value* Builder::createInput(
+        int64_t index,
+        core::Shape shape,
+        core::DType dtype,
+        int64_t tupleElement) {
     auto& op = graph_.ops_.emplace_back();
     op.kind = OpKind::Input;
     op.attrs["index"] = AttrValue::make_int(index);
+    if (tupleElement >= 0)
+        op.attrs["tuple_element"] = AttrValue::make_int(tupleElement);
     op.parent = block_;
 
     auto* v = graph_.newValue(std::move(shape), dtype);
@@ -1001,7 +1054,8 @@ Value* Builder::createPagedTensorInput(int64_t index,
                                        core::Shape dims,
                                        core::DType dtype,
                                        int64_t growDim,
-                                       int64_t pageSize) {
+                                       int64_t pageSize,
+                                       int64_t tupleElement) {
     if (index < 0) {
         fprintf(stderr, "paged_tensor_input index must be >= 0\n");
         abort();
@@ -1033,9 +1087,44 @@ Value* Builder::createPagedTensorInput(int64_t index,
     op.attrs["grow_dim"] = AttrValue::make_int(growDim);
     op.attrs["dims"] = AttrValue::make_int_list(std::move(attrDims));
     op.attrs["page_size"] = AttrValue::make_int(pageSize);
+    if (tupleElement >= 0)
+        op.attrs["tuple_element"] = AttrValue::make_int(tupleElement);
     op.parent = block_;
 
-    auto* v = graph_.newValue(std::move(dims), dtype);
+    auto* v = graph_.newValue(
+        ValueType::paged_tensor(std::move(dims), dtype, growDim, pageSize));
+    v->def = &op;
+    op.results.push_back(v);
+
+    block_->ops.push_back(&op);
+    return v;
+}
+
+Value* Builder::createTensorTupleCreate(std::span<Value* const> elements) {
+    auto& op = graph_.ops_.emplace_back();
+    op.kind = OpKind::TensorTupleCreate;
+    op.operands.assign(elements.begin(), elements.end());
+    op.parent = block_;
+
+    std::vector<ValueType> elementTypes;
+    elementTypes.reserve(elements.size());
+    for (int i = 0; i < static_cast<int>(elements.size()); i++) {
+        auto* element = elements[i];
+        if (element->kind == ValueKind::TensorTuple) {
+            fprintf(stderr, "tensor_tuple_create does not support nested tuples\n");
+            abort();
+        }
+        element->uses.push_back({&op, i});
+        ValueType elementType;
+        elementType.shape = element->shape;
+        elementType.dtype = element->dtype;
+        elementType.kind = element->kind;
+        elementType.growDim = element->growDim;
+        elementType.pageSize = element->pageSize;
+        elementTypes.push_back(std::move(elementType));
+    }
+
+    auto* v = graph_.newValue(ValueType::tensor_tuple(std::move(elementTypes)));
     v->def = &op;
     op.results.push_back(v);
 

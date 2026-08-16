@@ -11,13 +11,14 @@
 namespace sandy::sandygo {
 
 struct RuntimeValue {
-    enum Kind { Void, Int, Float, String, IntList, NodeVal, Tuple };
+    enum Kind { Void, Int, Float, String, IntList, NodeVal, TensorTuple, Tuple };
     Kind kind = Void;
     int64_t intVal = 0;
     double floatVal = 0.0;
     std::string strVal;
     std::vector<int64_t> intListVal;
     ir::high_ir::Value* nodeVal = nullptr;
+    std::vector<ir::high_ir::Value*> tensorTupleVals;
     std::vector<RuntimeValue> tupleVals;
 
     static RuntimeValue makeInt(int64_t v) {
@@ -37,6 +38,9 @@ struct RuntimeValue {
     }
     static RuntimeValue makeTuple(std::vector<RuntimeValue> vals) {
         RuntimeValue rv; rv.kind = Tuple; rv.tupleVals = std::move(vals); return rv;
+    }
+    static RuntimeValue makeTensorTuple(std::vector<ir::high_ir::Value*> vals) {
+        RuntimeValue rv; rv.kind = TensorTuple; rv.tensorTupleVals = std::move(vals); return rv;
     }
     static RuntimeValue makeVoid() { return RuntimeValue{}; }
 };

@@ -16,6 +16,7 @@ namespace sandy::ir::mid_ir {
 enum class OpKind {
     Input,
     PagedTensorInput,
+    TensorTupleCreate,
     Weight,
     Constant,
     Linear,
@@ -62,9 +63,26 @@ using AttrMap = std::unordered_map<std::string, AttrValue>;
 
 struct Value;
 
+enum class ValueKind {
+    Tensor,
+    PagedTensor,
+    TensorTuple,
+};
+
 struct ValueType {
     core::Shape shape;
-    core::DType dtype;
+    core::DType dtype = core::DType::F32;
+    ValueKind kind = ValueKind::Tensor;
+    int64_t growDim = -1;
+    int64_t pageSize = -1;
+    std::vector<ValueType> elements;
+
+    static ValueType tensor(core::Shape shape, core::DType dtype);
+    static ValueType paged_tensor(core::Shape shape,
+                                  core::DType dtype,
+                                  int64_t growDim,
+                                  int64_t pageSize);
+    static ValueType tensor_tuple(std::vector<ValueType> elements);
 };
 
 class OpDef {
@@ -106,8 +124,12 @@ struct Use {
 
 struct Value {
     int id;
+    ValueKind kind = ValueKind::Tensor;
     core::Shape shape;
     core::DType dtype;
+    int64_t growDim = -1;
+    int64_t pageSize = -1;
+    std::vector<ValueType> elements;
     Op* def = nullptr;
     std::vector<Use> uses;
 };
@@ -153,6 +175,7 @@ private:
     std::vector<Value*> outputs_;
     int nextId_ = 0;
 
+    Value* newValue(ValueType type);
     Value* newValue(core::Shape shape, core::DType dtype);
 };
 
@@ -173,7 +196,13 @@ public:
                                   core::Shape dims,
                                   core::DType dtype,
                                   int64_t growDim,
-                                  int64_t pageSize);
+                                  int64_t pageSize,
+                                  int64_t tupleElement = -1);
+    Value* createInput(int64_t index,
+                       core::Shape shape,
+                       core::DType dtype,
+                       int64_t tupleElement);
+    Value* createTensorTupleCreate(std::span<Value* const> elements);
     Value* createWeight(const std::string& name, core::Shape shape, core::DType dtype);
     Value* createConstantF32(float value);
 

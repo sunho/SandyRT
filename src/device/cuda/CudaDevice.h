@@ -41,8 +41,8 @@ public:
     Result<void> run(
         DeviceCompiledGraphId graph,
         ir::kernel_ir::OpId op,
-        std::span<const DeviceTensorView> inputs,
-        std::span<const DeviceTensorView> outputs) override;
+        std::span<const DeviceRunValue> inputs,
+        std::span<const DeviceRunValue> outputs) override;
 
     Result<TensorBufferPtr> read(DeviceTensorView src) override;
     Result<TensorBufferPtr> read(DeviceBufferId src);

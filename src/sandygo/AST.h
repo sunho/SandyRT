@@ -13,14 +13,21 @@ using ExprPtr = std::unique_ptr<Expr>;
 using StmtPtr = std::unique_ptr<Stmt>;
 
 struct TypeExpr {
-    enum Kind { Simple, Slice };
+    enum Kind { Simple, Slice, FixedTensorTuple };
     Kind kind = Simple;
     std::string name;
     std::vector<int64_t> dims;
+    std::string dtype;
     int64_t pageSize = -1;
+    int64_t tupleLen = -1;
 
     static TypeExpr simple(const std::string& n) { return {Simple, n}; }
     static TypeExpr slice(const std::string& elem) { return {Slice, elem}; }
+    static TypeExpr fixedTensorTuple(int64_t len, TypeExpr elem) {
+        elem.kind = FixedTensorTuple;
+        elem.tupleLen = len;
+        return elem;
+    }
 };
 
 struct Param {

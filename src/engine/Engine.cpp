@@ -11,6 +11,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace sandy::engine {
@@ -36,6 +37,7 @@ struct RuntimeState {
     std::unordered_map<ValueId, DeviceBufferId> buffers;
     std::unordered_map<ValueId, TensorViewDesc> views;
     std::unordered_map<ValueId, uint32_t> bufferDevices;
+    std::unordered_map<ValueId, std::vector<ValueId>> tensorTuples;
     std::vector<size_t> remainingUses;
     std::vector<bool> isOutput;
 };
@@ -378,25 +380,54 @@ RuntimeState initialize_runtime_state(const Graph& graph) {
     for (const auto& value : graph.values())
         state.remainingUses[value.id] = value.uses.size();
     for (auto output : graph.outputs()) {
-        if (output < state.isOutput.size())
+        if (output < state.isOutput.size()) {
             state.isOutput[output] = true;
+            const auto& value = graph.value(output);
+            if (value.type.kind == ir::kernel_ir::ValueKind::TensorTuple &&
+                value.def.op != ir::kernel_ir::kInvalidOpId) {
+                const auto& def = graph.op(value.def.op);
+                for (auto input : def.inputs()) {
+                    if (input < state.isOutput.size())
+                        state.isOutput[input] = true;
+                }
+            }
+        }
     }
     return state;
 }
 
 Result<TensorBufferPtr> resolve_input_buffer(
         const InputOp& inputOp,
-        std::span<TensorBufferPtr const> inputs,
+        std::span<const RunInput> inputs,
         const TensorMap& weights) {
     switch (inputOp.source().kind) {
         case InputSourceKind::Argument: {
             auto index = inputOp.source().index;
             if (index < 0 || static_cast<size_t>(index) >= inputs.size())
                 return make_error("input index out of range: " + std::to_string(index));
-            auto host = inputs[static_cast<size_t>(index)];
-            if (!host)
+            const auto& input = inputs[static_cast<size_t>(index)];
+            const TensorBufferPtr* host = nullptr;
+            if (inputOp.source().tupleElement >= 0) {
+                auto* tuple = std::get_if<RunTensorTuple>(&input);
+                if (!tuple)
+                    return make_error("input arg " + std::to_string(index) +
+                                      " must be a tensor tuple");
+                auto element = inputOp.source().tupleElement;
+                if (static_cast<size_t>(element) >= tuple->elements.size())
+                    return make_error("input tuple element out of range");
+                host = std::get_if<TensorBufferPtr>(
+                    &tuple->elements[static_cast<size_t>(element)]);
+                if (!host)
+                    return make_error("paged tuple input elements are not supported by Engine::runValues yet");
+            } else {
+                host = std::get_if<TensorBufferPtr>(&input);
+                if (!host)
+                    return make_error("input arg " + std::to_string(index) +
+                                      " must be a tensor");
+            }
+            if (!host || !*host)
                 return make_error("null input buffer at index: " + std::to_string(index));
-            return host;
+            return *host;
         }
         case InputSourceKind::Weight: {
             auto it = weights.find(inputOp.source().name);
@@ -417,7 +448,7 @@ Result<void> bind_input_op(
         DeviceId defaultDeviceId,
         const Graph& graph,
         const InputOp& inputOp,
-        std::span<TensorBufferPtr const> inputs,
+        std::span<const RunInput> inputs,
         const TensorMap& weights,
         RuntimeState& state) {
     auto output = inputOp.outputs()[0];
@@ -619,11 +650,11 @@ Result<void> allocate_kernel_outputs(
     return {};
 }
 
-Result<std::vector<DeviceTensorView>> collect_input_views(
+Result<std::vector<device::DeviceRunValue>> collect_input_views(
         const RuntimeState& state,
         const Op& op,
         DeviceId opDevice) {
-    std::vector<DeviceTensorView> inputs;
+    std::vector<device::DeviceRunValue> inputs;
     inputs.reserve(op.inputs().size());
     for (auto input : op.inputs()) {
         auto buffer = lookup_runtime_buffer(state.buffers, input);
@@ -642,10 +673,10 @@ Result<std::vector<DeviceTensorView>> collect_input_views(
     return inputs;
 }
 
-Result<std::vector<DeviceTensorView>> collect_output_views(
+Result<std::vector<device::DeviceRunValue>> collect_output_views(
         const RuntimeState& state,
         const Op& op) {
-    std::vector<DeviceTensorView> outputs;
+    std::vector<device::DeviceRunValue> outputs;
     outputs.reserve(op.outputs().size());
     for (auto output : op.outputs()) {
         auto buffer = lookup_runtime_buffer(state.buffers, output);
@@ -700,31 +731,69 @@ Result<void> run_kernel_op(
     return {};
 }
 
-Result<std::vector<TensorBufferPtr>> read_graph_outputs(
+Result<RunOutput> read_output_value(
+        std::vector<std::unique_ptr<Device>>& devices,
+        const Graph& graph,
+        RuntimeState& state,
+        ValueId value,
+        std::vector<ValueId>& uniqueOutputs) {
+    if (graph.value(value).type.kind == ir::kernel_ir::ValueKind::TensorTuple) {
+        auto it = state.tensorTuples.find(value);
+        if (it == state.tensorTuples.end())
+            return make_error("missing runtime tensor tuple for value: " + std::to_string(value));
+        RunTensorTuple tuple;
+        tuple.elements.reserve(it->second.size());
+        for (auto element : it->second) {
+            auto read = read_output_value(devices, graph, state, element, uniqueOutputs);
+            if (!read)
+                return make_error(read.error());
+            auto* tensor = std::get_if<TensorBufferPtr>(&*read);
+            if (!tensor)
+                return make_error("nested or paged tuple outputs are not fully supported yet");
+            tuple.elements.push_back(*tensor);
+        }
+        return RunOutput{std::move(tuple)};
+    }
+
+    auto buffer = lookup_runtime_buffer(state.buffers, value);
+    if (!buffer)
+        return make_error(buffer.error());
+    auto view = lookup_runtime_view(state.views, value);
+    if (!view)
+        return make_error(view.error());
+    auto outputDeviceIt = state.bufferDevices.find(value);
+    if (outputDeviceIt == state.bufferDevices.end())
+        return make_error("missing runtime device for value: " + std::to_string(value));
+    auto outputDevice = lookup_device(devices, outputDeviceIt->second);
+    if (!outputDevice)
+        return make_error(outputDevice.error());
+    auto output = (*outputDevice)->read(DeviceTensorView{buffer.take(), view.take()});
+    if (!output)
+        return make_error(output.error());
+
+    bool seen = false;
+    for (auto existing : uniqueOutputs)
+        seen = seen || existing == value;
+    if (!seen)
+        uniqueOutputs.push_back(value);
+
+    return RunOutput{output.take()};
+}
+
+Result<std::vector<RunOutput>> read_graph_outputs(
         std::vector<std::unique_ptr<Device>>& devices,
         const Graph& graph,
         RuntimeState& state,
         std::vector<ValueId>& uniqueOutputs) {
-    std::vector<TensorBufferPtr> outputs;
+    std::vector<RunOutput> outputs;
     outputs.reserve(graph.outputs().size());
     for (auto value : graph.outputs()) {
-        auto buffer = lookup_runtime_buffer(state.buffers, value);
-        if (!buffer)
-            return make_error(buffer.error());
-        auto view = lookup_runtime_view(state.views, value);
-        if (!view)
-            return make_error(view.error());
-        auto outputDeviceIt = state.bufferDevices.find(value);
-        if (outputDeviceIt == state.bufferDevices.end())
-            return make_error("missing runtime device for value: " + std::to_string(value));
-        auto outputDevice = lookup_device(devices, outputDeviceIt->second);
-        if (!outputDevice)
-            return make_error(outputDevice.error());
-        auto output = (*outputDevice)->read(DeviceTensorView{buffer.take(), view.take()});
+        auto output = read_output_value(devices, graph, state, value, uniqueOutputs);
         if (!output)
             return make_error(output.error());
         outputs.push_back(output.take());
-
+        if (graph.value(value).type.kind == ir::kernel_ir::ValueKind::TensorTuple)
+            continue;
         bool seen = false;
         for (auto existing : uniqueOutputs)
             seen = seen || existing == value;
@@ -798,7 +867,9 @@ Result<std::unique_ptr<CompiledKernelGraph>> Engine::compile(const ir::mid_ir::G
     std::unordered_set<DeviceId> executableDevices;
     for (const auto& opPtr : compiled->graph->ops()) {
         const auto& op = *opPtr;
-        if (op.kind() == OpKind::Input || op.kind() == OpKind::DeviceTransfer)
+        if (op.kind() == OpKind::Input ||
+            op.kind() == OpKind::TensorTupleCreate ||
+            op.kind() == OpKind::DeviceTransfer)
             continue;
         executableDevices.insert(op.device());
     }
@@ -823,6 +894,31 @@ Result<std::unique_ptr<CompiledKernelGraph>> Engine::compile(const ir::mid_ir::G
 Result<std::vector<TensorBufferPtr>> Engine::run(
         const CompiledKernelGraph& compiled,
         std::span<TensorBufferPtr const> inputs,
+        const TensorMap& weights,
+        const EngineRunOptions* options) {
+    std::vector<RunInput> valueInputs;
+    valueInputs.reserve(inputs.size());
+    for (const auto& input : inputs)
+        valueInputs.push_back(input);
+
+    auto outputs = runValues(compiled, valueInputs, weights, options);
+    if (!outputs)
+        return make_error(outputs.error());
+
+    std::vector<TensorBufferPtr> tensorOutputs;
+    tensorOutputs.reserve(outputs->size());
+    for (auto& output : *outputs) {
+        auto* tensor = std::get_if<TensorBufferPtr>(&output);
+        if (!tensor)
+            return make_error("Engine::run cannot return tensor tuple outputs; use runValues");
+        tensorOutputs.push_back(*tensor);
+    }
+    return tensorOutputs;
+}
+
+Result<std::vector<RunOutput>> Engine::runValues(
+        const CompiledKernelGraph& compiled,
+        std::span<const RunInput> inputs,
         const TensorMap& weights,
         const EngineRunOptions* options) {
     if (devices_.empty())
@@ -856,6 +952,12 @@ Result<std::vector<TensorBufferPtr>> Engine::run(
             auto finish = finish_op_lifetimes(devices_, state, op);
             if (!finish)
                 return make_error(finish.error());
+            continue;
+        }
+
+        if (op.kind() == OpKind::TensorTupleCreate) {
+            state.tensorTuples[op.outputs()[0]] =
+                std::vector<ValueId>(op.inputs().begin(), op.inputs().end());
             continue;
         }
 

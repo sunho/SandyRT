@@ -4,6 +4,7 @@
 #include <memory>
 #include <span>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace sandy::device {
@@ -79,6 +80,7 @@ Result<DeviceCompiledGraphId> CudaDevice::compile(const ir::kernel_ir::Graph& gr
     for (const auto& opPtr : graph.ops()) {
         const auto& op = *opPtr;
         if (op.kind() == ir::kernel_ir::OpKind::Input ||
+            op.kind() == ir::kernel_ir::OpKind::TensorTupleCreate ||
             op.kind() == ir::kernel_ir::OpKind::DeviceTransfer) {
             continue;
         }
@@ -284,8 +286,8 @@ Result<CudaDeviceBufferView> CudaDevice::buffer_view(DeviceBufferId buffer, bool
 Result<void> CudaDevice::run(
         DeviceCompiledGraphId graphId,
         ir::kernel_ir::OpId opId,
-        std::span<const DeviceTensorView> inputs,
-        std::span<const DeviceTensorView> outputs) {
+        std::span<const DeviceRunValue> inputs,
+        std::span<const DeviceRunValue> outputs) {
     auto stream = ensure_stream();
     if (!stream)
         return make_error(stream.error());
@@ -305,23 +307,29 @@ Result<void> CudaDevice::run(
 
     std::vector<CudaDeviceBufferView> inputViews;
     inputViews.reserve(inputs.size());
-    for (auto input : inputs) {
-        auto view = buffer_view(input.buffer, false);
+    for (const auto& input : inputs) {
+        auto* tensor = std::get_if<DeviceTensorView>(&input);
+        if (!tensor)
+            return make_error("cuda device kernel input must be a dense tensor view");
+        auto view = buffer_view(tensor->buffer, false);
         if (!view)
             return make_error(view.error());
         auto viewValue = view.take();
-        viewValue.view = input.view;
+        viewValue.view = tensor->view;
         inputViews.push_back(std::move(viewValue));
     }
 
     std::vector<CudaDeviceBufferView> outputViews;
     outputViews.reserve(outputs.size());
-    for (auto output : outputs) {
-        auto view = buffer_view(output.buffer, true);
+    for (const auto& output : outputs) {
+        auto* tensor = std::get_if<DeviceTensorView>(&output);
+        if (!tensor)
+            return make_error("cuda device kernel output must be a dense tensor view");
+        auto view = buffer_view(tensor->buffer, true);
         if (!view)
             return make_error(view.error());
         auto viewValue = view.take();
-        viewValue.view = output.view;
+        viewValue.view = tensor->view;
         outputViews.push_back(std::move(viewValue));
     }
 

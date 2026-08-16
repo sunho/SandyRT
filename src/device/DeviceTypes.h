@@ -7,6 +7,7 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <variant>
 #include <vector>
 
 namespace sandy::device {
@@ -53,5 +54,16 @@ struct DevicePagedTensorView {
     DevicePagedTensorId tensor = 0;
     DevicePagedTensorMeta meta;
 };
+
+using DeviceTensorLikeView = std::variant<DeviceTensorView, DevicePagedTensorView>;
+
+struct DeviceTensorTupleView {
+    std::vector<DeviceTensorLikeView> elements;
+};
+
+using DeviceRunValue = std::variant<
+    DeviceTensorView,
+    DevicePagedTensorView,
+    DeviceTensorTupleView>;
 
 } // namespace sandy::device

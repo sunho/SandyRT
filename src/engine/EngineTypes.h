@@ -6,6 +6,8 @@
 #include <cstdint>
 #include <memory>
 #include <unordered_map>
+#include <variant>
+#include <vector>
 
 namespace sandy::engine {
 
@@ -13,11 +15,21 @@ struct RunOptions {};
 
 using device::DeviceBufferId;
 using device::DeviceCompiledGraphId;
+using device::DevicePagedTensorView;
 using device::DeviceProgramId;
 using device::DeviceTensorView;
 using device::TensorBufferPtr;
 using device::TensorMap;
 using device::TensorViewDesc;
+
+using RunTensorLike = std::variant<TensorBufferPtr, DevicePagedTensorView>;
+
+struct RunTensorTuple {
+    std::vector<RunTensorLike> elements;
+};
+
+using RunInput = std::variant<TensorBufferPtr, DevicePagedTensorView, RunTensorTuple>;
+using RunOutput = std::variant<TensorBufferPtr, DevicePagedTensorView, RunTensorTuple>;
 
 struct CompiledKernelGraph {
     std::unique_ptr<ir::kernel_ir::Graph> graph;

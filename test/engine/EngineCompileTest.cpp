@@ -62,16 +62,16 @@ public:
     Result<void> run(
             sandy::device::DeviceCompiledGraphId graph,
             sandy::ir::kernel_ir::OpId op,
-            std::span<const sandy::device::DeviceTensorView> inputs,
-            std::span<const sandy::device::DeviceTensorView> outputs) override {
+            std::span<const sandy::device::DeviceRunValue> inputs,
+            std::span<const sandy::device::DeviceRunValue> outputs) override {
         std::vector<sandy::device::DeviceBufferId> inputBuffers;
         inputBuffers.reserve(inputs.size());
         for (const auto& input : inputs)
-            inputBuffers.push_back(input.buffer);
+            inputBuffers.push_back(std::get<sandy::device::DeviceTensorView>(input).buffer);
         std::vector<sandy::device::DeviceBufferId> outputBuffers;
         outputBuffers.reserve(outputs.size());
         for (const auto& output : outputs)
-            outputBuffers.push_back(output.buffer);
+            outputBuffers.push_back(std::get<sandy::device::DeviceTensorView>(output).buffer);
         runs.push_back({
             graph,
             op,
@@ -244,6 +244,76 @@ TEST_F(EngineCompileTest, RunExecutesKernelGraphWithFakeDevice) {
 
     EXPECT_EQ(fakePtr->reads, std::vector<sandy::device::DeviceBufferId>({202}));
     EXPECT_EQ(fakePtr->deallocs, std::vector<sandy::device::DeviceBufferId>({200, 201, 202}));
+}
+
+TEST_F(EngineCompileTest, RunValuesReturnsTensorTupleOutput) {
+    sandy::ir::mid_ir::Graph graph;
+    sandy::ir::mid_ir::Builder builder(graph);
+    auto* x = builder.createInput(0, sandy::core::Shape({1}), sandy::core::DType::F32);
+    auto* y = builder.createInput(1, sandy::core::Shape({2}), sandy::core::DType::F32);
+    sandy::ir::mid_ir::Value* tupleElements[] = {x, y};
+    auto* tuple = builder.createTensorTupleCreate(tupleElements);
+    sandy::ir::mid_ir::Value* outputs[] = {tuple};
+    builder.setOutputs(outputs);
+
+    FakeDevice* fake = nullptr;
+    auto engine = make_engine(&fake);
+    auto compiled = engine.compile(graph);
+    ASSERT_TRUE(compiled) << compiled.error();
+
+    std::vector<sandy::engine::RunInput> inputs = {
+        std::make_shared<FakeTensorBuffer>(
+            sandy::core::TensorDesc(sandy::core::Shape({1}), sandy::core::DType::F32)),
+        std::make_shared<FakeTensorBuffer>(
+            sandy::core::TensorDesc(sandy::core::Shape({2}), sandy::core::DType::F32)),
+    };
+    auto outputsResult = engine.runValues(**compiled, inputs, {});
+    ASSERT_TRUE(outputsResult) << outputsResult.error();
+    ASSERT_EQ(outputsResult->size(), 1u);
+    auto* tupleOutput = std::get_if<sandy::engine::RunTensorTuple>(&(*outputsResult)[0]);
+    ASSERT_NE(tupleOutput, nullptr);
+    EXPECT_EQ(tupleOutput->elements.size(), 2u);
+    EXPECT_EQ(fake->runs.size(), 0u);
+    EXPECT_EQ(fake->loads.size(), 2u);
+    EXPECT_EQ(fake->reads.size(), 2u);
+}
+
+TEST_F(EngineCompileTest, RunValuesKeepsTupleOutputElementsAliveUntilReadAndThenDeallocates) {
+    sandy::ir::mid_ir::Graph graph;
+    sandy::ir::mid_ir::Builder builder(graph);
+    auto* x = builder.createInput(0, sandy::core::Shape({1}), sandy::core::DType::F32);
+    auto* y = builder.createInput(1, sandy::core::Shape({2}), sandy::core::DType::F32);
+    auto* xOut = builder.createTanh(x);
+    auto* yOut = builder.createTanh(y);
+    sandy::ir::mid_ir::Value* tupleElements[] = {xOut, yOut};
+    auto* tuple = builder.createTensorTupleCreate(tupleElements);
+    sandy::ir::mid_ir::Value* outputs[] = {tuple};
+    builder.setOutputs(outputs);
+
+    FakeDevice* fake = nullptr;
+    auto engine = make_engine(&fake);
+    auto compiled = engine.compile(graph);
+    ASSERT_TRUE(compiled) << compiled.error();
+
+    std::vector<sandy::engine::RunInput> inputs = {
+        std::make_shared<FakeTensorBuffer>(
+            sandy::core::TensorDesc(sandy::core::Shape({1}), sandy::core::DType::F32)),
+        std::make_shared<FakeTensorBuffer>(
+            sandy::core::TensorDesc(sandy::core::Shape({2}), sandy::core::DType::F32)),
+    };
+
+    auto outputsResult = engine.runValues(**compiled, inputs, {});
+    ASSERT_TRUE(outputsResult) << outputsResult.error();
+    ASSERT_EQ(outputsResult->size(), 1u);
+    auto* tupleOutput = std::get_if<sandy::engine::RunTensorTuple>(&(*outputsResult)[0]);
+    ASSERT_NE(tupleOutput, nullptr);
+    ASSERT_EQ(tupleOutput->elements.size(), 2u);
+
+    EXPECT_EQ(fake->reads,
+              std::vector<sandy::device::DeviceBufferId>({202, 203}));
+    EXPECT_EQ(fake->deallocs,
+              std::vector<sandy::device::DeviceBufferId>({200, 201, 202, 203}));
+    EXPECT_TRUE(fake->bufferDescs.empty());
 }
 
 TEST_F(EngineCompileTest, RunReshapeUsesDeviceTensorViewWithoutKernelLaunch) {

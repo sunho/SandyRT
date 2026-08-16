@@ -40,8 +40,8 @@ public:
     virtual Result<void> run(
         DeviceCompiledGraphId graph,
         ir::kernel_ir::OpId op,
-        std::span<const DeviceTensorView> inputs,
-        std::span<const DeviceTensorView> outputs) = 0;
+        std::span<const DeviceRunValue> inputs,
+        std::span<const DeviceRunValue> outputs) = 0;
 
     virtual Result<TensorBufferPtr> read(DeviceTensorView src) = 0;
 };

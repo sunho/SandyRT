@@ -157,6 +157,79 @@ func main(k PagedTensor[[2, -1, 128], page_size=16], v PagedTensor[[2, -1, 128],
     fs::remove_all(dir, ec);
 }
 
+TEST(CompilerTest, FixedPagedTensorTupleInputMaterializesToElementInputsAndTupleOutput) {
+    fs::path dir = makeTempDir();
+    writeFile(dir / "main.sandy.go", R"(
+func main(k [2]PagedTensor[[128], bf16, page_size=16]) []Tensor {
+    var out []Tensor
+    out = append(out, k[0])
+    out = append(out, k[1])
+    return out
+}
+)");
+
+    sandy::Compiler compiler;
+    auto highGraph = compiler.load_sandygo((dir / "main.sandy.go").string());
+
+    TestWeights weights;
+    auto result = compiler.materialize_mid_ir(highGraph, weights, {});
+    ASSERT_TRUE(result) << result.error();
+    auto midGraph = result.take();
+
+    ASSERT_EQ(midGraph->outputs().size(), 1u);
+    auto* tuple = midGraph->outputs()[0];
+    ASSERT_NE(tuple, nullptr);
+    ASSERT_NE(tuple->def, nullptr);
+    EXPECT_EQ(tuple->kind, sandy::ir::mid_ir::ValueKind::TensorTuple);
+    EXPECT_EQ(tuple->def->kind, sandy::ir::mid_ir::OpKind::TensorTupleCreate);
+    ASSERT_EQ(tuple->def->operands.size(), 2u);
+
+    for (size_t i = 0; i < tuple->def->operands.size(); i++) {
+        auto* element = tuple->def->operands[i];
+        ASSERT_NE(element->def, nullptr);
+        EXPECT_EQ(element->def->kind, sandy::ir::mid_ir::OpKind::PagedTensorInput);
+        EXPECT_EQ(element->shape, sandy::core::Shape({128}));
+        EXPECT_EQ(element->dtype, sandy::core::DType::BF16);
+        EXPECT_EQ(element->def->attrs.at("index").intVal, 0);
+        EXPECT_EQ(element->def->attrs.at("tuple_element").intVal,
+                  static_cast<int64_t>(i));
+        EXPECT_EQ(element->def->attrs.at("page_size").intVal, 16);
+    }
+
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
+TEST(CompilerTest, FixedTensorTupleInputIndexMaterializesToElementInput) {
+    fs::path dir = makeTempDir();
+    writeFile(dir / "main.sandy.go", R"(
+func main(k [2]Tensor[[128], bf16]) Tensor {
+    return k[0]
+}
+)");
+
+    sandy::Compiler compiler;
+    auto highGraph = compiler.load_sandygo((dir / "main.sandy.go").string());
+
+    TestWeights weights;
+    auto result = compiler.materialize_mid_ir(highGraph, weights, {});
+    ASSERT_TRUE(result) << result.error();
+    auto midGraph = result.take();
+
+    ASSERT_EQ(midGraph->outputs().size(), 1u);
+    auto* output = midGraph->outputs()[0];
+    ASSERT_NE(output, nullptr);
+    ASSERT_NE(output->def, nullptr);
+    EXPECT_EQ(output->def->kind, sandy::ir::mid_ir::OpKind::Input);
+    EXPECT_EQ(output->shape, sandy::core::Shape({128}));
+    EXPECT_EQ(output->dtype, sandy::core::DType::BF16);
+    EXPECT_EQ(output->def->attrs.at("index").intVal, 0);
+    EXPECT_EQ(output->def->attrs.at("tuple_element").intVal, 0);
+
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
 TEST(CompilerTest, RMSNormBuiltinMaterializesToMidIROp) {
     fs::path dir = makeTempDir();
     writeFile(dir / "main.sandy.go", R"(

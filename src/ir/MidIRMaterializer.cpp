@@ -1,5 +1,6 @@
 #include "MidIRMaterializer.h"
 
+#include <functional>
 #include <memory>
 
 namespace sandy::ir::mid_ir {
@@ -15,9 +16,44 @@ Result<int64_t> infer_paged_tensor_grow_dim(const std::vector<int64_t>& dims) {
             return make_error("PagedTensor input shape must have exactly one dynamic grow dimension");
         growDim = static_cast<int64_t>(i);
     }
-    if (growDim < 0)
-        return make_error("PagedTensor input shape must have one dynamic grow dimension");
+    if (growDim < 0) {
+        if (dims.empty())
+            return make_error("PagedTensor input shape must have rank >= 1");
+        return 0;
+    }
     return growDim;
+}
+
+Result<core::DType> dtype_from_string(const std::string& dtype) {
+    if (dtype == "f32") return core::DType::F32;
+    if (dtype == "f16") return core::DType::F16;
+    if (dtype == "bf16") return core::DType::BF16;
+    if (dtype == "i32") return core::DType::I32;
+    if (dtype == "i64") return core::DType::I64;
+    if (dtype == "u8") return core::DType::U8;
+    return make_error("unknown dtype '" + dtype + "'");
+}
+
+Result<ValueType> value_type_from_high_tensor_type(
+        const high_ir::TensorType& type) {
+    if (type.dtype.empty())
+        return make_error("typed tensor requires dtype");
+    auto dtype = dtype_from_string(type.dtype);
+    if (!dtype)
+        return make_error(dtype.error());
+    if (type.kind == high_ir::TensorKind::PagedTensor) {
+        if (type.pageSize <= 0)
+            return make_error("PagedTensor requires positive page_size");
+        auto growDim = infer_paged_tensor_grow_dim(type.dims);
+        if (!growDim)
+            return make_error(growDim.error());
+        return ValueType::paged_tensor(
+            core::Shape(type.dims),
+            dtype.take(),
+            growDim.take(),
+            type.pageSize);
+    }
+    return ValueType::tensor(core::Shape(type.dims), dtype.take());
 }
 
 } // namespace
@@ -35,27 +71,111 @@ Result<std::unique_ptr<Graph>> MidIRMaterializer::materialize(
     Builder builder(*mid_graph);
 
     std::unordered_map<int, Value*> value_map;
+    std::unordered_map<int, std::vector<Value*>> tuple_map;
     int64_t nextInputIndex = 0;
+
+    auto createInputFromType =
+        [&](int64_t inputIndex,
+            int64_t tupleElement,
+            const high_ir::TensorType& type) -> Result<Value*> {
+            auto valueType = value_type_from_high_tensor_type(type);
+            if (!valueType)
+                return make_error(valueType.error());
+            auto vt = valueType.take();
+            if (vt.kind == ValueKind::PagedTensor) {
+                return builder.createPagedTensorInput(
+                    inputIndex,
+                    vt.shape,
+                    vt.dtype,
+                    vt.growDim,
+                    vt.pageSize,
+                    tupleElement);
+            }
+            return builder.createInput(inputIndex, vt.shape, vt.dtype, tupleElement);
+        };
+
+    std::function<Result<std::vector<Value*>>(const high_ir::Value*)>
+    expandTuple = [&](const high_ir::Value* value) -> Result<std::vector<Value*>> {
+        auto tupleIt = tuple_map.find(value->id);
+        if (tupleIt != tuple_map.end())
+            return tupleIt->second;
+        if (!value->def)
+            return make_error("tensor tuple value has no defining op");
+        const auto& def = *value->def;
+        if (def.kind == high_ir::Op::TensorTupleCreate) {
+            std::vector<Value*> elements;
+            elements.reserve(def.operands.size());
+            for (auto* operand : def.operands)
+                elements.push_back(value_map.at(operand->id));
+            return elements;
+        }
+        if (def.kind == high_ir::Op::TensorTupleAppend) {
+            auto base = expandTuple(def.operands[0]);
+            if (!base)
+                return make_error(base.error());
+            auto elements = base.take();
+            elements.push_back(value_map.at(def.operands[1]->id));
+            return elements;
+        }
+        return make_error("cannot expand tensor tuple");
+    };
 
     for (auto& op : graph.ops()) {
         switch (op.kind) {
             case high_ir::Op::Input: {
-                auto it = options.input_tensor_descs.find(op.inputName);
-                if (it == options.input_tensor_descs.end())
-                    return make_error("no shape provided for input '" + op.inputName + "'");
                 Value* v = nullptr;
-                if (op.inputKind == high_ir::InputKind::PagedTensor) {
+                if (op.inputKind == high_ir::InputKind::TensorTuple) {
+                    std::vector<Value*> elements;
+                    elements.reserve(op.inputTensorTupleElements.size());
+                    for (size_t i = 0; i < op.inputTensorTupleElements.size(); i++) {
+                        auto element = createInputFromType(
+                            nextInputIndex,
+                            static_cast<int64_t>(i),
+                            op.inputTensorTupleElements[i]);
+                        if (!element)
+                            return make_error("input '" + op.inputName + "': " + element.error());
+                        elements.push_back(element.take());
+                    }
+                    tuple_map[op.results[0]->id] = std::move(elements);
+                    nextInputIndex++;
+                    break;
+                } else if (op.inputKind == high_ir::InputKind::PagedTensor) {
+                    core::DType dtype = core::DType::F32;
+                    if (!op.inputPagedTensorDType.empty()) {
+                        auto parsed = dtype_from_string(op.inputPagedTensorDType);
+                        if (!parsed)
+                            return make_error(parsed.error());
+                        dtype = parsed.take();
+                    } else {
+                        auto it = options.input_tensor_descs.find(op.inputName);
+                        if (it == options.input_tensor_descs.end())
+                            return make_error("no shape provided for input '" + op.inputName + "'");
+                        dtype = it->second.dtype;
+                    }
                     auto growDim = infer_paged_tensor_grow_dim(op.inputPagedTensorDims);
                     if (!growDim)
                         return make_error("input '" + op.inputName + "': " + growDim.error());
                     v = builder.createPagedTensorInput(
                         nextInputIndex++,
                         core::Shape(op.inputPagedTensorDims),
-                        it->second.dtype,
+                        dtype,
                         growDim.take(),
                         op.inputPagedTensorPageSize);
                 } else {
-                    v = builder.createInput(nextInputIndex++, it->second.shape, it->second.dtype);
+                    if (!op.inputTensorDType.empty()) {
+                        auto dtype = dtype_from_string(op.inputTensorDType);
+                        if (!dtype)
+                            return make_error(dtype.error());
+                        v = builder.createInput(
+                            nextInputIndex++,
+                            core::Shape(op.inputTensorDims),
+                            dtype.take());
+                    } else {
+                        auto it = options.input_tensor_descs.find(op.inputName);
+                        if (it == options.input_tensor_descs.end())
+                            return make_error("no shape provided for input '" + op.inputName + "'");
+                        v = builder.createInput(nextInputIndex++, it->second.shape, it->second.dtype);
+                    }
                 }
                 value_map[op.results[0]->id] = v;
                 break;
@@ -67,6 +187,38 @@ Result<std::unique_ptr<Graph>> MidIRMaterializer::materialize(
                 const auto& desc = tensor->desc();
                 auto* v = builder.createWeight(op.weightName, desc.shape, desc.dtype);
                 value_map[op.results[0]->id] = v;
+                break;
+            }
+            case high_ir::Op::TensorTupleCreate: {
+                std::vector<Value*> elements;
+                elements.reserve(op.operands.size());
+                for (auto* operand : op.operands)
+                    elements.push_back(value_map.at(operand->id));
+                auto* v = builder.createTensorTupleCreate(elements);
+                value_map[op.results[0]->id] = v;
+                tuple_map[op.results[0]->id] = std::move(elements);
+                break;
+            }
+            case high_ir::Op::TensorTupleAppend: {
+                auto elements = expandTuple(op.results[0]);
+                if (!elements)
+                    return make_error(elements.error());
+                tuple_map[op.results[0]->id] = elements.take();
+                auto* v = builder.createTensorTupleCreate(tuple_map[op.results[0]->id]);
+                value_map[op.results[0]->id] = v;
+                break;
+            }
+            case high_ir::Op::TensorTupleGet: {
+                auto elements = expandTuple(op.operands[0]);
+                if (!elements)
+                    return make_error(elements.error());
+                auto expanded = elements.take();
+                if (op.tupleIndex < 0 ||
+                    static_cast<size_t>(op.tupleIndex) >= expanded.size()) {
+                    return make_error("tensor tuple index out of range");
+                }
+                value_map[op.results[0]->id] =
+                    expanded[static_cast<size_t>(op.tupleIndex)];
                 break;
             }
             case high_ir::Op::Builtin: {
@@ -126,8 +278,18 @@ Result<std::unique_ptr<Graph>> MidIRMaterializer::materialize(
     }
 
     std::vector<Value*> outputs;
-    for (auto* hv : graph.outputs())
+    for (auto* hv : graph.outputs()) {
+        if (hv->type == high_ir::Type::TensorTuple &&
+            value_map.find(hv->id) == value_map.end()) {
+            auto elements = expandTuple(hv);
+            if (!elements)
+                return make_error(elements.error());
+            auto expanded = elements.take();
+            auto* tuple = builder.createTensorTupleCreate(expanded);
+            value_map[hv->id] = tuple;
+        }
         outputs.push_back(value_map.at(hv->id));
+    }
     builder.setOutputs(outputs);
 
     return mid_graph;

@@ -1,6 +1,7 @@
 #include "MidIRToKernelIR.h"
 
 #include <unordered_map>
+#include <utility>
 
 namespace sandy::ir::kernel_ir {
 
@@ -9,11 +10,41 @@ namespace {
 using ValueMap = std::unordered_map<const mid_ir::Value*, ValueId>;
 
 ValueType value_type_from_mid(const mid_ir::Value& value) {
-    return ValueType{
-        ValueKind::Tensor,
-        value.dtype,
-        value.shape,
-    };
+    ValueType type;
+    switch (value.kind) {
+        case mid_ir::ValueKind::Tensor:
+            type.kind = ValueKind::Tensor;
+            break;
+        case mid_ir::ValueKind::PagedTensor:
+            type.kind = ValueKind::PagedTensor;
+            type.paged = PagedTensorMeta{value.growDim, value.pageSize};
+            break;
+        case mid_ir::ValueKind::TensorTuple:
+            type.kind = ValueKind::TensorTuple;
+            break;
+    }
+    type.dtype = value.dtype;
+    type.shape = value.shape;
+    type.elements.reserve(value.elements.size());
+    for (const auto& element : value.elements) {
+        ValueType e;
+        switch (element.kind) {
+            case mid_ir::ValueKind::Tensor:
+                e.kind = ValueKind::Tensor;
+                break;
+            case mid_ir::ValueKind::PagedTensor:
+                e.kind = ValueKind::PagedTensor;
+                e.paged = PagedTensorMeta{element.growDim, element.pageSize};
+                break;
+            case mid_ir::ValueKind::TensorTuple:
+                e.kind = ValueKind::TensorTuple;
+                break;
+        }
+        e.dtype = element.dtype;
+        e.shape = element.shape;
+        type.elements.push_back(std::move(e));
+    }
+    return type;
 }
 
 Result<const mid_ir::AttrValue*> find_attr(
@@ -143,6 +174,12 @@ Result<void> lower_input(
     InputSource source;
     source.kind = InputSourceKind::Argument;
     source.index = (*attr)->intVal;
+    auto tupleElement = op.attrs.find("tuple_element");
+    if (tupleElement != op.attrs.end()) {
+        if (tupleElement->second.kind != mid_ir::AttrValue::Int)
+            return make_error("input tuple_element attr must be int");
+        source.tupleElement = tupleElement->second.intVal;
+    }
     graph.addOp<InputOp>(std::move(source), output.take());
     return {};
 }
@@ -179,7 +216,28 @@ Result<void> lower_paged_tensor_input(
     InputSource source;
     source.kind = InputSourceKind::Argument;
     source.index = (*index)->intVal;
+    auto tupleElement = op.attrs.find("tuple_element");
+    if (tupleElement != op.attrs.end()) {
+        if (tupleElement->second.kind != mid_ir::AttrValue::Int)
+            return make_error("paged tensor input tuple_element attr must be int");
+        source.tupleElement = tupleElement->second.intVal;
+    }
     graph.addOp<InputOp>(std::move(source), output);
+    return {};
+}
+
+Result<void> lower_tensor_tuple_create(
+    Graph& graph,
+    const mid_ir::Op& op,
+    ValueMap& valueMap)
+{
+    auto inputs = mapped_operands(valueMap, op);
+    if (!inputs)
+        return make_error(inputs.error());
+    auto output = add_single_result_value(graph, op, valueMap);
+    if (!output)
+        return make_error(output.error());
+    graph.addOp<TensorTupleCreateOp>(inputs.take(), output.take());
     return {};
 }
 
@@ -569,6 +627,8 @@ Result<void> lower_op(
             return lower_input(graph, op, valueMap);
         case mid_ir::OpKind::PagedTensorInput:
             return lower_paged_tensor_input(graph, op, valueMap);
+        case mid_ir::OpKind::TensorTupleCreate:
+            return lower_tensor_tuple_create(graph, op, valueMap);
         case mid_ir::OpKind::Weight:
             return lower_weight(graph, op, valueMap);
         case mid_ir::OpKind::Constant:
