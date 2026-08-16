@@ -23,13 +23,20 @@ static constexpr OpId kInvalidOpId = std::numeric_limits<OpId>::max();
 
 enum class ValueKind {
     Tensor,
+    PagedTensor,
     Scalar,
+};
+
+struct PagedTensorMeta {
+    int64_t growDim = -1;
+    int64_t pageSize = -1;
 };
 
 struct ValueType {
     ValueKind kind = ValueKind::Tensor;
     core::DType dtype = core::DType::F32;
     core::Shape shape;
+    PagedTensorMeta paged;
 };
 
 struct Use {
@@ -55,7 +62,6 @@ struct Value {
 
 enum class OpKind {
     Input,
-    PagedInput,
     DeviceTransfer,
     LayoutTransform,
     ElementwiseKernel,
@@ -178,32 +184,6 @@ public:
 private:
     InputSource source_;
     std::array<ValueId, 1> outputs_;
-};
-
-class PagedInputOp final : public Op {
-public:
-    PagedInputOp(OpId id,
-                 int64_t index,
-                 ValueId output,
-                 int64_t growDim,
-                 int64_t pageSize,
-                 DeviceId device = 0);
-
-    int64_t index() const { return index_; }
-    int64_t growDim() const { return growDim_; }
-    int64_t pageSize() const { return pageSize_; }
-
-    std::span<const ValueId> inputs() const override { return {}; }
-    std::span<const ValueId> outputs() const override { return outputs_; }
-
-    const char* name() const override { return "paged_input"; }
-    Result<void> verify(const Graph& graph) const override;
-
-private:
-    int64_t index_ = -1;
-    std::array<ValueId, 1> outputs_;
-    int64_t growDim_ = -1;
-    int64_t pageSize_ = -1;
 };
 
 class DeviceTransferOp final : public Op {

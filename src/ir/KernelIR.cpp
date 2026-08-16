@@ -35,22 +35,62 @@ std::string shape_dims_string(const core::Shape& shape) {
 }
 
 std::string type_string(const ValueType& type) {
-    std::string out = type.kind == ValueKind::Tensor ? "tensor" : "scalar";
-    if (type.kind == ValueKind::Tensor) {
-        auto dims = shape_dims_string(type.shape);
-        if (!dims.empty())
-            dims += "x";
-        out += "<" + dims + core::dtype_name(type.dtype) + ">";
-    } else {
-        out += "<" + std::string(core::dtype_name(type.dtype)) + ">";
+    switch (type.kind) {
+        case ValueKind::Tensor: {
+            auto dims = shape_dims_string(type.shape);
+            if (!dims.empty())
+                dims += "x";
+            return "tensor<" + dims + core::dtype_name(type.dtype) + ">";
+        }
+        case ValueKind::PagedTensor: {
+            auto dims = shape_dims_string(type.shape);
+            if (!dims.empty())
+                dims += "x";
+            return "paged_tensor<" + dims + core::dtype_name(type.dtype) +
+                   ", grow_dim=" + std::to_string(type.paged.growDim) +
+                   ", page_size=" + std::to_string(type.paged.pageSize) + ">";
+        }
+        case ValueKind::Scalar:
+            return "scalar<" + std::string(core::dtype_name(type.dtype)) + ">";
     }
-    return out;
+    return "?";
 }
 
 bool same_value_type(const ValueType& lhs, const ValueType& rhs) {
-    return lhs.kind == rhs.kind &&
-           lhs.dtype == rhs.dtype &&
-           lhs.shape == rhs.shape;
+    if (lhs.kind != rhs.kind || lhs.dtype != rhs.dtype || lhs.shape != rhs.shape)
+        return false;
+    if (lhs.kind != ValueKind::PagedTensor)
+        return true;
+    return lhs.paged.growDim == rhs.paged.growDim &&
+           lhs.paged.pageSize == rhs.paged.pageSize;
+}
+
+Result<void> verify_value_type(const Value& value) {
+    const auto& type = value.type;
+    if (type.kind != ValueKind::PagedTensor)
+        return {};
+
+    int rank = type.shape.rank();
+    if (rank < 1) {
+        return make_error(value_ref(value.id) +
+                          " paged tensor rank must be >= 1");
+    }
+    if (type.paged.growDim < 0 || type.paged.growDim >= rank) {
+        return make_error(value_ref(value.id) +
+                          " paged tensor grow_dim out of range");
+    }
+    if (type.paged.pageSize <= 0) {
+        return make_error(value_ref(value.id) +
+                          " paged tensor page_size must be > 0");
+    }
+    for (int i = 0; i < rank; ++i) {
+        auto dim = type.shape.dim(i);
+        if (dim != core::Shape::kDynamic && dim <= 0) {
+            return make_error(value_ref(value.id) +
+                              " paged tensor dimensions must be positive or dynamic");
+        }
+    }
+    return {};
 }
 
 std::string values_string(std::span<const ValueId> values) {
@@ -266,12 +306,6 @@ std::string op_attr_string(const Op& op) {
             const auto& input = static_cast<const InputOp&>(op);
             return " source=" + input_source_string(input.source());
         }
-        case OpKind::PagedInput: {
-            const auto& input = static_cast<const PagedInputOp&>(op);
-            return " index=" + std::to_string(input.index()) +
-                   " grow_dim=" + std::to_string(input.growDim()) +
-                   " page_size=" + std::to_string(input.pageSize());
-        }
         case OpKind::DeviceTransfer: {
             const auto& transfer = static_cast<const DeviceTransferOp&>(op);
             return " source_device=" + std::to_string(transfer.sourceDevice()) +
@@ -334,7 +368,6 @@ std::string op_attr_string(const Op& op) {
 const char* op_kind_name(OpKind kind) {
     switch (kind) {
         case OpKind::Input: return "input";
-        case OpKind::PagedInput: return "paged_input";
         case OpKind::DeviceTransfer: return "device_transfer";
         case OpKind::LayoutTransform: return "layout_transform";
         case OpKind::ElementwiseKernel: return "elementwise_kernel";
@@ -397,6 +430,9 @@ Result<void> Graph::verify() const {
         }
         if (val.def.op == kInvalidOpId) {
             return make_error(value_ref(val.id) + " has no defining op");
+        }
+        if (auto result = verify_value_type(val); !result) {
+            return result;
         }
         if (!hasOp(val.def.op)) {
             return make_error(value_ref(val.id) + " has invalid defining op " +
@@ -553,52 +589,6 @@ Result<void> InputOp::verify(const Graph& graph) const {
     return {};
 }
 
-PagedInputOp::PagedInputOp(OpId id,
-                           int64_t index,
-                           ValueId output,
-                           int64_t growDim,
-                           int64_t pageSize,
-                           DeviceId device)
-    : Op(id, OpKind::PagedInput, device),
-      index_(index),
-      outputs_{output},
-      growDim_(growDim),
-      pageSize_(pageSize)
-{}
-
-Result<void> PagedInputOp::verify(const Graph& graph) const {
-    if (auto result = verify_common_op_shape(graph, *this, 0, 1); !result) {
-        return result;
-    }
-    if (index_ < 0) {
-        return make_error(op_ref(id()) + " paged input has negative index");
-    }
-    if (pageSize_ <= 0) {
-        return make_error(op_ref(id()) + " paged input page_size must be > 0");
-    }
-
-    const auto& outputType = graph.value(outputs_[0]).type;
-    if (outputType.kind != ValueKind::Tensor) {
-        return make_error(op_ref(id()) + " paged input output must be a tensor");
-    }
-    int rank = outputType.shape.rank();
-    if (rank < 1) {
-        return make_error(op_ref(id()) + " paged input output rank must be >= 1");
-    }
-    if (growDim_ < 0 || growDim_ >= rank) {
-        return make_error(op_ref(id()) + " paged input grow_dim out of range");
-    }
-
-    for (int i = 0; i < rank; ++i) {
-        auto dim = outputType.shape.dim(i);
-        if (dim != core::Shape::kDynamic && dim <= 0) {
-            return make_error(op_ref(id()) +
-                              " paged input dimensions must be positive or dynamic");
-        }
-    }
-    return {};
-}
-
 DeviceTransferOp::DeviceTransferOp(
     OpId id,
     DeviceId sourceDevice,
@@ -644,8 +634,7 @@ Result<void> LayoutTransformOp::verify(const Graph& graph) const {
         return result;
     }
     const auto& inputValue = graph.value(inputs_[0]);
-    if (inputValue.def.op != kInvalidOpId && graph.hasOp(inputValue.def.op) &&
-        graph.op(inputValue.def.op).kind() == OpKind::PagedInput) {
+    if (inputValue.type.kind == ValueKind::PagedTensor) {
         return make_error(op_ref(id()) + " layout transform cannot consume paged input");
     }
     if (transform_ == LayoutTransformKind::Permute && dims_.empty()) {

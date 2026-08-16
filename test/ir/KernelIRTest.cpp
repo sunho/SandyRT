@@ -21,6 +21,20 @@ kernel_ir::ValueType tensor_type(
     };
 }
 
+kernel_ir::ValueType paged_tensor_type(
+    sandy::core::Shape shape,
+    sandy::core::DType dtype,
+    int64_t growDim,
+    int64_t pageSize)
+{
+    return kernel_ir::ValueType{
+        kernel_ir::ValueKind::PagedTensor,
+        dtype,
+        std::move(shape),
+        kernel_ir::PagedTensorMeta{growDim, pageSize},
+    };
+}
+
 const kernel_ir::ElementwiseKernelOp& as_elementwise(
     const std::unique_ptr<kernel_ir::Op>& op)
 {
@@ -71,13 +85,15 @@ TEST(KernelIRGraphTest, VerifyTracksDefsUsesAndOutputs) {
     EXPECT_EQ(graph.outputs()[0], output);
 }
 
-TEST(KernelIRGraphTest, VerifyTracksPagedInput) {
+TEST(KernelIRGraphTest, VerifyTracksPagedTensorInput) {
     kernel_ir::Graph graph;
 
     auto cache = graph.addValue(
-        tensor_type({2, -1, 128}, sandy::core::DType::BF16),
+        paged_tensor_type({2, -1, 128}, sandy::core::DType::BF16, 1, 16),
         "cache");
-    graph.addOp<kernel_ir::PagedInputOp>(3, cache, 1, 16);
+    graph.addOp<kernel_ir::InputOp>(
+        kernel_ir::InputSource{kernel_ir::InputSourceKind::Argument, 3, ""},
+        cache);
     graph.setOutputs({cache});
 
     auto result = graph.verify();
@@ -90,8 +106,9 @@ TEST(KernelIRGraphTest, VerifyTracksPagedInput) {
     graph.dump();
     auto dump = testing::internal::GetCapturedStdout();
 
-    EXPECT_NE(dump.find("paged_input()"), std::string::npos);
-    EXPECT_NE(dump.find("index=3"), std::string::npos);
+    EXPECT_NE(dump.find("input()"), std::string::npos);
+    EXPECT_NE(dump.find("source=arg(3)"), std::string::npos);
+    EXPECT_NE(dump.find("paged_tensor<2x?x128xbf16"), std::string::npos);
     EXPECT_NE(dump.find("grow_dim=1"), std::string::npos);
     EXPECT_NE(dump.find("page_size=16"), std::string::npos);
 }
@@ -99,8 +116,11 @@ TEST(KernelIRGraphTest, VerifyTracksPagedInput) {
 TEST(KernelIRGraphTest, VerifyRejectsLayoutTransformOnPagedInput) {
     kernel_ir::Graph graph;
 
-    auto cache = graph.addValue(tensor_type({2, -1, 128}, sandy::core::DType::BF16));
-    graph.addOp<kernel_ir::PagedInputOp>(0, cache, 1, 16);
+    auto cache = graph.addValue(
+        paged_tensor_type({2, -1, 128}, sandy::core::DType::BF16, 1, 16));
+    graph.addOp<kernel_ir::InputOp>(
+        kernel_ir::InputSource{kernel_ir::InputSourceKind::Argument, 0, ""},
+        cache);
     auto reshaped = graph.addValue(tensor_type({2, -1, 128}, sandy::core::DType::BF16));
     graph.addOp<kernel_ir::LayoutTransformOp>(
         kernel_ir::LayoutTransformKind::Reshape,
@@ -287,15 +307,18 @@ TEST_F(MidIRToKernelIRTest, LowersPagedTensorInput) {
     ASSERT_EQ(graph->outputs().size(), 1u);
 
     const auto& inputOp =
-        static_cast<const kernel_ir::PagedInputOp&>(*graph->ops()[0]);
-    EXPECT_EQ(inputOp.kind(), kernel_ir::OpKind::PagedInput);
-    EXPECT_EQ(inputOp.index(), 4);
-    EXPECT_EQ(inputOp.growDim(), 1);
-    EXPECT_EQ(inputOp.pageSize(), 16);
+        static_cast<const kernel_ir::InputOp&>(*graph->ops()[0]);
+    EXPECT_EQ(inputOp.kind(), kernel_ir::OpKind::Input);
+    EXPECT_EQ(inputOp.source().kind, kernel_ir::InputSourceKind::Argument);
+    EXPECT_EQ(inputOp.source().index, 4);
     EXPECT_EQ(graph->value(inputOp.outputs()[0]).type.shape,
               sandy::core::Shape({2, -1, 128}));
     EXPECT_EQ(graph->value(inputOp.outputs()[0]).type.dtype,
               sandy::core::DType::BF16);
+    EXPECT_EQ(graph->value(inputOp.outputs()[0]).type.kind,
+              kernel_ir::ValueKind::PagedTensor);
+    EXPECT_EQ(graph->value(inputOp.outputs()[0]).type.paged.growDim, 1);
+    EXPECT_EQ(graph->value(inputOp.outputs()[0]).type.paged.pageSize, 16);
     EXPECT_EQ(graph->outputs()[0], inputOp.outputs()[0]);
 }
 

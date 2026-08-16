@@ -162,15 +162,24 @@ Result<void> lower_paged_tensor_input(
     if (!pageSize)
         return make_error(pageSize.error());
 
-    auto output = add_single_result_value(graph, op, valueMap);
-    if (!output)
-        return make_error(output.error());
+    if (op.results.size() != 1) {
+        return make_error("paged tensor input lowering expects one result");
+    }
 
-    graph.addOp<PagedInputOp>(
-        (*index)->intVal,
-        output.take(),
-        (*growDim)->intVal,
-        (*pageSize)->intVal);
+    auto* result = op.results[0];
+    ValueType type{
+        ValueKind::PagedTensor,
+        result->dtype,
+        result->shape,
+        PagedTensorMeta{(*growDim)->intVal, (*pageSize)->intVal},
+    };
+    auto output = graph.addValue(std::move(type));
+    valueMap[result] = output;
+
+    InputSource source;
+    source.kind = InputSourceKind::Argument;
+    source.index = (*index)->intVal;
+    graph.addOp<InputOp>(std::move(source), output);
     return {};
 }
 
