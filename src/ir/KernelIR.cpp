@@ -887,17 +887,45 @@ RoPEKernelOp::RoPEKernelOp(
     int64_t rotaryDim,
     bool splitHalf,
     DeviceId device)
+    : RoPEKernelOp(
+          id,
+          std::vector<ValueId>{input},
+          output,
+          theta,
+          rotaryDim,
+          splitHalf,
+          device)
+{}
+
+RoPEKernelOp::RoPEKernelOp(
+    OpId id,
+    std::vector<ValueId> inputs,
+    ValueId output,
+    double theta,
+    int64_t rotaryDim,
+    bool splitHalf,
+    DeviceId device)
     : Op(id, OpKind::RoPEKernel, device),
-      inputs_{input},
+      inputs_(std::move(inputs)),
       outputs_{output},
       theta_(theta),
       rotaryDim_(rotaryDim),
       splitHalf_(splitHalf)
 {}
 
+std::span<const ValueId> RoPEKernelOp::inputs() const {
+    return {inputs_.data(), inputs_.size()};
+}
+
 Result<void> RoPEKernelOp::verify(const Graph& graph) const {
-    if (auto result = verify_common_op_shape(graph, *this, 1, 1); !result) {
+    if (auto result = verify_values_exist(graph, inputs(), "input", *this); !result) {
         return result;
+    }
+    if (auto result = verify_values_exist(graph, outputs(), "output", *this); !result) {
+        return result;
+    }
+    if (inputs_.size() != 1 && inputs_.size() != 2) {
+        return make_error(op_ref(id()) + " rope expects 1 or 2 inputs");
     }
     if (theta_ <= 0.0) {
         return make_error(op_ref(id()) + " rope theta must be positive");

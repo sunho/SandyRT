@@ -629,8 +629,8 @@ public:
         std::span<Value* const> operands,
         const AttrMap& attrs) const override
     {
-        if (operands.size() != 1) {
-            fprintf(stderr, "rope expects 1 operand, got %zu\n", operands.size());
+        if (operands.size() != 1 && operands.size() != 2) {
+            fprintf(stderr, "rope expects 1 or 2 operands, got %zu\n", operands.size());
             abort();
         }
         if (operands[0]->dtype != core::DType::F32 &&
@@ -641,6 +641,12 @@ public:
         }
         if (operands[0]->shape.rank() < 2) {
             fprintf(stderr, "rope input must have rank >= 2\n");
+            abort();
+        }
+        if (operands.size() == 2 &&
+            operands[1]->dtype != core::DType::I32 &&
+            operands[1]->dtype != core::DType::I64) {
+            fprintf(stderr, "rope position_ids must be i32 or i64\n");
             abort();
         }
         int64_t dim = operands[0]->shape.dim(operands[0]->shape.rank() - 1);
@@ -1242,6 +1248,17 @@ Value* Builder::createEmbedding(Value* ids, Value* weight) {
 
 Value* Builder::createRoPE(Value* x, float theta, int64_t rotary_dim, bool split_half) {
     Value* operands[] = {x};
+    AttrMap attrs;
+    attrs["rope_theta"] = AttrValue::make_float(theta);
+    if (rotary_dim > 0)
+        attrs["rotary_dim"] = AttrValue::make_int(rotary_dim);
+    if (split_half)
+        attrs["split_half"] = AttrValue::make_int(1);
+    return createOp(OpKind::RoPE, operands, attrs)[0];
+}
+
+Value* Builder::createRoPE(Value* x, Value* position_ids, float theta, int64_t rotary_dim, bool split_half) {
+    Value* operands[] = {x, position_ids};
     AttrMap attrs;
     attrs["rope_theta"] = AttrValue::make_float(theta);
     if (rotary_dim > 0)

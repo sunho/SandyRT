@@ -1164,11 +1164,25 @@ Result<void> rope(TensorRef x, float theta, int64_t rotaryDim, MutableTensorRef 
     return rope(x, theta, rotaryDim, false, out);
 }
 
-Result<void> rope(TensorRef x, float theta, int64_t rotaryDim, bool splitHalf, MutableTensorRef out) {
+namespace {
+
+Result<void> rope_impl(
+        TensorRef x,
+        const TensorRef* positionIds,
+        float theta,
+        int64_t rotaryDim,
+        bool splitHalf,
+        MutableTensorRef out) {
     auto xFloat = require_float_tensor(x, "rope input");
     if (!xFloat) return make_error(xFloat.error());
     auto output = require_output(out, x.desc.shape, x.desc.dtype, "rope");
     if (!output) return make_error(output.error());
+    if (positionIds) {
+        if (positionIds->desc.dtype != DType::I32 &&
+            positionIds->desc.dtype != DType::I64) {
+            return make_error("rope position_ids must be i32 or i64");
+        }
+    }
 
     int rank = x.desc.shape.rank();
     if (rank < 2)
@@ -1194,8 +1208,29 @@ Result<void> rope(TensorRef x, float theta, int64_t rotaryDim, bool splitHalf, M
         return make_error("rope input must have static shape");
 
     int64_t vectors = total / dim;
+    int64_t positionCount = 0;
+    if (positionIds) {
+        positionCount = positionIds->desc.shape.numel();
+        if (positionCount < 0)
+            return make_error("rope position_ids must have static shape");
+        if (positionCount != 1 && positionCount != seq && positionCount != vectors) {
+            return make_error("rope position_ids numel must be 1, sequence length, or vector count");
+        }
+    }
+
     for (int64_t vector = 0; vector < vectors; vector++) {
         int64_t position = vector % seq;
+        if (positionIds) {
+            int64_t positionIndex = 0;
+            if (positionCount == seq) {
+                positionIndex = position;
+            } else if (positionCount == vectors) {
+                positionIndex = vector;
+            }
+            position = read_index(*positionIds, static_cast<size_t>(positionIndex));
+            if (position < 0)
+                return make_error("rope position_ids must be non-negative");
+        }
         size_t base = static_cast<size_t>(vector * dim);
         if (splitHalf) {
             int64_t half = dim / 2;
@@ -1239,6 +1274,22 @@ Result<void> rope(TensorRef x, float theta, int64_t rotaryDim, bool splitHalf, M
     }
 
     return {};
+}
+
+} // namespace
+
+Result<void> rope(TensorRef x, float theta, int64_t rotaryDim, bool splitHalf, MutableTensorRef out) {
+    return rope_impl(x, nullptr, theta, rotaryDim, splitHalf, out);
+}
+
+Result<void> rope(
+        TensorRef x,
+        TensorRef positionIds,
+        float theta,
+        int64_t rotaryDim,
+        bool splitHalf,
+        MutableTensorRef out) {
+    return rope_impl(x, &positionIds, theta, rotaryDim, splitHalf, out);
 }
 
 Result<void> rms_norm_impl(TensorRef x, const TensorRef* weight, float epsilon, MutableTensorRef out) {

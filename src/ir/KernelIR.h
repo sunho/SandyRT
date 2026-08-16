@@ -494,19 +494,27 @@ public:
         int64_t rotaryDim,
         bool splitHalf,
         DeviceId device = 0);
+    RoPEKernelOp(
+        OpId id,
+        std::vector<ValueId> inputs,
+        ValueId output,
+        double theta,
+        int64_t rotaryDim,
+        bool splitHalf,
+        DeviceId device = 0);
 
     double theta() const { return theta_; }
     int64_t rotaryDim() const { return rotaryDim_; }
     bool splitHalf() const { return splitHalf_; }
 
-    std::span<const ValueId> inputs() const override { return inputs_; }
+    std::span<const ValueId> inputs() const override;
     std::span<const ValueId> outputs() const override { return outputs_; }
 
     const char* name() const override { return "rope_kernel"; }
     Result<void> verify(const Graph& graph) const override;
 
 private:
-    std::array<ValueId, 1> inputs_;
+    std::vector<ValueId> inputs_;
     std::array<ValueId, 1> outputs_;
     double theta_ = 10000.0;
     int64_t rotaryDim_ = -1;

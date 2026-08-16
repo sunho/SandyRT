@@ -530,12 +530,12 @@ Result<void> lower_rope(
     const mid_ir::Op& op,
     ValueMap& valueMap)
 {
-    if (op.operands.size() != 1) {
-        return make_error("rope lowering expects one operand");
+    if (op.operands.size() != 1 && op.operands.size() != 2) {
+        return make_error("rope lowering expects one or two operands");
     }
-    auto input = mapped_value(valueMap, op.operands[0]);
-    if (!input)
-        return make_error(input.error());
+    auto inputs = mapped_operands(valueMap, op);
+    if (!inputs)
+        return make_error(inputs.error());
     auto output = add_single_result_value(graph, op, valueMap);
     if (!output)
         return make_error(output.error());
@@ -550,7 +550,7 @@ Result<void> lower_rope(
         return make_error(splitHalf.error());
 
     graph.addOp<RoPEKernelOp>(
-        input.take(),
+        inputs.take(),
         output.take(),
         theta.take(),
         rotaryDim.take(),

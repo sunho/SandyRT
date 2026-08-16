@@ -437,8 +437,8 @@ BuiltinLowering BuiltinLowering::createDefault() {
                        int numResults) -> Result<std::vector<Value*>> {
         auto resultCount = expect_num_results("rope", numResults, 1);
         if (!resultCount) return make_error(resultCount.error());
-        if (operands.size() != 1)
-            return make_error("rope expects one operand");
+        if (operands.size() != 1 && operands.size() != 2)
+            return make_error("rope expects one or two operands");
         float theta = 10000.0f;
         auto it = attrs.find("theta");
         if (it == attrs.end())
@@ -459,6 +459,8 @@ BuiltinLowering BuiltinLowering::createDefault() {
                 return make_error("rope split_half attr must be int");
             splitHalf = splitIt->second.intVal != 0;
         }
+        if (operands.size() == 2)
+            return std::vector<Value*>{builder.createRoPE(operands[0], operands[1], theta, rotaryDim, splitHalf)};
         return std::vector<Value*>{builder.createRoPE(operands[0], theta, rotaryDim, splitHalf)};
     });
 

@@ -782,6 +782,17 @@ Result<void> CpuDevice::run(
             if (!x) return make_error(x.error());
             auto out = outputRef(0);
             if (!out) return make_error(out.error());
+            if (inputs.size() == 2) {
+                auto positionIds = inputRef(1);
+                if (!positionIds) return make_error(positionIds.error());
+                return core::rope(
+                    *x,
+                    *positionIds,
+                    static_cast<float>(kernel.theta),
+                    kernel.rotaryDim,
+                    kernel.splitHalf,
+                    *out);
+            }
             return core::rope(
                 *x,
                 static_cast<float>(kernel.theta),

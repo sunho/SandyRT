@@ -128,12 +128,21 @@ Result<void> runMidIROpOnCpu(
             if (!rotaryDim) return make_error(rotaryDim.error());
             auto splitHalf = attr_int_or(op.attrs, "split_half", 0);
             if (!splitHalf) return make_error(splitHalf.error());
+            if (inputs.size() == 2) {
+                return core::rope(
+                    inputs[0],
+                    inputs[1],
+                    theta.take(),
+                    rotaryDim.take(),
+                    splitHalf.take() != 0,
+                    outputs[0]);
+            }
             return core::rope(
-                inputs[0],
-                theta.take(),
-                rotaryDim.take(),
-                splitHalf.take() != 0,
-                outputs[0]);
+                    inputs[0],
+                    theta.take(),
+                    rotaryDim.take(),
+                    splitHalf.take() != 0,
+                    outputs[0]);
         }
         case ir::mid_ir::OpKind::RMSNorm: {
             auto epsilon = attr_float_or(op.attrs, "epsilon", 1.0e-6f);

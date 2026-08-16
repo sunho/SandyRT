@@ -697,6 +697,42 @@ TEST(CompilerTest, ProgrammaticRoPEMaterializesRotaryDimAttr) {
     EXPECT_EQ(midGraph->outputs()[0]->def->attrs.at("rotary_dim").intVal, 128);
 }
 
+TEST(CompilerTest, ProgrammaticRoPEMaterializesRuntimePositionIdsOperand) {
+    sandy::ir::high_ir::Graph highGraph;
+    auto* x = highGraph.addInput("x");
+    auto* positionIds = highGraph.addInput("position_ids");
+    auto rope = highGraph.addBuiltin(
+        "rope",
+        {x, positionIds},
+        {
+            sandy::ir::high_ir::Attr::fromFloat("rope_theta", 10000.0),
+            sandy::ir::high_ir::Attr::fromInt("split_half", 1),
+        },
+        1);
+    highGraph.setOutputs({rope[0]});
+
+    sandy::Compiler compiler;
+    TestWeights weights;
+    sandy::ir::mid_ir::MaterializeOptions options;
+    options.input_tensor_descs["x"] = sandy::core::TensorDesc(
+        sandy::core::Shape({1, 8, 1, 256}), sandy::core::DType::F32);
+    options.input_tensor_descs["position_ids"] = sandy::core::TensorDesc(
+        sandy::core::Shape({1}), sandy::core::DType::I64);
+
+    auto result = compiler.materialize_mid_ir(highGraph, weights, options);
+    ASSERT_TRUE(result) << result.error();
+    auto midGraph = result.take();
+
+    ASSERT_EQ(midGraph->outputs().size(), 1u);
+    ASSERT_NE(midGraph->outputs()[0], nullptr);
+    ASSERT_NE(midGraph->outputs()[0]->def, nullptr);
+    EXPECT_EQ(midGraph->outputs()[0]->def->kind, sandy::ir::mid_ir::OpKind::RoPE);
+    EXPECT_EQ(midGraph->outputs()[0]->def->operands.size(), 2u);
+    EXPECT_EQ(midGraph->outputs()[0]->shape, sandy::core::Shape({1, 8, 1, 256}));
+    EXPECT_EQ(midGraph->outputs()[0]->def->attrs.at("rope_theta").floatVal, 10000.0);
+    EXPECT_EQ(midGraph->outputs()[0]->def->attrs.at("split_half").intVal, 1);
+}
+
 TEST(CompilerTest, ProgrammaticKVAttentionMaterializesBatchedHKeyValue) {
     sandy::ir::high_ir::Graph highGraph;
     auto* x = highGraph.addInput("x");

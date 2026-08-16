@@ -398,16 +398,13 @@ int main(int argc, char* argv[]) {
     std::cout << std::flush;
     printStage("dump_sandygo_ast");
 
-    printf("[3/8] lowering sandy go ast -> high ir\n");
-    sandy::ir::high_ir::Graph highGraph;
-    sandy::sandygo::Interpreter interp(program, highGraph);
-    interp.interpret();
+    printf("[3/8] loading sandy go -> high ir\n");
+    sandy::Compiler compiler;
+    auto highGraph = compiler.load_sandygo(programPath);
     printStage("lower_high_ir");
     printf("high ir:\n");
     highGraph.dump();
     printStage("dump_high_ir");
-
-    sandy::Compiler compiler;
 
     printf("[4/8] loading weights: %s\n", weightsPath);
     auto weights = sandy::weight::EagerSafeTensorWeights::load(weightsPath);

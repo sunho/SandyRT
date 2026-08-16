@@ -553,7 +553,7 @@ Result<bool> try_alias_layout_op(
         if (!isDefault)
             return make_error(isDefault.error());
         if (!*isDefault)
-            return make_error("reshape view requires contiguous input");
+            return false;
 
         auto desc = resolve_output_desc(graph, layout, output, state.views);
         if (!desc)

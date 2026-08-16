@@ -87,6 +87,7 @@ Result<void> embedding(TensorRef ids, TensorRef weight, MutableTensorRef out);
 Result<void> rope(TensorRef x, float theta, MutableTensorRef out);
 Result<void> rope(TensorRef x, float theta, int64_t rotary_dim, MutableTensorRef out);
 Result<void> rope(TensorRef x, float theta, int64_t rotary_dim, bool split_half, MutableTensorRef out);
+Result<void> rope(TensorRef x, TensorRef position_ids, float theta, int64_t rotary_dim, bool split_half, MutableTensorRef out);
 Result<void> rms_norm(TensorRef x, float epsilon, MutableTensorRef out);
 Result<void> rms_norm(TensorRef x, TensorRef weight, float epsilon, MutableTensorRef out);
 Result<void> layer_norm(

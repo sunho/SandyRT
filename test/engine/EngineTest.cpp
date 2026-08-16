@@ -470,6 +470,33 @@ Result<TestTensor> rope_calc(
     return out.take();
 }
 
+Result<TestTensor> rope_calc(
+        std::span<const uint8_t> x,
+        sandy::core::TensorDesc xDesc,
+        std::span<const uint8_t> positionIds,
+        sandy::core::TensorDesc positionDesc,
+        float theta,
+        int64_t rotaryDim,
+        bool splitHalf) {
+    auto out = make_output(sandy::core::TensorDesc(xDesc.shape, xDesc.dtype));
+    if (!out) return make_error(out.error());
+    auto xRef = tensor_ref(x, xDesc);
+    if (!xRef) return make_error(xRef.error());
+    auto positionRef = tensor_ref(positionIds, positionDesc);
+    if (!positionRef) return make_error(positionRef.error());
+    auto outRef = mutable_tensor_ref(*out);
+    if (!outRef) return make_error(outRef.error());
+    auto result = sandy::core::rope(
+        *xRef,
+        *positionRef,
+        theta,
+        rotaryDim,
+        splitHalf,
+        *outRef);
+    if (!result) return make_error(result.error());
+    return out.take();
+}
+
 Result<TestTensor> rms_norm_calc(
         std::span<const uint8_t> x,
         sandy::core::TensorDesc xDesc,
@@ -1306,6 +1333,25 @@ TEST(TensorCalcTest, RoPEF32AppliesPartialRotaryDimAndCopiesTail) {
     EXPECT_NEAR(read_f32(out.data, 5), std::sin(1.0f), 1.0e-6f);
     EXPECT_FLOAT_EQ(read_f32(out.data, 6), 5.0f);
     EXPECT_FLOAT_EQ(read_f32(out.data, 7), 6.0f);
+}
+
+TEST(TensorCalcTest, RoPEF32UsesRuntimePositionIds) {
+    auto result = rope_calc(
+        f32_bytes({1.0f, 0.0f, 0.0f, 1.0f}),
+        sandy::core::TensorDesc(sandy::core::Shape({1, 1, 4}), sandy::core::DType::F32),
+        i64_bytes({3}),
+        sandy::core::TensorDesc(sandy::core::Shape({1}), sandy::core::DType::I64),
+        10000.0f,
+        -1,
+        false);
+
+    ASSERT_TRUE(result) << result.error();
+    auto out = result.take();
+    EXPECT_EQ(out.desc.shape, sandy::core::Shape({1, 1, 4}));
+    EXPECT_NEAR(read_f32(out.data, 0), std::cos(3.0f), 1.0e-6f);
+    EXPECT_NEAR(read_f32(out.data, 1), std::sin(3.0f), 1.0e-6f);
+    EXPECT_NEAR(read_f32(out.data, 2), -std::sin(0.03f), 1.0e-6f);
+    EXPECT_NEAR(read_f32(out.data, 3), std::cos(0.03f), 1.0e-6f);
 }
 
 TEST(TensorCalcTest, RoPEBF16UsesTensorRefStorageAccessors) {
