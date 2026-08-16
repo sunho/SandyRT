@@ -266,6 +266,12 @@ std::string op_attr_string(const Op& op) {
             const auto& input = static_cast<const InputOp&>(op);
             return " source=" + input_source_string(input.source());
         }
+        case OpKind::PagedInput: {
+            const auto& input = static_cast<const PagedInputOp&>(op);
+            return " index=" + std::to_string(input.index()) +
+                   " grow_dim=" + std::to_string(input.growDim()) +
+                   " page_size=" + std::to_string(input.pageSize());
+        }
         case OpKind::DeviceTransfer: {
             const auto& transfer = static_cast<const DeviceTransferOp&>(op);
             return " source_device=" + std::to_string(transfer.sourceDevice()) +
@@ -328,6 +334,7 @@ std::string op_attr_string(const Op& op) {
 const char* op_kind_name(OpKind kind) {
     switch (kind) {
         case OpKind::Input: return "input";
+        case OpKind::PagedInput: return "paged_input";
         case OpKind::DeviceTransfer: return "device_transfer";
         case OpKind::LayoutTransform: return "layout_transform";
         case OpKind::ElementwiseKernel: return "elementwise_kernel";
@@ -546,6 +553,52 @@ Result<void> InputOp::verify(const Graph& graph) const {
     return {};
 }
 
+PagedInputOp::PagedInputOp(OpId id,
+                           int64_t index,
+                           ValueId output,
+                           int64_t growDim,
+                           int64_t pageSize,
+                           DeviceId device)
+    : Op(id, OpKind::PagedInput, device),
+      index_(index),
+      outputs_{output},
+      growDim_(growDim),
+      pageSize_(pageSize)
+{}
+
+Result<void> PagedInputOp::verify(const Graph& graph) const {
+    if (auto result = verify_common_op_shape(graph, *this, 0, 1); !result) {
+        return result;
+    }
+    if (index_ < 0) {
+        return make_error(op_ref(id()) + " paged input has negative index");
+    }
+    if (pageSize_ <= 0) {
+        return make_error(op_ref(id()) + " paged input page_size must be > 0");
+    }
+
+    const auto& outputType = graph.value(outputs_[0]).type;
+    if (outputType.kind != ValueKind::Tensor) {
+        return make_error(op_ref(id()) + " paged input output must be a tensor");
+    }
+    int rank = outputType.shape.rank();
+    if (rank < 1) {
+        return make_error(op_ref(id()) + " paged input output rank must be >= 1");
+    }
+    if (growDim_ < 0 || growDim_ >= rank) {
+        return make_error(op_ref(id()) + " paged input grow_dim out of range");
+    }
+
+    for (int i = 0; i < rank; ++i) {
+        auto dim = outputType.shape.dim(i);
+        if (dim != core::Shape::kDynamic && dim <= 0) {
+            return make_error(op_ref(id()) +
+                              " paged input dimensions must be positive or dynamic");
+        }
+    }
+    return {};
+}
+
 DeviceTransferOp::DeviceTransferOp(
     OpId id,
     DeviceId sourceDevice,
@@ -589,6 +642,11 @@ LayoutTransformOp::LayoutTransformOp(
 Result<void> LayoutTransformOp::verify(const Graph& graph) const {
     if (auto result = verify_common_op_shape(graph, *this, 1, 1); !result) {
         return result;
+    }
+    const auto& inputValue = graph.value(inputs_[0]);
+    if (inputValue.def.op != kInvalidOpId && graph.hasOp(inputValue.def.op) &&
+        graph.op(inputValue.def.op).kind() == OpKind::PagedInput) {
+        return make_error(op_ref(id()) + " layout transform cannot consume paged input");
     }
     if (transform_ == LayoutTransformKind::Permute && dims_.empty()) {
         return make_error(op_ref(id()) + " permute transform requires dims");

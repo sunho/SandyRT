@@ -147,6 +147,33 @@ Result<void> lower_input(
     return {};
 }
 
+Result<void> lower_paged_tensor_input(
+    Graph& graph,
+    const mid_ir::Op& op,
+    ValueMap& valueMap)
+{
+    auto index = find_attr(op, "index", mid_ir::AttrValue::Int);
+    if (!index)
+        return make_error(index.error());
+    auto growDim = find_attr(op, "grow_dim", mid_ir::AttrValue::Int);
+    if (!growDim)
+        return make_error(growDim.error());
+    auto pageSize = find_attr(op, "page_size", mid_ir::AttrValue::Int);
+    if (!pageSize)
+        return make_error(pageSize.error());
+
+    auto output = add_single_result_value(graph, op, valueMap);
+    if (!output)
+        return make_error(output.error());
+
+    graph.addOp<PagedInputOp>(
+        (*index)->intVal,
+        output.take(),
+        (*growDim)->intVal,
+        (*pageSize)->intVal);
+    return {};
+}
+
 Result<void> lower_weight(
     Graph& graph,
     const mid_ir::Op& op,
@@ -531,6 +558,8 @@ Result<void> lower_op(
     switch (op.kind) {
         case mid_ir::OpKind::Input:
             return lower_input(graph, op, valueMap);
+        case mid_ir::OpKind::PagedTensorInput:
+            return lower_paged_tensor_input(graph, op, valueMap);
         case mid_ir::OpKind::Weight:
             return lower_weight(graph, op, valueMap);
         case mid_ir::OpKind::Constant:
