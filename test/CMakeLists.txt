@@ -39,6 +39,37 @@ set_target_properties(dump_ir PROPERTIES
   CXX_STANDARD_REQUIRED ON
 )
 
+add_executable(dump_mid_ir
+  sandygo/DumpMidIR.cpp
+)
+
+target_link_libraries(dump_mid_ir PRIVATE SandyCompilerLib)
+
+set_target_properties(dump_mid_ir PROPERTIES
+  CXX_STANDARD 20
+  CXX_STANDARD_REQUIRED ON
+)
+
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+
+set(SANDYGO_LOWER_CHECK_COMMAND
+  ${Python3_EXECUTABLE}
+  ${CMAKE_CURRENT_SOURCE_DIR}/sandygo/sandygo_lower_check.py
+  --dump-mid-ir $<TARGET_FILE:dump_mid_ir>
+  --test-dir ${CMAKE_CURRENT_SOURCE_DIR}/sandygo/lower
+  --cwd ${PROJECT_SOURCE_DIR}
+)
+
+add_custom_target(sandygo_lower_check
+  COMMAND ${SANDYGO_LOWER_CHECK_COMMAND}
+  DEPENDS dump_mid_ir
+  USES_TERMINAL
+)
+
+add_test(NAME sandygo_lower_check
+  COMMAND ${SANDYGO_LOWER_CHECK_COMMAND}
+)
+
 add_executable(load_safetensors
   weight/LoadSafeTensorsTest.cpp
 )
