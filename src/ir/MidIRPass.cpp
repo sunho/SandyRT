@@ -95,6 +95,8 @@ public:
 
 private:
     static bool isDead(const Graph& graph, const Op& op) {
+        if (op.def && op.def->has_side_effects())
+            return false;
         if (op.results.empty())
             return false;
         for (auto* result : op.results) {

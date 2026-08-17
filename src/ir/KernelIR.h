@@ -66,6 +66,7 @@ enum class OpKind {
     Input,
     TensorTupleCreate,
     DeviceTransfer,
+    PagedAppend,
     LayoutTransform,
     ElementwiseKernel,
     ReductionKernel,
@@ -96,6 +97,7 @@ public:
     virtual std::span<const ValueId> outputs() const = 0;
 
     virtual const char* name() const = 0;
+    virtual bool has_side_effects() const { return false; }
     virtual Result<void> verify(const Graph& graph) const = 0;
 
 private:
@@ -234,6 +236,28 @@ private:
     DeviceId targetDevice_ = 0;
     std::array<ValueId, 1> inputs_;
     std::array<ValueId, 1> outputs_;
+};
+
+class PagedAppendOp final : public Op {
+public:
+    PagedAppendOp(
+        OpId id,
+        ValueId cache,
+        ValueId chunk,
+        DeviceId device = 0);
+
+    ValueId cache() const { return inputs_[0]; }
+    ValueId chunk() const { return inputs_[1]; }
+
+    std::span<const ValueId> inputs() const override { return inputs_; }
+    std::span<const ValueId> outputs() const override { return {}; }
+
+    const char* name() const override { return "paged_append"; }
+    bool has_side_effects() const override { return true; }
+    Result<void> verify(const Graph& graph) const override;
+
+private:
+    std::array<ValueId, 2> inputs_;
 };
 
 enum class LayoutTransformKind {
@@ -531,6 +555,15 @@ public:
         int64_t window,
         double scale,
         DeviceId device = 0);
+    SlidingQueryKeyScoreKernelOp(
+        OpId id,
+        ValueId query,
+        ValueId key,
+        ValueId positionIds,
+        ValueId output,
+        int64_t window,
+        double scale,
+        DeviceId device = 0);
 
     int64_t window() const { return window_; }
     double scale() const { return scale_; }
@@ -542,7 +575,7 @@ public:
     Result<void> verify(const Graph& graph) const override;
 
 private:
-    std::array<ValueId, 2> inputs_;
+    std::vector<ValueId> inputs_;
     std::array<ValueId, 1> outputs_;
     int64_t window_ = 0;
     double scale_ = -1.0;

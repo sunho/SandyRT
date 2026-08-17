@@ -200,6 +200,18 @@ BuiltinLowering BuiltinLowering::createDefault() {
         return std::vector<Value*>{builder.createPermute(operands[0], attrs.at("dims").intListVal)};
     });
 
+    bl.add("paged_append", [](Builder& builder,
+                               const std::vector<Value*>& operands,
+                               const AttrMap&,
+                               int numResults) -> Result<std::vector<Value*>> {
+        auto resultCount = expect_num_results("paged_append", numResults, 0);
+        if (!resultCount) return make_error(resultCount.error());
+        if (operands.size() != 2)
+            return make_error("paged_append expects cache and chunk operands");
+        builder.createPagedAppend(operands[0], operands[1]);
+        return std::vector<Value*>{};
+    });
+
     bl.add("sliding_query_key_score", [](Builder& builder,
                                           const std::vector<Value*>& operands,
                                           const AttrMap& attrs,
@@ -217,7 +229,11 @@ BuiltinLowering BuiltinLowering::createDefault() {
                 return make_error("sliding_query_key_score scale attr must be float");
             scale = static_cast<float>(scaleIt->second.floatVal);
         }
-        return std::vector<Value*>{builder.createSlidingQueryKeyScore(operands[0], operands[1], window, scale)};
+        if (operands.size() == 2)
+            return std::vector<Value*>{builder.createSlidingQueryKeyScore(operands[0], operands[1], window, scale)};
+        if (operands.size() == 3)
+            return std::vector<Value*>{builder.createSlidingQueryKeyScore(operands[0], operands[1], operands[2], window, scale)};
+        return make_error("sliding_query_key_score expects 2 or 3 operands");
     });
 
     bl.add("softmax", [](Builder& builder,

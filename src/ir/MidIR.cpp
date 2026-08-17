@@ -28,6 +28,7 @@ const char* op_kind_name(OpKind kind) {
         case OpKind::Transpose: return "transpose";
         case OpKind::Reshape:   return "reshape";
         case OpKind::Permute:   return "permute";
+        case OpKind::PagedAppend: return "paged_append";
         case OpKind::SlidingQueryKeyScore: return "sliding_query_key_score";
         case OpKind::Softmax:   return "softmax";
         case OpKind::Embedding: return "embedding";
@@ -469,8 +470,8 @@ public:
         std::span<Value* const> operands,
         const AttrMap& attrs) const override
     {
-        if (operands.size() != 2) {
-            fprintf(stderr, "sliding_query_key_score expects 2 operands, got %zu\n",
+        if (operands.size() != 2 && operands.size() != 3) {
+            fprintf(stderr, "sliding_query_key_score expects 2 or 3 operands, got %zu\n",
                     operands.size());
             abort();
         }
@@ -481,6 +482,12 @@ public:
         }
         if (operands[0]->dtype != operands[1]->dtype) {
             fprintf(stderr, "sliding_query_key_score operands must have the same dtype\n");
+            abort();
+        }
+        if (operands.size() == 3 &&
+            operands[2]->dtype != core::DType::I32 &&
+            operands[2]->dtype != core::DType::I64) {
+            fprintf(stderr, "sliding_query_key_score position_ids must be i32 or i64\n");
             abort();
         }
 
@@ -573,6 +580,61 @@ public:
         int64_t dimValue = dim == attrs.end() ? -1 : dim->second.intVal;
         if (dimValue < -rank || dimValue >= rank) {
             fprintf(stderr, "softmax dim out of range\n");
+            abort();
+        }
+    }
+};
+
+class PagedAppendOpDef : public OpDef {
+public:
+    OpKind kind() const override { return OpKind::PagedAppend; }
+    const char* name() const override { return "paged_append"; }
+    bool has_side_effects() const override { return true; }
+    std::vector<ValueType> infer_types(
+        std::span<Value* const>,
+        const AttrMap&) const override
+    {
+        return {};
+    }
+    void verify(
+        std::span<Value* const> operands,
+        const AttrMap&) const override
+    {
+        if (operands.size() != 2) {
+            fprintf(stderr, "paged_append expects 2 operands, got %zu\n", operands.size());
+            abort();
+        }
+        if (operands[0]->kind != ValueKind::PagedTensor ||
+            operands[1]->kind != ValueKind::Tensor) {
+            fprintf(stderr, "paged_append expects paged tensor cache and dense tensor chunk\n");
+            abort();
+        }
+        if (operands[0]->dtype != operands[1]->dtype) {
+            fprintf(stderr, "paged_append dtype mismatch\n");
+            abort();
+        }
+        if (operands[0]->shape.rank() != operands[1]->shape.rank()) {
+            fprintf(stderr, "paged_append rank mismatch\n");
+            abort();
+        }
+        int growDim = static_cast<int>(operands[0]->growDim);
+        if (growDim < 0 || growDim >= operands[0]->shape.rank()) {
+            fprintf(stderr, "paged_append grow dimension out of range\n");
+            abort();
+        }
+        for (int i = 0; i < operands[0]->shape.rank(); i++) {
+            if (i == growDim)
+                continue;
+            auto cacheDim = operands[0]->shape.dim(i);
+            auto chunkDim = operands[1]->shape.dim(i);
+            if (cacheDim >= 0 && chunkDim >= 0 && cacheDim != chunkDim) {
+                fprintf(stderr, "paged_append non-grow dimension mismatch\n");
+                abort();
+            }
+        }
+        auto chunkGrow = operands[1]->shape.dim(growDim);
+        if (chunkGrow == 0) {
+            fprintf(stderr, "paged_append chunk grow dimension must be non-zero\n");
             abort();
         }
     }
@@ -800,6 +862,7 @@ void register_all_ops() {
     static TransposeOpDef transpose_def;
     static ReshapeOpDef reshape_def;
     static PermuteOpDef permute_def;
+    static PagedAppendOpDef paged_append_def;
     static SlidingQueryKeyScoreOpDef sliding_query_key_score_def;
     static SoftmaxOpDef softmax_def;
     static EmbeddingOpDef embedding_def;
@@ -818,6 +881,7 @@ void register_all_ops() {
     reg.add(&transpose_def);
     reg.add(&reshape_def);
     reg.add(&permute_def);
+    reg.add(&paged_append_def);
     reg.add(&sliding_query_key_score_def);
     reg.add(&softmax_def);
     reg.add(&embedding_def);
@@ -1225,8 +1289,22 @@ Value* Builder::createPermute(Value* x, std::vector<int64_t> dims) {
     return createOp(OpKind::Permute, operands, attrs)[0];
 }
 
+void Builder::createPagedAppend(Value* cache, Value* chunk) {
+    Value* operands[] = {cache, chunk};
+    createOp(OpKind::PagedAppend, operands, {}, 0);
+}
+
 Value* Builder::createSlidingQueryKeyScore(Value* q, Value* k, int64_t window, float scale) {
     Value* operands[] = {q, k};
+    AttrMap attrs;
+    attrs["window"] = AttrValue::make_int(window);
+    if (scale > 0.0f)
+        attrs["scale"] = AttrValue::make_float(scale);
+    return createOp(OpKind::SlidingQueryKeyScore, operands, attrs)[0];
+}
+
+Value* Builder::createSlidingQueryKeyScore(Value* q, Value* k, Value* positionIds, int64_t window, float scale) {
+    Value* operands[] = {q, k, positionIds};
     AttrMap attrs;
     attrs["window"] = AttrValue::make_int(window);
     if (scale > 0.0f)

@@ -220,6 +220,48 @@ TEST_F(CpuDeviceTest, PagedPoolAllocReserveAppendAndMeta) {
     EXPECT_TRUE(device.destroyPagedPool(*pool));
 }
 
+TEST_F(CpuDeviceTest, PagedPoolReadMaterializesDenseTensor) {
+    sandy::device::CpuDevice device;
+    sandy::device::DevicePagedPoolDesc poolDesc;
+    poolDesc.templateDesc = sandy::core::TensorDesc(
+        sandy::core::Shape({2, sandy::core::Shape::kDynamic, 4}),
+        sandy::core::DType::F32);
+    poolDesc.growDim = 1;
+    poolDesc.pageSize = 2;
+    poolDesc.maxPages = 4;
+
+    auto pool = device.createPagedPool(poolDesc);
+    ASSERT_TRUE(pool) << pool.error();
+    auto tensor = device.allocPaged(*pool, sandy::core::Shape({2, 0, 4}));
+    ASSERT_TRUE(tensor) << tensor.error();
+
+    auto chunk = make_f32_buffer(
+        "chunk",
+        sandy::core::Shape({2, 3, 4}),
+        {
+            0.0f, 1.0f, 2.0f, 3.0f,
+            4.0f, 5.0f, 6.0f, 7.0f,
+            8.0f, 9.0f, 10.0f, 11.0f,
+            12.0f, 13.0f, 14.0f, 15.0f,
+            16.0f, 17.0f, 18.0f, 19.0f,
+            20.0f, 21.0f, 22.0f, 23.0f,
+        });
+    auto append = device.appendPaged(*tensor, *chunk);
+    ASSERT_TRUE(append) << append.error();
+
+    auto read = device.readPaged(*tensor);
+    ASSERT_TRUE(read) << read.error();
+    auto access = (*read)->access();
+    ASSERT_TRUE(access) << access.error();
+    EXPECT_EQ((*access).desc().shape, sandy::core::Shape({2, 3, 4}));
+    ASSERT_EQ((*access).data().size(), 24u * sizeof(float));
+    for (size_t i = 0; i < 24; i++)
+        EXPECT_NEAR(read_f32((*access).data(), i), static_cast<float>(i), 1.0e-5f);
+
+    EXPECT_TRUE(device.deallocPaged(*tensor));
+    EXPECT_TRUE(device.destroyPagedPool(*pool));
+}
+
 TEST_F(CpuDeviceTest, PagedPoolAppendRejectsShapeMismatch) {
     sandy::device::CpuDevice device;
     sandy::device::DevicePagedPoolDesc poolDesc;
@@ -248,7 +290,7 @@ TEST_F(CpuDeviceTest, PagedPoolAppendRejectsShapeMismatch) {
     EXPECT_TRUE(device.destroyPagedPool(*pool));
 }
 
-TEST_F(CpuDeviceTest, CompileRejectsPagedTensorValue) {
+TEST_F(CpuDeviceTest, CompileAcceptsPagedTensorValue) {
     sandy::ir::kernel_ir::Graph graph;
     auto cache = graph.addValue(
         paged_tensor_type(
@@ -266,8 +308,7 @@ TEST_F(CpuDeviceTest, CompileRejectsPagedTensorValue) {
 
     sandy::device::CpuDevice device;
     auto compiled = device.compile(graph);
-    EXPECT_FALSE(compiled);
-    EXPECT_NE(compiled.error().find("paged tensor values yet"), std::string::npos);
+    EXPECT_TRUE(compiled) << compiled.error();
 }
 
 TEST_F(CpuDeviceTest, DefaultViewRejectsDynamicShape) {

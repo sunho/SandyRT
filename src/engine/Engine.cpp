@@ -30,11 +30,13 @@ using ir::kernel_ir::InputSourceKind;
 using ir::kernel_ir::LayoutTransformKind;
 using ir::kernel_ir::Op;
 using ir::kernel_ir::OpKind;
+using ir::kernel_ir::PagedAppendOp;
 using ir::kernel_ir::ValueId;
 using ir::kernel_ir::ValueType;
 
 struct RuntimeState {
     std::unordered_map<ValueId, DeviceBufferId> buffers;
+    std::unordered_map<ValueId, DevicePagedTensorView> pagedTensors;
     std::unordered_map<ValueId, TensorViewDesc> views;
     std::unordered_map<ValueId, uint32_t> bufferDevices;
     std::unordered_map<ValueId, std::vector<ValueId>> tensorTuples;
@@ -313,6 +315,14 @@ Result<void> dealloc_value(
         std::vector<std::unique_ptr<Device>>& devices,
         RuntimeState& state,
         ValueId value) {
+    auto pagedIt = state.pagedTensors.find(value);
+    if (pagedIt != state.pagedTensors.end()) {
+        state.pagedTensors.erase(pagedIt);
+        state.views.erase(value);
+        state.bufferDevices.erase(value);
+        return {};
+    }
+
     auto buffer = lookup_runtime_buffer(state.buffers, value);
     if (!buffer)
         return make_error(buffer.error());
@@ -452,6 +462,53 @@ Result<void> bind_input_op(
         const TensorMap& weights,
         RuntimeState& state) {
     auto output = inputOp.outputs()[0];
+    const auto& outputType = graph.value(output).type;
+    if (outputType.kind == ir::kernel_ir::ValueKind::PagedTensor) {
+        if (inputOp.source().kind != InputSourceKind::Argument)
+            return make_error("paged tensor inputs must come from arguments");
+        auto index = inputOp.source().index;
+        if (index < 0 || static_cast<size_t>(index) >= inputs.size())
+            return make_error("input index out of range: " + std::to_string(index));
+
+        const DevicePagedTensorView* paged = nullptr;
+        const auto& input = inputs[static_cast<size_t>(index)];
+        if (inputOp.source().tupleElement >= 0) {
+            auto* tuple = std::get_if<RunTensorTuple>(&input);
+            if (!tuple)
+                return make_error("input arg " + std::to_string(index) +
+                                  " must be a tensor tuple");
+            auto element = inputOp.source().tupleElement;
+            if (static_cast<size_t>(element) >= tuple->elements.size())
+                return make_error("input tuple element out of range");
+            paged = std::get_if<DevicePagedTensorView>(
+                &tuple->elements[static_cast<size_t>(element)]);
+        } else {
+            paged = std::get_if<DevicePagedTensorView>(&input);
+        }
+        if (!paged)
+            return make_error("input arg " + std::to_string(index) +
+                              " must be a paged tensor");
+
+        auto verify = verify_desc_matches_type(
+            paged->meta.logicalDesc,
+            outputType,
+            "value %" + std::to_string(output));
+        if (!verify)
+            return make_error(verify.error());
+        if (paged->meta.growDim != outputType.paged.growDim ||
+            paged->meta.pageSize != outputType.paged.pageSize) {
+            return make_error("paged tensor input metadata mismatch for value %" +
+                              std::to_string(output));
+        }
+
+        TensorViewDesc view;
+        view.desc = paged->meta.logicalDesc;
+        state.pagedTensors[output] = *paged;
+        state.views[output] = std::move(view);
+        state.bufferDevices[output] = defaultDeviceId;
+        return {};
+    }
+
     auto host = resolve_input_buffer(inputOp, inputs, weights);
     if (!host)
         return make_error(host.error());
@@ -513,6 +570,57 @@ Result<void> transfer_op(
     state.buffers[output] = loadedView.buffer;
     state.views[output] = std::move(loadedView.view);
     state.bufferDevices[output] = transfer.targetDevice();
+    return {};
+}
+
+Result<void> paged_append_op(
+        std::vector<std::unique_ptr<Device>>& devices,
+        RuntimeState& state,
+        const PagedAppendOp& append) {
+    auto cacheValue = append.cache();
+    auto chunkValue = append.chunk();
+
+    auto cacheIt = state.pagedTensors.find(cacheValue);
+    if (cacheIt == state.pagedTensors.end())
+        return make_error("missing runtime paged tensor for value: " + std::to_string(cacheValue));
+
+    auto cacheDeviceIt = state.bufferDevices.find(cacheValue);
+    if (cacheDeviceIt == state.bufferDevices.end())
+        return make_error("missing runtime device for value: " + std::to_string(cacheValue));
+    auto chunkDeviceIt = state.bufferDevices.find(chunkValue);
+    if (chunkDeviceIt == state.bufferDevices.end())
+        return make_error("missing runtime device for value: " + std::to_string(chunkValue));
+    if (cacheDeviceIt->second != chunkDeviceIt->second)
+        return make_error("paged append cache and chunk must be on the same device");
+    if (cacheDeviceIt->second != append.device())
+        return make_error("paged append input is not on execution device");
+
+    auto device = lookup_device(devices, cacheDeviceIt->second);
+    if (!device)
+        return make_error(device.error());
+
+    auto chunkBuffer = lookup_runtime_buffer(state.buffers, chunkValue);
+    if (!chunkBuffer)
+        return make_error(chunkBuffer.error());
+    auto chunkView = lookup_runtime_view(state.views, chunkValue);
+    if (!chunkView)
+        return make_error(chunkView.error());
+
+    auto denseChunk = (*device)->read(DeviceTensorView{chunkBuffer.take(), chunkView.take()});
+    if (!denseChunk)
+        return make_error(denseChunk.error());
+    auto appended = (*device)->appendPaged(cacheIt->second.tensor, **denseChunk);
+    if (!appended)
+        return make_error(appended.error());
+    auto meta = (*device)->pagedMeta(cacheIt->second.tensor);
+    if (!meta)
+        return make_error(meta.error());
+
+    cacheIt->second.meta = meta.take();
+    auto viewIt = state.views.find(cacheValue);
+    if (viewIt == state.views.end())
+        return make_error("missing runtime view for value: " + std::to_string(cacheValue));
+    viewIt->second.desc = cacheIt->second.meta.logicalDesc;
     return {};
 }
 
@@ -657,17 +765,24 @@ Result<std::vector<device::DeviceRunValue>> collect_input_views(
     std::vector<device::DeviceRunValue> inputs;
     inputs.reserve(op.inputs().size());
     for (auto input : op.inputs()) {
+        auto inputDeviceIt = state.bufferDevices.find(input);
+        if (inputDeviceIt == state.bufferDevices.end())
+            return make_error("missing runtime device for value: " + std::to_string(input));
+        if (inputDeviceIt->second != opDevice)
+            return make_error("KernelIR op input is not on execution device");
+
+        auto pagedIt = state.pagedTensors.find(input);
+        if (pagedIt != state.pagedTensors.end()) {
+            inputs.push_back(pagedIt->second);
+            continue;
+        }
+
         auto buffer = lookup_runtime_buffer(state.buffers, input);
         if (!buffer)
             return make_error(buffer.error());
         auto view = lookup_runtime_view(state.views, input);
         if (!view)
             return make_error(view.error());
-        auto inputDeviceIt = state.bufferDevices.find(input);
-        if (inputDeviceIt == state.bufferDevices.end())
-            return make_error("missing runtime device for value: " + std::to_string(input));
-        if (inputDeviceIt->second != opDevice)
-            return make_error("KernelIR op input is not on execution device");
         inputs.push_back(DeviceTensorView{buffer.take(), view.take()});
     }
     return inputs;
@@ -869,6 +984,7 @@ Result<std::unique_ptr<CompiledKernelGraph>> Engine::compile(const ir::mid_ir::G
         const auto& op = *opPtr;
         if (op.kind() == OpKind::Input ||
             op.kind() == OpKind::TensorTupleCreate ||
+            op.kind() == OpKind::PagedAppend ||
             op.kind() == OpKind::DeviceTransfer)
             continue;
         executableDevices.insert(op.device());
@@ -958,6 +1074,19 @@ Result<std::vector<RunOutput>> Engine::runValues(
         if (op.kind() == OpKind::TensorTupleCreate) {
             state.tensorTuples[op.outputs()[0]] =
                 std::vector<ValueId>(op.inputs().begin(), op.inputs().end());
+            continue;
+        }
+
+        if (op.kind() == OpKind::PagedAppend) {
+            auto appended = paged_append_op(
+                devices_,
+                state,
+                static_cast<const PagedAppendOp&>(op));
+            if (!appended)
+                return make_error(appended.error());
+            auto finish = finish_op_lifetimes(devices_, state, op);
+            if (!finish)
+                return make_error(finish.error());
             continue;
         }
 

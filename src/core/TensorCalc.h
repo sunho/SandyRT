@@ -74,6 +74,13 @@ Result<void> permute(TensorRef x, std::span<const int64_t> dims, MutableTensorRe
 Result<void> sliding_query_key_score(
     TensorRef q,
     TensorRef k,
+    TensorRef position_ids,
+    int64_t window,
+    float scale,
+    MutableTensorRef out);
+Result<void> sliding_query_key_score(
+    TensorRef q,
+    TensorRef k,
     int64_t window,
     float scale,
     MutableTensorRef out);

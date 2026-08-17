@@ -244,6 +244,40 @@ TEST_F(MidIRTest, FuseTransposeIntoMatMulPassKeepsSharedTranspose) {
     EXPECT_EQ(graph.entry()->ops.size(), 5u);
 }
 
+TEST_F(MidIRTest, DeadCodeEliminationPreservesPagedAppendSideEffect) {
+    sandy::ir::mid_ir::Graph graph;
+    sandy::ir::mid_ir::Builder builder(graph);
+
+    auto* cache = builder.createPagedTensorInput(
+        0,
+        sandy::core::Shape({1, 1, -1, 4}),
+        sandy::core::DType::BF16,
+        2,
+        16);
+    auto* chunk = builder.createInput(
+        1,
+        sandy::core::Shape({1, 1, 1, 4}),
+        sandy::core::DType::BF16);
+    auto* output = builder.createInput(
+        2,
+        sandy::core::Shape({1}),
+        sandy::core::DType::F32);
+    builder.createPagedAppend(cache, chunk);
+    sandy::ir::mid_ir::Value* outputs[] = {output};
+    builder.setOutputs(outputs);
+
+    auto pass = sandy::ir::mid_ir::createDeadCodeEliminationPass();
+    auto result = pass->run(graph);
+    ASSERT_TRUE(result) << result.error();
+
+    bool foundAppend = false;
+    for (auto* op : graph.entry()->ops) {
+        if (op && op->kind == sandy::ir::mid_ir::OpKind::PagedAppend)
+            foundAppend = true;
+    }
+    EXPECT_TRUE(foundAppend);
+}
+
 TEST_F(MidIRTest, ReshapeTypeInference) {
     sandy::ir::mid_ir::Graph graph;
     sandy::ir::mid_ir::Builder builder(graph);

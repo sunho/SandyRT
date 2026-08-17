@@ -33,6 +33,10 @@ Result<DevicePagedTensorMeta> Device::pagedMeta(DevicePagedTensorId) const {
     return make_error("device does not support paged tensors");
 }
 
+Result<TensorBufferPtr> Device::read(DevicePagedTensorView) {
+    return make_error("device does not support reading paged tensors");
+}
+
 Result<std::vector<int64_t>> Device::defaultStrides(const core::Shape& shape) const {
     if (shape.has_dynamic())
         return make_error("cannot compute default strides for dynamic shape");

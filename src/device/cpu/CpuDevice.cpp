@@ -195,13 +195,6 @@ Result<DeviceCompiledGraphId> CpuDevice::compile(const ir::kernel_ir::Graph& gra
     if (!verify)
         return make_error(verify.error());
 
-    for (const auto& value : graph.values()) {
-        if (value.type.kind == ir::kernel_ir::ValueKind::PagedTensor) {
-            return make_error(
-                "cpu device KernelIR runner does not support paged tensor values yet");
-        }
-    }
-
     CpuDeviceGraph compiled;
     for (const auto& opPtr : graph.ops()) {
         const auto& op = *opPtr;
@@ -213,6 +206,7 @@ Result<DeviceCompiledGraphId> CpuDevice::compile(const ir::kernel_ir::Graph& gra
         switch (op.kind()) {
             case ir::kernel_ir::OpKind::Input:
             case ir::kernel_ir::OpKind::TensorTupleCreate:
+            case ir::kernel_ir::OpKind::PagedAppend:
             case ir::kernel_ir::OpKind::DeviceTransfer:
                 break;
             case ir::kernel_ir::OpKind::LayoutTransform: {
@@ -583,6 +577,73 @@ Result<TensorBufferPtr> CpuDevice::read(DeviceTensorView src) {
     return buffer;
 }
 
+Result<TensorBufferPtr> CpuDevice::read(DevicePagedTensorView src) {
+    auto tensorIt = pagedTensors_.find(src.tensor);
+    if (tensorIt == pagedTensors_.end())
+        return make_error("cpu device paged tensor not found");
+    auto poolIt = pagedPools_.find(tensorIt->second.pool);
+    if (poolIt == pagedPools_.end())
+        return make_error("cpu device paged pool not found");
+
+    const auto& pool = poolIt->second;
+    const auto& tensor = tensorIt->second;
+    auto desc = core::TensorDesc(
+        tensor.logicalShape,
+        pool.desc.templateDesc.dtype);
+    auto numel = desc.shape.numel();
+    if (numel < 0)
+        return make_error("cpu device cannot read dynamic paged tensor");
+
+    std::vector<uint8_t> outData(
+        static_cast<size_t>(numel) * core::dtype_size(desc.dtype));
+    if (tensor.growLength == 0) {
+        return TensorBufferPtr(std::make_shared<CpuTensorBuffer>(
+            std::move(desc),
+            std::move(outData)));
+    }
+
+    auto prefixCount = checked_product(
+        pool.desc.templateDesc.shape,
+        0,
+        static_cast<int>(pool.desc.growDim));
+    if (!prefixCount)
+        return make_error(prefixCount.error());
+    auto trailingCount = checked_product(
+        pool.desc.templateDesc.shape,
+        static_cast<int>(pool.desc.growDim) + 1,
+        pool.desc.templateDesc.shape.rank());
+    if (!trailingCount)
+        return make_error(trailingCount.error());
+
+    auto elementSize = core::dtype_size(desc.dtype);
+    auto trailingBytes = static_cast<size_t>(*trailingCount) * elementSize;
+    for (int64_t prefix = 0; prefix < *prefixCount; prefix++) {
+        for (int64_t grow = 0; grow < tensor.growLength; grow++) {
+            auto pageOrdinal = grow / pool.desc.pageSize;
+            auto growInPage = grow % pool.desc.pageSize;
+            if (static_cast<size_t>(pageOrdinal) >= tensor.pageIndices.size())
+                return make_error("cpu device paged tensor missing backing page");
+            auto pageIndex = tensor.pageIndices[static_cast<size_t>(pageOrdinal)];
+            auto page = pool.pages.page(pageIndex);
+            if (!page)
+                return make_error(page.error());
+
+            auto srcElement =
+                (prefix * pool.desc.pageSize + growInPage) * *trailingCount;
+            auto dstElement =
+                (prefix * tensor.growLength + grow) * *trailingCount;
+            std::memcpy(
+                outData.data() + static_cast<size_t>(dstElement) * elementSize,
+                page->data() + static_cast<size_t>(srcElement) * elementSize,
+                trailingBytes);
+        }
+    }
+
+    return TensorBufferPtr(std::make_shared<CpuTensorBuffer>(
+        std::move(desc),
+        std::move(outData)));
+}
+
 Result<TensorBufferPtr> CpuDevice::read(DeviceBufferId src) {
     auto it = buffers_.find(src);
     if (it == buffers_.end())
@@ -591,6 +652,13 @@ Result<TensorBufferPtr> CpuDevice::read(DeviceBufferId src) {
     if (!view)
         return make_error(view.error());
     return read(DeviceTensorView{src, view.take()});
+}
+
+Result<TensorBufferPtr> CpuDevice::readPaged(DevicePagedTensorId src) {
+    auto meta = pagedMeta(src);
+    if (!meta)
+        return make_error(meta.error());
+    return read(DevicePagedTensorView{src, meta.take()});
 }
 
 Result<void> CpuDevice::run(
@@ -627,13 +695,50 @@ Result<void> CpuDevice::run(
     if (outputs.size() != kernel.outputCount)
         return make_error("cpu device output arity mismatch");
 
+    std::vector<TensorBufferPtr> pagedInputBuffers;
+    pagedInputBuffers.reserve(inputs.size());
+
+    struct TempInputBuffers {
+        CpuDevice& device;
+        std::vector<DeviceBufferId> ids;
+
+        ~TempInputBuffers() {
+            for (auto id : ids)
+                device.buffers_.erase(id);
+        }
+    } tempInputBuffers{*this};
+
     std::vector<DeviceTensorView> inputViews;
     inputViews.reserve(inputs.size());
     for (const auto& input : inputs) {
         auto* view = std::get_if<DeviceTensorView>(&input);
-        if (!view)
-            return make_error("cpu device kernel input must be a dense tensor view");
-        inputViews.push_back(*view);
+        if (view) {
+            inputViews.push_back(*view);
+            continue;
+        }
+
+        auto* paged = std::get_if<DevicePagedTensorView>(&input);
+        if (!paged)
+            return make_error("cpu device kernel input must be a tensor view");
+        auto dense = read(*paged);
+        if (!dense)
+            return make_error(dense.error());
+        auto access = (*dense)->access();
+        if (!access)
+            return make_error(access.error());
+        auto viewDesc = defaultView((*access).desc());
+        if (!viewDesc)
+            return make_error(viewDesc.error());
+
+        auto bufferId = nextBufferId_++;
+        CpuDeviceBuffer buffer;
+        buffer.desc = (*access).desc();
+        buffer.borrowed.emplace(access.take());
+        buffers_[bufferId] = std::move(buffer);
+        tempInputBuffers.ids.push_back(bufferId);
+
+        pagedInputBuffers.push_back(dense.take());
+        inputViews.push_back(DeviceTensorView{bufferId, viewDesc.take()});
     }
 
     std::vector<DeviceTensorView> outputViews;
@@ -673,6 +778,7 @@ Result<void> CpuDevice::run(
     switch (kernel.kind) {
         case ir::kernel_ir::OpKind::Input:
         case ir::kernel_ir::OpKind::TensorTupleCreate:
+        case ir::kernel_ir::OpKind::PagedAppend:
             return make_error("cpu device cannot run input boundary op");
         case ir::kernel_ir::OpKind::DeviceTransfer:
             return make_error("cpu device cannot run device transfer boundary op");
@@ -754,6 +860,17 @@ Result<void> CpuDevice::run(
             if (!k) return make_error(k.error());
             auto out = outputRef(0);
             if (!out) return make_error(out.error());
+            if (inputs.size() == 3) {
+                auto positionIds = inputRef(2);
+                if (!positionIds) return make_error(positionIds.error());
+                return core::sliding_query_key_score(
+                    *q,
+                    *k,
+                    *positionIds,
+                    kernel.window,
+                    static_cast<float>(kernel.scale),
+                    *out);
+            }
             return core::sliding_query_key_score(
                 *q,
                 *k,

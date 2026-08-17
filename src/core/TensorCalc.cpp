@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 #include <string>
@@ -85,6 +86,9 @@ Result<void> require_bytes(
         return make_error(name + " strides rank mismatch");
     if (storageOffset < 0)
         return make_error(name + " storage offset must be non-negative");
+
+    if (numel == 0)
+        return {};
 
     int64_t maxStorageIndex = storageOffset;
     for (int i = 0; i < desc.shape.rank(); i++) {
@@ -327,6 +331,32 @@ bool cublas_can_fallback(cublasStatus_t status) {
            status == CUBLAS_STATUS_ARCH_MISMATCH;
 }
 
+void log_cublas_skip_once(const char* reason) {
+    static bool logged = false;
+    if (logged) return;
+    logged = true;
+    std::fprintf(stderr, "[sandy] cuBLAS matmul skipped: %s\n", reason);
+}
+
+void log_cublas_use_once(
+        DType dtype,
+        int64_t rows,
+        int64_t k,
+        int64_t n,
+        int64_t batchNumel) {
+    static bool logged = false;
+    if (logged) return;
+    logged = true;
+    std::fprintf(
+        stderr,
+        "[sandy] cuBLAS matmul active: dtype=%s rows=%ld k=%ld n=%ld batch=%ld\n",
+        dtype_name(dtype),
+        static_cast<long>(rows),
+        static_cast<long>(k),
+        static_cast<long>(n),
+        static_cast<long>(batchNumel));
+}
+
 Result<bool> matmul_cublas(
         TensorRef lhs,
         TensorRef rhs,
@@ -337,28 +367,40 @@ Result<bool> matmul_cublas(
         int64_t n,
         int64_t batchNumel,
         MutableTensorRef out) {
-    if (lhs.desc.dtype != rhs.desc.dtype || lhs.desc.dtype != out.desc.dtype)
+    if (lhs.desc.dtype != rhs.desc.dtype || lhs.desc.dtype != out.desc.dtype) {
+        log_cublas_skip_once("dtype mismatch");
         return false;
-    if (!lhs.is_contiguous() || !rhs.is_contiguous() || !out.is_contiguous())
+    }
+    if (!lhs.is_contiguous() || !rhs.is_contiguous() || !out.is_contiguous()) {
+        log_cublas_skip_once("non-contiguous tensor");
         return false;
+    }
     auto dataType = cublas_data_type_for(lhs.desc.dtype);
-    if (!dataType)
+    if (!dataType) {
+        log_cublas_skip_once("unsupported dtype");
         return false;
+    }
     cudaDataType_t cudaType = dataType.take();
-    if (!cublas_runtime_available())
+    if (!cublas_runtime_available()) {
+        log_cublas_skip_once("no CUDA device available");
         return false;
+    }
 
     int lhsRank = lhs.desc.shape.rank();
     int rhsRank = rhs.desc.shape.rank();
     bool flattenSharedRhs = !transpose_lhs && rhsRank == 2;
-    if (!flattenSharedRhs && batchNumel != 1)
+    if (!flattenSharedRhs && batchNumel != 1) {
+        log_cublas_skip_once("batched matmul with non-shared rhs");
         return false;
+    }
 
     int64_t rows = flattenSharedRhs ? batchNumel * m : m;
     int64_t lhsLd = lhs.desc.shape.dim(lhsRank - 1);
     int64_t rhsLd = rhs.desc.shape.dim(rhsRank - 1);
-    if (!cublas_int_dims_ok(rows, n, k, lhsLd, rhsLd))
+    if (!cublas_int_dims_ok(rows, n, k, lhsLd, rhsLd)) {
+        log_cublas_skip_once("matrix dimensions exceed cuBLAS int limits");
         return false;
+    }
 
     CudaAllocation lhsDevice;
     CudaAllocation rhsDevice;
@@ -408,11 +450,14 @@ Result<bool> matmul_cublas(
         static_cast<int>(n),
         CUBLAS_COMPUTE_32F,
         CUBLAS_GEMM_DEFAULT);
-    if (cublas_can_fallback(gemmStatus))
+    if (cublas_can_fallback(gemmStatus)) {
+        log_cublas_skip_once(cublas_status_name(gemmStatus));
         return false;
+    }
     auto gemm = cublas_check(gemmStatus, "cublasGemmEx");
     if (!gemm)
         return make_error(gemm.error());
+    log_cublas_use_once(lhs.desc.dtype, rows, k, n, batchNumel);
 
     auto outCopy = cuda_check(
         cudaMemcpy(out.bytes.data(), outDevice.get(), out.bytes.size(), cudaMemcpyDeviceToHost),
@@ -956,9 +1001,10 @@ Result<void> permute(TensorRef x, std::span<const int64_t> dims, MutableTensorRe
     return {};
 }
 
-Result<void> sliding_query_key_score(
+Result<void> sliding_query_key_score_impl(
         TensorRef q,
         TensorRef k,
+        const TensorRef* positionIds,
         int64_t window,
         float scale,
         MutableTensorRef out) {
@@ -993,6 +1039,18 @@ Result<void> sliding_query_key_score(
         return make_error("sliding_query_key_score head dimension mismatch");
     if (heads <= 0 || kvHeads <= 0 || heads % kvHeads != 0)
         return make_error("sliding_query_key_score heads must be divisible by kv_heads");
+    int64_t positionCount = 0;
+    if (positionIds) {
+        if (positionIds->desc.dtype != DType::I32 &&
+            positionIds->desc.dtype != DType::I64) {
+            return make_error("sliding_query_key_score position_ids must be i32 or i64");
+        }
+        positionCount = positionIds->desc.shape.numel();
+        if (positionCount < 0)
+            return make_error("sliding_query_key_score position_ids must have static shape");
+        if (positionCount != 1 && positionCount != tq)
+            return make_error("sliding_query_key_score position_ids numel must be 1 or query length");
+    }
 
     std::vector<int64_t> outDims;
     if (rank == 4)
@@ -1012,15 +1070,22 @@ Result<void> sliding_query_key_score(
         for (int64_t h = 0; h < heads; h++) {
             int64_t kh = h / headsPerKv;
             for (int64_t qi = 0; qi < tq; qi++) {
+                int64_t queryPosition = qi;
+                if (positionIds) {
+                    auto positionIndex = positionCount == 1 ? 0 : qi;
+                    queryPosition = read_index(*positionIds, static_cast<size_t>(positionIndex));
+                    if (queryPosition < 0)
+                        return make_error("sliding_query_key_score position_ids must be non-negative");
+                }
                 int64_t minKey = 0;
                 if (window > 0)
-                    minKey = std::max<int64_t>(0, qi + 1 - window);
+                    minKey = std::max<int64_t>(0, queryPosition + 1 - window);
                 for (int64_t ki = 0; ki < tk; ki++) {
                     size_t outIndex = rank == 4
                         ? static_cast<size_t>(((b * heads + h) * tq + qi) * tk + ki)
                         : static_cast<size_t>((h * tq + qi) * tk + ki);
 
-                    if (ki > qi || ki < minKey) {
+                    if (ki > queryPosition || ki < minKey) {
                         out.store_float(outIndex, masked);
                         continue;
                     }
@@ -1052,6 +1117,25 @@ Result<void> sliding_query_key_score(
 Result<void> sliding_query_key_score(
         TensorRef q,
         TensorRef k,
+        TensorRef positionIds,
+        int64_t window,
+        float scale,
+        MutableTensorRef out) {
+    return sliding_query_key_score_impl(q, k, &positionIds, window, scale, out);
+}
+
+Result<void> sliding_query_key_score(
+        TensorRef q,
+        TensorRef k,
+        int64_t window,
+        float scale,
+        MutableTensorRef out) {
+    return sliding_query_key_score_impl(q, k, nullptr, window, scale, out);
+}
+
+Result<void> sliding_query_key_score(
+        TensorRef q,
+        TensorRef k,
         int64_t window,
         MutableTensorRef out) {
     return sliding_query_key_score(q, k, window, -1.0f, out);
@@ -1074,6 +1158,8 @@ Result<void> softmax(TensorRef x, int64_t dim, MutableTensorRef out) {
     int64_t total = x.desc.shape.numel();
     if (total < 0)
         return make_error("softmax input must have static shape");
+    if (total == 0)
+        return {};
 
     int64_t axis = x.desc.shape.dim(static_cast<int>(dim));
     if (axis < 0)

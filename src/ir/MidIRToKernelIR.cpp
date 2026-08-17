@@ -525,6 +525,25 @@ Result<void> lower_softmax(
     return {};
 }
 
+Result<void> lower_paged_append(
+    Graph& graph,
+    const mid_ir::Op& op,
+    ValueMap& valueMap)
+{
+    if (op.operands.size() != 2) {
+        return make_error("paged_append lowering expects two operands");
+    }
+    auto cache = mapped_value(valueMap, op.operands[0]);
+    if (!cache)
+        return make_error(cache.error());
+    auto chunk = mapped_value(valueMap, op.operands[1]);
+    if (!chunk)
+        return make_error(chunk.error());
+
+    graph.addOp<PagedAppendOp>(cache.take(), chunk.take());
+    return {};
+}
+
 Result<void> lower_rope(
     Graph& graph,
     const mid_ir::Op& op,
@@ -589,8 +608,8 @@ Result<void> lower_sliding_query_key_score(
     const mid_ir::Op& op,
     ValueMap& valueMap)
 {
-    if (op.operands.size() != 2) {
-        return make_error("sliding_query_key_score lowering expects two operands");
+    if (op.operands.size() != 2 && op.operands.size() != 3) {
+        return make_error("sliding_query_key_score lowering expects two or three operands");
     }
     auto query = mapped_value(valueMap, op.operands[0]);
     if (!query)
@@ -608,12 +627,25 @@ Result<void> lower_sliding_query_key_score(
     if (!scale)
         return make_error(scale.error());
 
-    graph.addOp<SlidingQueryKeyScoreKernelOp>(
-        query.take(),
-        key.take(),
-        output.take(),
-        window.take(),
-        scale.take());
+    if (op.operands.size() == 3) {
+        auto positionIds = mapped_value(valueMap, op.operands[2]);
+        if (!positionIds)
+            return make_error(positionIds.error());
+        graph.addOp<SlidingQueryKeyScoreKernelOp>(
+            query.take(),
+            key.take(),
+            positionIds.take(),
+            output.take(),
+            window.take(),
+            scale.take());
+    } else {
+        graph.addOp<SlidingQueryKeyScoreKernelOp>(
+            query.take(),
+            key.take(),
+            output.take(),
+            window.take(),
+            scale.take());
+    }
     return {};
 }
 
@@ -648,6 +680,8 @@ Result<void> lower_op(
         case mid_ir::OpKind::Reshape:
         case mid_ir::OpKind::Permute:
             return lower_layout_transform(graph, op, valueMap);
+        case mid_ir::OpKind::PagedAppend:
+            return lower_paged_append(graph, op, valueMap);
         case mid_ir::OpKind::SlidingQueryKeyScore:
             return lower_sliding_query_key_score(graph, op, valueMap);
         case mid_ir::OpKind::Softmax:

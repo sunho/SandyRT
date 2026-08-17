@@ -29,6 +29,7 @@ enum class OpKind {
     Transpose,
     Reshape,
     Permute,
+    PagedAppend,
     SlidingQueryKeyScore,
     Softmax,
     Embedding,
@@ -93,6 +94,7 @@ public:
     virtual std::vector<ValueType> infer_types(
         std::span<Value* const> operands,
         const AttrMap& attrs) const = 0;
+    virtual bool has_side_effects() const { return false; }
     virtual void verify(
         std::span<Value* const> operands,
         const AttrMap& attrs) const {}
@@ -216,7 +218,9 @@ public:
     Value* createTranspose(Value* x);
     Value* createReshape(Value* x, std::vector<int64_t> shape);
     Value* createPermute(Value* x, std::vector<int64_t> dims);
+    void createPagedAppend(Value* cache, Value* chunk);
     Value* createSlidingQueryKeyScore(Value* q, Value* k, int64_t window = 0, float scale = -1.0f);
+    Value* createSlidingQueryKeyScore(Value* q, Value* k, Value* positionIds, int64_t window = 0, float scale = -1.0f);
     Value* createSoftmax(Value* x, int64_t dim = -1);
     Value* createEmbedding(Value* ids, Value* weight);
     Value* createRoPE(Value* x, float theta = 10000.0f, int64_t rotary_dim = -1, bool split_half = false);

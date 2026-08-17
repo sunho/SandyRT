@@ -150,7 +150,13 @@ void Interpreter::execStmt(const Stmt& stmt) {
         case Stmt::For:         execFor(stmt); break;
         case Stmt::If:          execIf(stmt); break;
         case Stmt::WeightScope: execWeightScope(stmt); break;
-        case Stmt::ExprStmt:    evalExpr(*stmt.expr); break;
+        case Stmt::ExprStmt: {
+            int saved = expectedResults_;
+            expectedResults_ = 0;
+            evalExpr(*stmt.expr);
+            expectedResults_ = saved;
+            break;
+        }
     }
 }
 
@@ -356,6 +362,9 @@ RuntimeValue Interpreter::evalCall(const Expr& expr) {
         expectedResults_ = saved;
 
         auto results = graph_.addBuiltin(builtinName, operands, attrs, numResults);
+        if (numResults == 0) {
+            return RuntimeValue::makeVoid();
+        }
         if (numResults == 1) {
             return RuntimeValue::makeNode(results[0]);
         }

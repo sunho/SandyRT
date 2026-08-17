@@ -44,6 +44,7 @@ public:
         std::span<const DeviceRunValue> outputs) = 0;
 
     virtual Result<TensorBufferPtr> read(DeviceTensorView src) = 0;
+    virtual Result<TensorBufferPtr> read(DevicePagedTensorView src);
 };
 
 } // namespace sandy::device

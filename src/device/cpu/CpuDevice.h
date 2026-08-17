@@ -43,7 +43,9 @@ public:
         std::span<const DeviceTensorView> outputs);
 
     Result<TensorBufferPtr> read(DeviceTensorView src) override;
+    Result<TensorBufferPtr> read(DevicePagedTensorView src) override;
     Result<TensorBufferPtr> read(DeviceBufferId src);
+    Result<TensorBufferPtr> readPaged(DevicePagedTensorId src);
 
 private:
     struct CpuDeviceBuffer {

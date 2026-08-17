@@ -405,6 +405,7 @@ const char* op_kind_name(OpKind kind) {
         case OpKind::Input: return "input";
         case OpKind::TensorTupleCreate: return "tensor_tuple_create";
         case OpKind::DeviceTransfer: return "device_transfer";
+        case OpKind::PagedAppend: return "paged_append";
         case OpKind::LayoutTransform: return "layout_transform";
         case OpKind::ElementwiseKernel: return "elementwise_kernel";
         case OpKind::ReductionKernel: return "reduction_kernel";
@@ -687,6 +688,57 @@ Result<void> DeviceTransferOp::verify(const Graph& graph) const {
     return {};
 }
 
+PagedAppendOp::PagedAppendOp(
+    OpId id,
+    ValueId cache,
+    ValueId chunk,
+    DeviceId device)
+    : Op(id, OpKind::PagedAppend, device),
+      inputs_{cache, chunk}
+{}
+
+Result<void> PagedAppendOp::verify(const Graph& graph) const {
+    if (auto result = verify_values_exist(graph, inputs(), "input", *this); !result) {
+        return result;
+    }
+
+    const auto& cacheValue = graph.value(cache());
+    const auto& chunkValue = graph.value(chunk());
+    if (cacheValue.type.kind != ValueKind::PagedTensor) {
+        return make_error(op_ref(id()) + " paged_append cache input must be a paged tensor");
+    }
+    if (chunkValue.type.kind != ValueKind::Tensor) {
+        return make_error(op_ref(id()) + " paged_append chunk input must be a dense tensor");
+    }
+    if (cacheValue.type.dtype != chunkValue.type.dtype) {
+        return make_error(op_ref(id()) + " paged_append dtype mismatch");
+    }
+    if (cacheValue.type.shape.rank() != chunkValue.type.shape.rank()) {
+        return make_error(op_ref(id()) + " paged_append rank mismatch");
+    }
+
+    int growDim = static_cast<int>(cacheValue.type.paged.growDim);
+    if (growDim < 0 || growDim >= cacheValue.type.shape.rank()) {
+        return make_error(op_ref(id()) + " paged_append grow_dim out of range");
+    }
+    for (int i = 0; i < cacheValue.type.shape.rank(); i++) {
+        if (i == growDim)
+            continue;
+        auto cacheDim = cacheValue.type.shape.dim(i);
+        auto chunkDim = chunkValue.type.shape.dim(i);
+        if (cacheDim != core::Shape::kDynamic &&
+            chunkDim != core::Shape::kDynamic &&
+            cacheDim != chunkDim) {
+            return make_error(op_ref(id()) + " paged_append non-grow dimension mismatch");
+        }
+    }
+    auto chunkGrow = chunkValue.type.shape.dim(growDim);
+    if (chunkGrow == 0) {
+        return make_error(op_ref(id()) + " paged_append chunk grow dimension must be non-zero");
+    }
+    return {};
+}
+
 LayoutTransformOp::LayoutTransformOp(
     OpId id,
     LayoutTransformKind transform,
@@ -948,12 +1000,40 @@ SlidingQueryKeyScoreKernelOp::SlidingQueryKeyScoreKernelOp(
       scale_(scale)
 {}
 
+SlidingQueryKeyScoreKernelOp::SlidingQueryKeyScoreKernelOp(
+    OpId id,
+    ValueId query,
+    ValueId key,
+    ValueId positionIds,
+    ValueId output,
+    int64_t window,
+    double scale,
+    DeviceId device)
+    : Op(id, OpKind::SlidingQueryKeyScoreKernel, device),
+      inputs_{query, key, positionIds},
+      outputs_{output},
+      window_(window),
+      scale_(scale)
+{}
+
 Result<void> SlidingQueryKeyScoreKernelOp::verify(const Graph& graph) const {
-    if (auto result = verify_common_op_shape(graph, *this, 2, 1); !result) {
+    if (inputs_.size() != 2 && inputs_.size() != 3) {
+        return make_error(op_ref(id()) + " sliding score expects 2 or 3 input(s)");
+    }
+    if (auto result = verify_values_exist(graph, inputs(), "input", *this); !result) {
+        return result;
+    }
+    if (auto result = verify_values_exist(graph, outputs(), "output", *this); !result) {
         return result;
     }
     if (window_ < 0) {
         return make_error(op_ref(id()) + " sliding score window must be non-negative");
+    }
+    if (inputs_.size() == 3) {
+        auto dtype = graph.value(inputs_[2]).type.dtype;
+        if (dtype != core::DType::I32 && dtype != core::DType::I64) {
+            return make_error(op_ref(id()) + " sliding score position_ids must be i32 or i64");
+        }
     }
     return {};
 }

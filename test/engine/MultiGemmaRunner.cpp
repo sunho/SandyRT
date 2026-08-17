@@ -4,6 +4,7 @@
 #include "SafeTensorWeights.h"
 
 #include <algorithm>
+#include <array>
 #include <charconv>
 #include <cstdint>
 #include <cstdio>
@@ -17,9 +18,14 @@
 #include <system_error>
 #include <unordered_map>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace {
+
+constexpr int kGemma4E2BLocalCacheCount = 12;
+constexpr int kGemma4E2BGlobalCacheCount = 3;
+constexpr int kGemma4E2BKVLayerCount = 15;
 
 class HostTensorBuffer final : public sandy::core::TensorBuffer {
 public:
@@ -85,6 +91,20 @@ std::shared_ptr<HostTensorBuffer> make_input_buffer(
         std::move(bytes));
 }
 
+std::shared_ptr<HostTensorBuffer> make_i64_buffer(
+        std::string name,
+        sandy::core::Shape shape,
+        int64_t value) {
+    std::vector<uint8_t> bytes(sizeof(int64_t));
+    std::memcpy(bytes.data(), &value, sizeof(value));
+    return std::make_shared<HostTensorBuffer>(
+        sandy::core::TensorDesc(
+            std::move(name),
+            std::move(shape),
+            sandy::core::DType::I64),
+        std::move(bytes));
+}
+
 Result<std::pair<int64_t, float>> argmax_at(
         sandy::core::TensorBuffer& output,
         int64_t tokenIndex) {
@@ -119,16 +139,232 @@ Result<std::pair<int64_t, float>> argmax_at(
     return std::pair<int64_t, float>{bestId, bestValue};
 }
 
+struct EvalTokenCaches {
+    sandy::device::DevicePagedPoolId localPool = 0;
+    sandy::device::DevicePagedPoolId globalPool = 0;
+    std::array<sandy::device::DevicePagedTensorId, kGemma4E2BLocalCacheCount> localK{};
+    std::array<sandy::device::DevicePagedTensorId, kGemma4E2BLocalCacheCount> localV{};
+    std::array<sandy::device::DevicePagedTensorId, kGemma4E2BGlobalCacheCount> globalK{};
+    std::array<sandy::device::DevicePagedTensorId, kGemma4E2BGlobalCacheCount> globalV{};
+};
+
+Result<sandy::device::DevicePagedTensorView> paged_view(
+        sandy::device::CpuDevice& device,
+        sandy::device::DevicePagedTensorId tensor) {
+    auto meta = device.pagedMeta(tensor);
+    if (!meta)
+        return make_error(meta.error());
+    return sandy::device::DevicePagedTensorView{tensor, meta.take()};
+}
+
+Result<sandy::engine::RunTensorTuple> make_paged_tuple(
+        sandy::device::CpuDevice& device,
+        const std::array<sandy::device::DevicePagedTensorId, kGemma4E2BLocalCacheCount>& ids) {
+    sandy::engine::RunTensorTuple tuple;
+    tuple.elements.reserve(ids.size());
+    for (auto id : ids) {
+        auto view = paged_view(device, id);
+        if (!view)
+            return make_error(view.error());
+        tuple.elements.push_back(view.take());
+    }
+    return tuple;
+}
+
+Result<sandy::engine::RunTensorTuple> make_global_paged_tuple(
+        sandy::device::CpuDevice& device,
+        const std::array<sandy::device::DevicePagedTensorId, kGemma4E2BGlobalCacheCount>& ids) {
+    sandy::engine::RunTensorTuple tuple;
+    tuple.elements.reserve(ids.size());
+    for (auto id : ids) {
+        auto view = paged_view(device, id);
+        if (!view)
+            return make_error(view.error());
+        tuple.elements.push_back(view.take());
+    }
+    return tuple;
+}
+
+Result<EvalTokenCaches> create_eval_token_caches(sandy::device::CpuDevice& device) {
+    sandy::device::DevicePagedPoolDesc localPoolDesc;
+    localPoolDesc.templateDesc = sandy::core::TensorDesc(
+        sandy::core::Shape({1, 1, sandy::core::Shape::kDynamic, 256}),
+        sandy::core::DType::BF16);
+    localPoolDesc.growDim = 2;
+    localPoolDesc.pageSize = 16;
+
+    sandy::device::DevicePagedPoolDesc globalPoolDesc;
+    globalPoolDesc.templateDesc = sandy::core::TensorDesc(
+        sandy::core::Shape({1, 1, sandy::core::Shape::kDynamic, 512}),
+        sandy::core::DType::BF16);
+    globalPoolDesc.growDim = 2;
+    globalPoolDesc.pageSize = 16;
+
+    EvalTokenCaches caches;
+    auto localPool = device.createPagedPool(localPoolDesc);
+    if (!localPool)
+        return make_error(localPool.error());
+    caches.localPool = *localPool;
+
+    auto globalPool = device.createPagedPool(globalPoolDesc);
+    if (!globalPool)
+        return make_error(globalPool.error());
+    caches.globalPool = *globalPool;
+
+    for (auto& id : caches.localK) {
+        auto tensor = device.allocPaged(caches.localPool, sandy::core::Shape({1, 1, 0, 256}));
+        if (!tensor)
+            return make_error(tensor.error());
+        id = *tensor;
+    }
+    for (auto& id : caches.localV) {
+        auto tensor = device.allocPaged(caches.localPool, sandy::core::Shape({1, 1, 0, 256}));
+        if (!tensor)
+            return make_error(tensor.error());
+        id = *tensor;
+    }
+    for (auto& id : caches.globalK) {
+        auto tensor = device.allocPaged(caches.globalPool, sandy::core::Shape({1, 1, 0, 512}));
+        if (!tensor)
+            return make_error(tensor.error());
+        id = *tensor;
+    }
+    for (auto& id : caches.globalV) {
+        auto tensor = device.allocPaged(caches.globalPool, sandy::core::Shape({1, 1, 0, 512}));
+        if (!tensor)
+            return make_error(tensor.error());
+        id = *tensor;
+    }
+
+    return caches;
+}
+
+Result<std::vector<sandy::engine::RunInput>> make_eval_inputs(
+        sandy::device::CpuDevice& device,
+        const EvalTokenCaches& caches,
+        int64_t token,
+        int64_t position) {
+    auto localK = make_paged_tuple(device, caches.localK);
+    if (!localK)
+        return make_error(localK.error());
+    auto localV = make_paged_tuple(device, caches.localV);
+    if (!localV)
+        return make_error(localV.error());
+    auto globalK = make_global_paged_tuple(device, caches.globalK);
+    if (!globalK)
+        return make_error(globalK.error());
+    auto globalV = make_global_paged_tuple(device, caches.globalV);
+    if (!globalV)
+        return make_error(globalV.error());
+
+    std::vector<sandy::engine::RunInput> inputs;
+    inputs.reserve(6);
+    inputs.push_back(make_i64_buffer("input_id", sandy::core::Shape({1, 1}), token));
+    inputs.push_back(make_i64_buffer("position_id", sandy::core::Shape({1}), position));
+    inputs.push_back(localK.take());
+    inputs.push_back(localV.take());
+    inputs.push_back(globalK.take());
+    inputs.push_back(globalV.take());
+    return inputs;
+}
+
+Result<sandy::engine::RunTensorTuple*> require_tuple_output(
+        std::vector<sandy::engine::RunOutput>& outputs,
+        size_t index) {
+    if (index >= outputs.size())
+        return make_error("runner output tuple index out of range");
+    auto* tuple = std::get_if<sandy::engine::RunTensorTuple>(&outputs[index]);
+    if (!tuple)
+        return make_error("runner expected tuple output");
+    return tuple;
+}
+
+Result<sandy::engine::TensorBufferPtr> require_tensor_tuple_element(
+        sandy::engine::RunTensorTuple& tuple,
+        size_t index) {
+    if (index >= tuple.elements.size())
+        return make_error("runner tuple element index out of range");
+    auto* tensor = std::get_if<sandy::engine::TensorBufferPtr>(&tuple.elements[index]);
+    if (!tensor || !*tensor)
+        return make_error("runner expected dense tensor tuple element");
+    return *tensor;
+}
+
+Result<sandy::engine::TensorBufferPtr> require_tensor_output(
+        std::vector<sandy::engine::RunOutput>& outputs,
+        size_t index) {
+    if (index >= outputs.size())
+        return make_error("runner output tensor index out of range");
+    auto* tensor = std::get_if<sandy::engine::TensorBufferPtr>(&outputs[index]);
+    if (!tensor || !*tensor)
+        return make_error("runner expected dense tensor output");
+    return *tensor;
+}
+
+Result<void> append_eval_outputs(
+        sandy::device::CpuDevice& device,
+        EvalTokenCaches& caches,
+        std::vector<sandy::engine::RunOutput>& outputs) {
+    auto nextK = require_tuple_output(outputs, 0);
+    if (!nextK)
+        return make_error(nextK.error());
+    auto nextV = require_tuple_output(outputs, 1);
+    if (!nextV)
+        return make_error(nextV.error());
+    if ((*nextK)->elements.size() != kGemma4E2BKVLayerCount ||
+        (*nextV)->elements.size() != kGemma4E2BKVLayerCount) {
+        return make_error("runner expected 15 K/V tensors from eval-token graph");
+    }
+
+    int localIndex = 0;
+    int globalIndex = 0;
+    for (int layer = 0; layer < kGemma4E2BKVLayerCount; layer++) {
+        auto k = require_tensor_tuple_element(**nextK, static_cast<size_t>(layer));
+        if (!k)
+            return make_error(k.error());
+        auto v = require_tensor_tuple_element(**nextV, static_cast<size_t>(layer));
+        if (!v)
+            return make_error(v.error());
+
+        if (layer % 5 == 4) {
+            auto appendK = device.appendPaged(caches.globalK[globalIndex], **k);
+            if (!appendK)
+                return make_error(appendK.error());
+            auto appendV = device.appendPaged(caches.globalV[globalIndex], **v);
+            if (!appendV)
+                return make_error(appendV.error());
+            globalIndex++;
+        } else {
+            auto appendK = device.appendPaged(caches.localK[localIndex], **k);
+            if (!appendK)
+                return make_error(appendK.error());
+            auto appendV = device.appendPaged(caches.localV[localIndex], **v);
+            if (!appendV)
+                return make_error(appendV.error());
+            localIndex++;
+        }
+    }
+
+    return {};
+}
+
 void usage() {
     fprintf(stderr,
             "usage: multi_gemma4_runner "
-            "<program.sandy.go> <weights.safetensors> <emit_count> <token_id>...\n");
+            "[--eval-token] <program.sandy.go> <weights.safetensors> "
+            "<emit_count> <token_id>...\n");
 }
 
 } // namespace
 
 int main(int argc, char* argv[]) {
     int arg = 1;
+    bool evalTokenMode = false;
+    if (arg < argc && std::string_view(argv[arg]) == "--eval-token") {
+        evalTokenMode = true;
+        arg++;
+    }
+
     if (argc - arg < 4) {
         usage();
         return 1;
@@ -162,6 +398,125 @@ int main(int argc, char* argv[]) {
     auto weights = sandy::weight::EagerSafeTensorWeights::load(weightsPath);
     sandy::engine::TensorMap weightMap;
     add_tensors_to_map(*weights, weightMap);
+
+    if (evalTokenMode) {
+        sandy::ir::mid_ir::MaterializeOptions options;
+        options.input_tensor_descs["input_id"] =
+            sandy::core::TensorDesc(
+                "input_id",
+                sandy::core::Shape({1, 1}),
+                sandy::core::DType::I64);
+        options.input_tensor_descs["position_id"] =
+            sandy::core::TensorDesc(
+                "position_id",
+                sandy::core::Shape({1}),
+                sandy::core::DType::I64);
+
+        auto midResult = compiler.materialize_mid_ir(highGraph, *weights, options);
+        if (!midResult) {
+            fprintf(stderr, "materialize error: %s\n", midResult.error().c_str());
+            return 1;
+        }
+
+        auto cpu = std::make_unique<sandy::device::CpuDevice>();
+        auto* cpuDevice = cpu.get();
+        std::vector<std::unique_ptr<sandy::device::Device>> devices;
+        devices.push_back(std::move(cpu));
+        sandy::engine::Engine engine(std::move(devices));
+        auto planResult = engine.compile(**midResult);
+        if (!planResult) {
+            fprintf(stderr, "plan error: %s\n", planResult.error().c_str());
+            return 1;
+        }
+
+        auto caches = create_eval_token_caches(*cpuDevice);
+        if (!caches) {
+            fprintf(stderr, "cache creation error: %s\n", caches.error().c_str());
+            return 1;
+        }
+
+        auto evalOnce = [&](int64_t token, int64_t position) {
+            auto inputs = make_eval_inputs(*cpuDevice, *caches, token, position);
+            if (!inputs)
+                return Result<std::vector<sandy::engine::RunOutput>>(make_error(inputs.error()));
+            return engine.runValues(**planResult, *inputs, weightMap);
+        };
+
+        int64_t nextToken = 0;
+        float nextScore = 0.0f;
+        for (size_t i = 0; i < tokens.size(); i++) {
+            auto run = evalOnce(tokens[i], static_cast<int64_t>(i));
+            if (!run) {
+                fprintf(stderr, "run error at prompt pos %zu: %s\n", i, run.error().c_str());
+                return 1;
+            }
+            if (emitCount > 0 && i + 1 == tokens.size()) {
+                auto logits = require_tensor_output(*run, 0);
+                if (!logits) {
+                    fprintf(stderr, "logits output error: %s\n", logits.error().c_str());
+                    return 1;
+                }
+                auto next = argmax_at(**logits, 0);
+                if (!next) {
+                    fprintf(stderr, "argmax error at prompt pos %zu: %s\n", i, next.error().c_str());
+                    return 1;
+                }
+                auto pair = next.take();
+                nextToken = pair.first;
+                nextScore = pair.second;
+            }
+        }
+
+        std::vector<int64_t> generated;
+        for (int64_t step = 0; step < emitCount; step++) {
+            auto emitted = nextToken;
+            auto score = nextScore;
+            generated.push_back(emitted);
+            tokens.push_back(emitted);
+            printf("[step %lld] pos=%lld token=%lld score=%.6g\n",
+                   static_cast<long long>(step),
+                   static_cast<long long>(tokens.size() - 2),
+                   static_cast<long long>(emitted),
+                   score);
+            fflush(stdout);
+
+            if (step + 1 >= emitCount)
+                break;
+
+            auto position = static_cast<int64_t>(tokens.size() - 1);
+            auto run = evalOnce(emitted, position);
+            if (!run) {
+                fprintf(stderr, "run error at generated pos %lld: %s\n",
+                        static_cast<long long>(position),
+                        run.error().c_str());
+                return 1;
+            }
+            auto logits = require_tensor_output(*run, 0);
+            if (!logits) {
+                fprintf(stderr, "logits output error: %s\n", logits.error().c_str());
+                return 1;
+            }
+            auto next = argmax_at(**logits, 0);
+            if (!next) {
+                fprintf(stderr, "argmax error at generated pos %lld: %s\n",
+                        static_cast<long long>(position),
+                        next.error().c_str());
+                return 1;
+            }
+            auto pair = next.take();
+            nextToken = pair.first;
+            nextScore = pair.second;
+        }
+
+        printf("[generated]");
+        for (int64_t token : generated)
+            printf(" %lld", static_cast<long long>(token));
+        printf("\n[all_tokens]");
+        for (int64_t token : tokens)
+            printf(" %lld", static_cast<long long>(token));
+        printf("\n");
+        return 0;
+    }
 
     std::vector<int64_t> generated;
     for (int64_t step = 0; step < emitCount; step++) {

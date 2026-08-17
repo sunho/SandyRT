@@ -404,6 +404,42 @@ Result<TestTensor> sliding_query_key_score_calc(
     return out.take();
 }
 
+Result<TestTensor> sliding_query_key_score_calc(
+        std::span<const uint8_t> q,
+        sandy::core::TensorDesc qDesc,
+        std::span<const uint8_t> k,
+        sandy::core::TensorDesc kDesc,
+        std::span<const uint8_t> positionIds,
+        sandy::core::TensorDesc positionDesc,
+        int64_t window) {
+    int rank = qDesc.shape.rank();
+    std::vector<int64_t> outDims;
+    if (rank == 4)
+        outDims.push_back(qDesc.shape.dim(0));
+    outDims.push_back(qDesc.shape.dim(rank - 3));
+    outDims.push_back(qDesc.shape.dim(rank - 2));
+    outDims.push_back(kDesc.shape.dim(rank - 2));
+    auto out = make_output(sandy::core::TensorDesc(sandy::core::Shape(outDims), qDesc.dtype));
+    if (!out) return make_error(out.error());
+    auto qRef = tensor_ref(q, qDesc);
+    if (!qRef) return make_error(qRef.error());
+    auto kRef = tensor_ref(k, kDesc);
+    if (!kRef) return make_error(kRef.error());
+    auto positionRef = tensor_ref(positionIds, positionDesc);
+    if (!positionRef) return make_error(positionRef.error());
+    auto outRef = mutable_tensor_ref(*out);
+    if (!outRef) return make_error(outRef.error());
+    auto result = sandy::core::sliding_query_key_score(
+        *qRef,
+        *kRef,
+        *positionRef,
+        window,
+        -1.0f,
+        *outRef);
+    if (!result) return make_error(result.error());
+    return out.take();
+}
+
 Result<TestTensor> softmax_calc(
         std::span<const uint8_t> x,
         sandy::core::TensorDesc xDesc,
@@ -1167,6 +1203,26 @@ TEST(TensorCalcTest, SlidingQueryKeyScoreF32GroupedQueryBatched) {
     EXPECT_TRUE(std::isinf(read_f32(out.data, 3)) && read_f32(out.data, 3) < 0.0f);
 }
 
+TEST(TensorCalcTest, SlidingQueryKeyScoreUsesRuntimePositionIdsForCausalMask) {
+    auto q = f32_bytes({1.0f});
+    auto k = f32_bytes({10.0f, 20.0f, 30.0f, 40.0f});
+    auto position = i64_bytes({2});
+
+    auto result = sliding_query_key_score_calc(
+        q, sandy::core::TensorDesc(sandy::core::Shape({1, 1, 1, 1}), sandy::core::DType::F32),
+        k, sandy::core::TensorDesc(sandy::core::Shape({1, 1, 4, 1}), sandy::core::DType::F32),
+        position, sandy::core::TensorDesc(sandy::core::Shape({1}), sandy::core::DType::I64),
+        0);
+
+    ASSERT_TRUE(result) << result.error();
+    auto out = result.take();
+    EXPECT_EQ(out.desc.shape, sandy::core::Shape({1, 1, 1, 4}));
+    EXPECT_FLOAT_EQ(read_f32(out.data, 0), 10.0f);
+    EXPECT_FLOAT_EQ(read_f32(out.data, 1), 20.0f);
+    EXPECT_FLOAT_EQ(read_f32(out.data, 2), 30.0f);
+    EXPECT_TRUE(std::isinf(read_f32(out.data, 3)) && read_f32(out.data, 3) < 0.0f);
+}
+
 TEST(TensorCalcTest, SoftmaxF32LastDim) {
     auto x = f32_bytes({
         1.0f, 1.0f,
@@ -1190,6 +1246,18 @@ TEST(TensorCalcTest, SoftmaxF32LastDim) {
     EXPECT_NEAR(read_f32(out.data, 3), 1.0f - inv, 1.0e-6f);
     EXPECT_FLOAT_EQ(read_f32(out.data, 4), 0.0f);
     EXPECT_FLOAT_EQ(read_f32(out.data, 5), 0.0f);
+}
+
+TEST(TensorCalcTest, SoftmaxAllowsZeroElementAxis) {
+    std::vector<uint8_t> x;
+    auto result = softmax_calc(
+        x, sandy::core::TensorDesc(sandy::core::Shape({1, 8, 1, 0}), sandy::core::DType::F32),
+        -1);
+
+    ASSERT_TRUE(result) << result.error();
+    auto out = result.take();
+    EXPECT_EQ(out.desc.shape, sandy::core::Shape({1, 8, 1, 0}));
+    EXPECT_TRUE(out.data.empty());
 }
 
 TEST(TensorCalcTest, SoftmaxF32MiddleDim) {
@@ -1267,6 +1335,16 @@ TEST(TensorCalcTest, EmbeddingF32WithI64IdsKeepsLeadingDims) {
     EXPECT_FLOAT_EQ(read_f32(out.data, 5), 2.0f);
     EXPECT_FLOAT_EQ(read_f32(out.data, 6), 5.0f);
     EXPECT_FLOAT_EQ(read_f32(out.data, 7), 6.0f);
+}
+
+TEST(TensorCalcTest, TensorRefAllowsZeroElementStaticShape) {
+    std::vector<uint8_t> bytes;
+    auto ref = sandy::core::make_tensor_ref(
+        sandy::core::TensorDesc(
+            sandy::core::Shape({1, 1, 0, 256}),
+            sandy::core::DType::BF16),
+        bytes);
+    ASSERT_TRUE(ref) << ref.error();
 }
 
 TEST(TensorCalcTest, RoPEF32AppliesToLastDimForArbitraryRank) {
