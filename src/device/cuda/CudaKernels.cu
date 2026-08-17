@@ -12,15 +12,6 @@ Result<void> launch_cuda_layout_transform(
     return unimplemented("layout_transform");
 }
 
-Result<void> launch_cuda_softmax(
-        const CudaLaunchContext& context,
-        const CudaSoftmaxProgram&) {
-    auto valid = validate_context(context, 1, 1, "softmax");
-    if (!valid)
-        return make_error(valid.error());
-    return unimplemented("softmax");
-}
-
 Result<void> launch_cuda_rope(
         const CudaLaunchContext& context,
         const CudaRoPEProgram&) {

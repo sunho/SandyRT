@@ -16,6 +16,7 @@ if(SANDY_ENABLE_CUDA)
     cuda/CudaKernels.cu
     cuda/CudaMatMulKernels.cu
     cuda/CudaNormKernels.cu
+    cuda/CudaSoftmaxKernels.cu
   )
 endif()
 
@@ -57,6 +58,7 @@ if(SANDY_ENABLE_CUDA)
     cuda/CudaKernels.cu
     cuda/CudaMatMulKernels.cu
     cuda/CudaNormKernels.cu
+    cuda/CudaSoftmaxKernels.cu
     PROPERTIES LANGUAGE CUDA
   )
 endif()
