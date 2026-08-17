@@ -11,7 +11,10 @@ if(SANDY_ENABLE_CUDA)
     cuda/CudaRuntime.cpp
     cuda/CudaDevice.cpp
     cuda/CudaPagedTensor.cpp
+    cuda/CudaElementwiseKernels.cu
+    cuda/CudaGatherKernels.cu
     cuda/CudaKernels.cu
+    cuda/CudaMatMulKernels.cu
   )
 endif()
 
@@ -47,7 +50,11 @@ if(SANDY_ENABLE_CUDA)
     CUDA_STANDARD_REQUIRED ON
   )
 
-  set_source_files_properties(cuda/CudaKernels.cu PROPERTIES
-    LANGUAGE CUDA
+  set_source_files_properties(
+    cuda/CudaElementwiseKernels.cu
+    cuda/CudaGatherKernels.cu
+    cuda/CudaKernels.cu
+    cuda/CudaMatMulKernels.cu
+    PROPERTIES LANGUAGE CUDA
   )
 endif()

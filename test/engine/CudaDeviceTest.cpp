@@ -39,6 +39,26 @@ std::vector<uint8_t> f32_bytes(std::initializer_list<float> values) {
     return bytes;
 }
 
+std::vector<uint8_t> i32_bytes(std::initializer_list<int32_t> values) {
+    std::vector<uint8_t> bytes(values.size() * sizeof(int32_t));
+    size_t index = 0;
+    for (int32_t value : values) {
+        std::memcpy(bytes.data() + index * sizeof(int32_t), &value, sizeof(int32_t));
+        index++;
+    }
+    return bytes;
+}
+
+std::vector<uint8_t> i64_bytes(std::initializer_list<int64_t> values) {
+    std::vector<uint8_t> bytes(values.size() * sizeof(int64_t));
+    size_t index = 0;
+    for (int64_t value : values) {
+        std::memcpy(bytes.data() + index * sizeof(int64_t), &value, sizeof(int64_t));
+        index++;
+    }
+    return bytes;
+}
+
 std::shared_ptr<TestTensorBuffer> make_f32_buffer(
         const std::string& name,
         sandy::core::Shape shape,
@@ -46,6 +66,24 @@ std::shared_ptr<TestTensorBuffer> make_f32_buffer(
     return std::make_shared<TestTensorBuffer>(
         sandy::core::TensorDesc(name, std::move(shape), sandy::core::DType::F32),
         f32_bytes(values));
+}
+
+std::shared_ptr<TestTensorBuffer> make_i32_buffer(
+        const std::string& name,
+        sandy::core::Shape shape,
+        std::initializer_list<int32_t> values) {
+    return std::make_shared<TestTensorBuffer>(
+        sandy::core::TensorDesc(name, std::move(shape), sandy::core::DType::I32),
+        i32_bytes(values));
+}
+
+std::shared_ptr<TestTensorBuffer> make_i64_buffer(
+        const std::string& name,
+        sandy::core::Shape shape,
+        std::initializer_list<int64_t> values) {
+    return std::make_shared<TestTensorBuffer>(
+        sandy::core::TensorDesc(name, std::move(shape), sandy::core::DType::I64),
+        i64_bytes(values));
 }
 
 float read_f32(std::span<const uint8_t> bytes, size_t index) {
@@ -223,6 +261,171 @@ TEST(CudaDeviceTest, RunSuffixBroadcastAddF32) {
         device,
         *outputBuffer,
         {101.0f, 202.0f, 303.0f, 110.0f, 220.0f, 330.0f});
+}
+
+TEST(CudaDeviceTest, RunGatherF32WithI32Ids) {
+    if (auto reason = cuda_device_skip_reason(); !reason.empty())
+        GTEST_SKIP() << reason;
+    namespace kir = sandy::ir::kernel_ir;
+
+    kir::Graph graph;
+    auto ids = graph.addValue(tensor_type({3}, sandy::core::DType::I32));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 0, ""},
+        ids);
+    auto table = graph.addValue(tensor_type({4, 2}));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 1, ""},
+        table);
+    auto output = graph.addValue(tensor_type({3, 2}));
+    auto* op = graph.addOp<kir::GatherKernelOp>(ids, table, output);
+    graph.setOutputs({output});
+
+    sandy::device::CudaDevice device;
+    auto compiled = device.compile(graph);
+    ASSERT_TRUE(compiled) << compiled.error();
+
+    auto idsHost = make_i32_buffer("ids", sandy::core::Shape({3}), {2, 0, 3});
+    auto tableHost = make_f32_buffer(
+        "table",
+        sandy::core::Shape({4, 2}),
+        {
+            1.0f, 2.0f,
+            3.0f, 4.0f,
+            5.0f, 6.0f,
+            7.0f, 8.0f,
+        });
+    auto idsBuffer = device.load(*idsHost);
+    ASSERT_TRUE(idsBuffer) << idsBuffer.error();
+    auto tableBuffer = device.load(*tableHost);
+    ASSERT_TRUE(tableBuffer) << tableBuffer.error();
+    auto outputBuffer = device.alloc(
+        sandy::core::TensorDesc({3, 2}, sandy::core::DType::F32));
+    ASSERT_TRUE(outputBuffer) << outputBuffer.error();
+
+    std::vector<sandy::device::DeviceRunValue> inputs = {
+        tensor_view(device, *idsBuffer, idsHost->desc()),
+        tensor_view(device, *tableBuffer, tableHost->desc()),
+    };
+    std::vector<sandy::device::DeviceRunValue> outputs = {
+        tensor_view(
+            device,
+            *outputBuffer,
+            sandy::core::TensorDesc({3, 2}, sandy::core::DType::F32)),
+    };
+    auto run = device.run(*compiled, op->id(), inputs, outputs);
+    ASSERT_TRUE(run) << run.error();
+
+    expect_f32_output(device, *outputBuffer, {5.0f, 6.0f, 1.0f, 2.0f, 7.0f, 8.0f});
+}
+
+TEST(CudaDeviceTest, RunGatherF32WithI64IdsKeepsLeadingDims) {
+    if (auto reason = cuda_device_skip_reason(); !reason.empty())
+        GTEST_SKIP() << reason;
+    namespace kir = sandy::ir::kernel_ir;
+
+    kir::Graph graph;
+    auto ids = graph.addValue(tensor_type({2, 2}, sandy::core::DType::I64));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 0, ""},
+        ids);
+    auto table = graph.addValue(tensor_type({4, 2}));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 1, ""},
+        table);
+    auto output = graph.addValue(tensor_type({2, 2, 2}));
+    auto* op = graph.addOp<kir::GatherKernelOp>(ids, table, output);
+    graph.setOutputs({output});
+
+    sandy::device::CudaDevice device;
+    auto compiled = device.compile(graph);
+    ASSERT_TRUE(compiled) << compiled.error();
+
+    auto idsHost = make_i64_buffer("ids", sandy::core::Shape({2, 2}), {1, 3, 0, 2});
+    auto tableHost = make_f32_buffer(
+        "table",
+        sandy::core::Shape({4, 2}),
+        {
+            1.0f, 2.0f,
+            3.0f, 4.0f,
+            5.0f, 6.0f,
+            7.0f, 8.0f,
+        });
+    auto idsBuffer = device.load(*idsHost);
+    ASSERT_TRUE(idsBuffer) << idsBuffer.error();
+    auto tableBuffer = device.load(*tableHost);
+    ASSERT_TRUE(tableBuffer) << tableBuffer.error();
+    auto outputBuffer = device.alloc(
+        sandy::core::TensorDesc({2, 2, 2}, sandy::core::DType::F32));
+    ASSERT_TRUE(outputBuffer) << outputBuffer.error();
+
+    std::vector<sandy::device::DeviceRunValue> inputs = {
+        tensor_view(device, *idsBuffer, idsHost->desc()),
+        tensor_view(device, *tableBuffer, tableHost->desc()),
+    };
+    std::vector<sandy::device::DeviceRunValue> outputs = {
+        tensor_view(
+            device,
+            *outputBuffer,
+            sandy::core::TensorDesc({2, 2, 2}, sandy::core::DType::F32)),
+    };
+    auto run = device.run(*compiled, op->id(), inputs, outputs);
+    ASSERT_TRUE(run) << run.error();
+
+    expect_f32_output(
+        device,
+        *outputBuffer,
+        {3.0f, 4.0f, 7.0f, 8.0f, 1.0f, 2.0f, 5.0f, 6.0f});
+}
+
+TEST(CudaDeviceTest, RunGatherReportsOutOfRangeId) {
+    if (auto reason = cuda_device_skip_reason(); !reason.empty())
+        GTEST_SKIP() << reason;
+    namespace kir = sandy::ir::kernel_ir;
+
+    kir::Graph graph;
+    auto ids = graph.addValue(tensor_type({2}, sandy::core::DType::I64));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 0, ""},
+        ids);
+    auto table = graph.addValue(tensor_type({2, 2}));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 1, ""},
+        table);
+    auto output = graph.addValue(tensor_type({2, 2}));
+    auto* op = graph.addOp<kir::GatherKernelOp>(ids, table, output);
+    graph.setOutputs({output});
+
+    sandy::device::CudaDevice device;
+    auto compiled = device.compile(graph);
+    ASSERT_TRUE(compiled) << compiled.error();
+
+    auto idsHost = make_i64_buffer("ids", sandy::core::Shape({2}), {0, 2});
+    auto tableHost = make_f32_buffer(
+        "table",
+        sandy::core::Shape({2, 2}),
+        {1.0f, 2.0f, 3.0f, 4.0f});
+    auto idsBuffer = device.load(*idsHost);
+    ASSERT_TRUE(idsBuffer) << idsBuffer.error();
+    auto tableBuffer = device.load(*tableHost);
+    ASSERT_TRUE(tableBuffer) << tableBuffer.error();
+    auto outputBuffer = device.alloc(
+        sandy::core::TensorDesc({2, 2}, sandy::core::DType::F32));
+    ASSERT_TRUE(outputBuffer) << outputBuffer.error();
+
+    std::vector<sandy::device::DeviceRunValue> inputs = {
+        tensor_view(device, *idsBuffer, idsHost->desc()),
+        tensor_view(device, *tableBuffer, tableHost->desc()),
+    };
+    std::vector<sandy::device::DeviceRunValue> outputs = {
+        tensor_view(
+            device,
+            *outputBuffer,
+            sandy::core::TensorDesc({2, 2}, sandy::core::DType::F32)),
+    };
+    auto run = device.run(*compiled, op->id(), inputs, outputs);
+    ASSERT_FALSE(run);
+    EXPECT_NE(run.error().find("embedding id out of range"), std::string::npos);
 }
 
 TEST(CudaDeviceTest, RunMatMulF32) {

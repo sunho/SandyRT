@@ -374,12 +374,15 @@ int main(int argc, char* argv[]) {
     int arg = 1;
     bool evalTokenMode = false;
     bool profile = false;
+    bool dumpKernelIR = false;
     while (arg < argc && std::string_view(argv[arg]).starts_with("--")) {
         std::string_view option(argv[arg]);
         if (option == "--eval-token") {
             evalTokenMode = true;
         } else if (option == "--profile") {
             profile = true;
+        } else if (option == "--dump-kernel-ir") {
+            dumpKernelIR = true;
         } else {
             fprintf(stderr, "unknown option: %s\n", argv[arg]);
             usage();
@@ -450,6 +453,10 @@ int main(int argc, char* argv[]) {
         if (!planResult) {
             fprintf(stderr, "plan error: %s\n", planResult.error().c_str());
             return 1;
+        }
+        if (dumpKernelIR) {
+            (*planResult)->graph->dump();
+            return 0;
         }
 
         auto caches = create_eval_token_caches(*cpuDevice);
@@ -621,6 +628,10 @@ int main(int argc, char* argv[]) {
                     static_cast<long long>(step),
                     planResult.error().c_str());
             return 1;
+        }
+        if (dumpKernelIR) {
+            (*planResult)->graph->dump();
+            return 0;
         }
 
         auto runResult = engine.run(**planResult, inputs, weightMap);
