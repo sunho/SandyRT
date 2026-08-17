@@ -30,6 +30,7 @@ const char* op_kind_name(OpKind kind) {
         case OpKind::Permute:   return "permute";
         case OpKind::PagedAppend: return "paged_append";
         case OpKind::SlidingQueryKeyScore: return "sliding_query_key_score";
+        case OpKind::Attention: return "attention";
         case OpKind::Softmax:   return "softmax";
         case OpKind::Embedding: return "embedding";
         case OpKind::RoPE:      return "rope";
@@ -544,6 +545,144 @@ public:
     }
 };
 
+class AttentionOpDef : public OpDef {
+public:
+    OpKind kind() const override { return OpKind::Attention; }
+    const char* name() const override { return "attention"; }
+    std::vector<ValueType> infer_types(
+        std::span<Value* const> operands,
+        const AttrMap&) const override
+    {
+        return {{operands[0]->shape, operands[0]->dtype}};
+    }
+    void verify(
+        std::span<Value* const> operands,
+        const AttrMap& attrs) const override
+    {
+        if (operands.size() != 3 && operands.size() != 4) {
+            fprintf(stderr, "attention expects 3 or 4 operands, got %zu\n",
+                    operands.size());
+            abort();
+        }
+        if (!is_float_compute_dtype(operands[0]->dtype) ||
+            !is_float_compute_dtype(operands[1]->dtype) ||
+            !is_float_compute_dtype(operands[2]->dtype)) {
+            fprintf(stderr, "attention operands must be a supported floating dtype\n");
+            abort();
+        }
+        if (operands[0]->dtype != operands[1]->dtype ||
+            operands[0]->dtype != operands[2]->dtype) {
+            fprintf(stderr, "attention operands must have the same dtype\n");
+            abort();
+        }
+
+        const auto& qShape = operands[0]->shape;
+        const auto& kShape = operands[1]->shape;
+        const auto& vShape = operands[2]->shape;
+        int rank = qShape.rank();
+        if ((rank != 3 && rank != 4) ||
+            kShape.rank() != rank ||
+            vShape.rank() != rank) {
+            fprintf(stderr, "attention q, k, and v must all have rank 3 or rank 4\n");
+            abort();
+        }
+
+        if (rank == 4) {
+            int64_t qBatch = qShape.dim(0);
+            int64_t kBatch = kShape.dim(0);
+            int64_t vBatch = vShape.dim(0);
+            if ((qBatch >= 0 && kBatch >= 0 && qBatch != kBatch) ||
+                (qBatch >= 0 && vBatch >= 0 && qBatch != vBatch)) {
+                fprintf(stderr, "attention batch dimension mismatch\n");
+                abort();
+            }
+        }
+
+        int64_t heads = qShape.dim(rank - 3);
+        int64_t kvHeads = kShape.dim(rank - 3);
+        int64_t vHeads = vShape.dim(rank - 3);
+        int64_t kSeq = kShape.dim(rank - 2);
+        int64_t vSeq = vShape.dim(rank - 2);
+        int64_t headDim = qShape.dim(rank - 1);
+        int64_t kHeadDim = kShape.dim(rank - 1);
+        int64_t vHeadDim = vShape.dim(rank - 1);
+
+        if ((heads >= 0 && heads <= 0) ||
+            (kvHeads >= 0 && kvHeads <= 0) ||
+            (vHeads >= 0 && vHeads <= 0)) {
+            fprintf(stderr, "attention head counts must be positive\n");
+            abort();
+        }
+        if (kvHeads >= 0 && vHeads >= 0 && kvHeads != vHeads) {
+            fprintf(stderr, "attention k and v head count mismatch\n");
+            abort();
+        }
+        if (kSeq >= 0 && vSeq >= 0 && kSeq != vSeq) {
+            fprintf(stderr, "attention k and v sequence dimension mismatch\n");
+            abort();
+        }
+        if ((headDim >= 0 && kHeadDim >= 0 && headDim != kHeadDim) ||
+            (headDim >= 0 && vHeadDim >= 0 && headDim != vHeadDim)) {
+            fprintf(stderr, "attention head dimension mismatch\n");
+            abort();
+        }
+
+        // Grouped-query attention uses contiguous KV-head groups:
+        // kv_head = query_head / (query_heads / kv_heads). This is not
+        // NumPy broadcasting, so query_heads must be divisible by kv_heads.
+        if (heads >= 0 && kvHeads >= 0 && heads % kvHeads != 0) {
+            fprintf(stderr, "attention heads must be divisible by kv_heads\n");
+            abort();
+        }
+
+        if (operands.size() == 4) {
+            auto* positionOffsets = operands[3];
+            if (positionOffsets->dtype != core::DType::I32 &&
+                positionOffsets->dtype != core::DType::I64) {
+                fprintf(stderr, "attention position_offsets must be i32 or i64\n");
+                abort();
+            }
+            if (rank == 4) {
+                if (positionOffsets->shape.rank() != 1) {
+                    fprintf(stderr, "attention batched position_offsets must have rank 1\n");
+                    abort();
+                }
+                int64_t qBatch = qShape.dim(0);
+                int64_t offsets = positionOffsets->shape.dim(0);
+                if (qBatch >= 0 && offsets >= 0 && qBatch != offsets) {
+                    fprintf(stderr, "attention position_offsets length must match batch\n");
+                    abort();
+                }
+            } else {
+                int64_t numel = positionOffsets->shape.numel();
+                if (numel >= 0 && numel != 1) {
+                    fprintf(stderr, "attention unbatched position_offsets must have one element\n");
+                    abort();
+                }
+            }
+        }
+
+        auto window = attrs.find("window");
+        if (window != attrs.end() && window->second.kind != AttrValue::Int) {
+            fprintf(stderr, "attention window attr must be int\n");
+            abort();
+        }
+        if (window != attrs.end() && window->second.intVal < 0) {
+            fprintf(stderr, "attention window attr must be >= 0\n");
+            abort();
+        }
+        auto scale = attrs.find("scale");
+        if (scale != attrs.end() && scale->second.kind != AttrValue::Float) {
+            fprintf(stderr, "attention scale attr must be float\n");
+            abort();
+        }
+        if (scale != attrs.end() && scale->second.floatVal <= 0.0) {
+            fprintf(stderr, "attention scale attr must be > 0\n");
+            abort();
+        }
+    }
+};
+
 class SoftmaxOpDef : public OpDef {
 public:
     OpKind kind() const override { return OpKind::Softmax; }
@@ -864,6 +1003,7 @@ void register_all_ops() {
     static PermuteOpDef permute_def;
     static PagedAppendOpDef paged_append_def;
     static SlidingQueryKeyScoreOpDef sliding_query_key_score_def;
+    static AttentionOpDef attention_def;
     static SoftmaxOpDef softmax_def;
     static EmbeddingOpDef embedding_def;
     static RoPEOpDef rope_def;
@@ -883,6 +1023,7 @@ void register_all_ops() {
     reg.add(&permute_def);
     reg.add(&paged_append_def);
     reg.add(&sliding_query_key_score_def);
+    reg.add(&attention_def);
     reg.add(&softmax_def);
     reg.add(&embedding_def);
     reg.add(&rope_def);
@@ -1310,6 +1451,24 @@ Value* Builder::createSlidingQueryKeyScore(Value* q, Value* k, Value* positionId
     if (scale > 0.0f)
         attrs["scale"] = AttrValue::make_float(scale);
     return createOp(OpKind::SlidingQueryKeyScore, operands, attrs)[0];
+}
+
+Value* Builder::createAttention(Value* q, Value* k, Value* v, int64_t window, float scale) {
+    Value* operands[] = {q, k, v};
+    AttrMap attrs;
+    attrs["window"] = AttrValue::make_int(window);
+    if (scale > 0.0f)
+        attrs["scale"] = AttrValue::make_float(scale);
+    return createOp(OpKind::Attention, operands, attrs)[0];
+}
+
+Value* Builder::createAttention(Value* q, Value* k, Value* v, Value* positionOffsets, int64_t window, float scale) {
+    Value* operands[] = {q, k, v, positionOffsets};
+    AttrMap attrs;
+    attrs["window"] = AttrValue::make_int(window);
+    if (scale > 0.0f)
+        attrs["scale"] = AttrValue::make_float(scale);
+    return createOp(OpKind::Attention, operands, attrs)[0];
 }
 
 Value* Builder::createSoftmax(Value* x, int64_t dim) {

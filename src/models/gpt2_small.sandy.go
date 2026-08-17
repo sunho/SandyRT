@@ -12,9 +12,7 @@ func gpt2_attention(x Tensor) Tensor {
         k = __permute(k, dims=[0, 2, 1, 3])
         v = __permute(v, dims=[0, 2, 1, 3])
 
-        scores := __sliding_query_key_score(q, k, window=0)
-        probs := __softmax(scores, dim=-1)
-        ctx := __matmul(probs, v)
+        ctx := __attention(q, k, v, window=0)
 
         ctx = __permute(ctx, dims=[0, 2, 1, 3])
         ctx = __reshape(ctx, shape=[-1, 16, 768])

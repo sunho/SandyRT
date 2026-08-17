@@ -401,6 +401,39 @@ TEST_F(MidIRTest, SlidingQueryKeyScoreTypeInferenceSupportsRank3AndRank4) {
     EXPECT_EQ(bout->def->kind, sandy::ir::mid_ir::OpKind::SlidingQueryKeyScore);
 }
 
+TEST_F(MidIRTest, AttentionTypeInferenceSupportsGroupedKVHeads) {
+    sandy::ir::mid_ir::Graph graph;
+    sandy::ir::mid_ir::Builder builder(graph);
+
+    auto* q = builder.createInput(0, sandy::core::Shape({2, 8, 3, 4}), sandy::core::DType::F32);
+    auto* k = builder.createInput(1, sandy::core::Shape({2, 2, 5, 4}), sandy::core::DType::F32);
+    auto* v = builder.createInput(2, sandy::core::Shape({2, 2, 5, 4}), sandy::core::DType::F32);
+    auto* out = builder.createAttention(q, k, v, 512, 1.0f);
+
+    EXPECT_EQ(out->shape, q->shape);
+    EXPECT_EQ(out->dtype, sandy::core::DType::F32);
+    EXPECT_EQ(out->def->kind, sandy::ir::mid_ir::OpKind::Attention);
+    EXPECT_EQ(out->def->attrs.at("window").intVal, 512);
+    EXPECT_EQ(out->def->attrs.at("scale").floatVal, 1.0);
+}
+
+TEST_F(MidIRTest, AttentionTypeInferenceSupportsBatchedPositionOffsets) {
+    sandy::ir::mid_ir::Graph graph;
+    sandy::ir::mid_ir::Builder builder(graph);
+
+    auto* q = builder.createInput(0, sandy::core::Shape({2, 8, 1, 4}), sandy::core::DType::F32);
+    auto* k = builder.createInput(1, sandy::core::Shape({2, 2, 5, 4}), sandy::core::DType::F32);
+    auto* v = builder.createInput(2, sandy::core::Shape({2, 2, 5, 4}), sandy::core::DType::F32);
+    auto* positionOffsets = builder.createInput(3, sandy::core::Shape({2}), sandy::core::DType::I64);
+    auto* out = builder.createAttention(q, k, v, positionOffsets, 512, 1.0f);
+
+    EXPECT_EQ(out->shape, q->shape);
+    EXPECT_EQ(out->dtype, sandy::core::DType::F32);
+    EXPECT_EQ(out->def->kind, sandy::ir::mid_ir::OpKind::Attention);
+    ASSERT_EQ(out->def->operands.size(), 4u);
+    EXPECT_EQ(out->def->operands[3], positionOffsets);
+}
+
 TEST_F(MidIRTest, SoftmaxTypeInference) {
     sandy::ir::mid_ir::Graph graph;
     sandy::ir::mid_ir::Builder builder(graph);

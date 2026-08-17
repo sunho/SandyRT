@@ -263,21 +263,20 @@ func f() {
 TEST(Parser, FunctionCallWithNamedArgs) {
     auto prog = parseSource(R"(
 func f() {
-    x := __kv_attention(h, @weight, heads=8, kv_heads=1)
+    x := __attention(q, k, v, window=512)
 }
 )");
     auto& stmt = prog.funcs[0].body[0];
     auto& call = stmt->value;
     ASSERT_EQ(call->kind, Expr::Call);
-    EXPECT_EQ(call->left->sval, "__kv_attention");
-    ASSERT_EQ(call->args.size(), 2u);
-    EXPECT_EQ(call->args[0]->sval, "h");
-    EXPECT_EQ(call->args[1]->kind, Expr::WeightLit);
-    ASSERT_EQ(call->namedArgs.size(), 2u);
-    EXPECT_EQ(call->namedArgs[0].name, "heads");
-    EXPECT_EQ(call->namedArgs[0].value->ival, 8);
-    EXPECT_EQ(call->namedArgs[1].name, "kv_heads");
-    EXPECT_EQ(call->namedArgs[1].value->ival, 1);
+    EXPECT_EQ(call->left->sval, "__attention");
+    ASSERT_EQ(call->args.size(), 3u);
+    EXPECT_EQ(call->args[0]->sval, "q");
+    EXPECT_EQ(call->args[1]->sval, "k");
+    EXPECT_EQ(call->args[2]->sval, "v");
+    ASSERT_EQ(call->namedArgs.size(), 1u);
+    EXPECT_EQ(call->namedArgs[0].name, "window");
+    EXPECT_EQ(call->namedArgs[0].value->ival, 512);
 }
 
 TEST(Parser, FunctionCallWithIntListNamedArg) {
@@ -371,14 +370,7 @@ TEST(Parser, GemmaLayerStructure) {
 func gemma_kv_layer(x Tensor, i int, window int, head_dim int, rope_theta float) (Tensor, Tensor) {
     weight_scope "layers.{i}" {
         h := __rms_norm(x, @input_layernorm.weight)
-        h, kv := __kv_attention(h,
-            @self_attn.q_proj.weight,
-            @self_attn.k_proj.weight,
-            @self_attn.v_proj.weight,
-            @self_attn.o_proj.weight,
-            heads=8, kv_heads=1,
-            head_dim=head_dim, window=window, rope_theta=rope_theta,
-        )
+        h = __attention(q, k, v, window=window)
         h = __rms_norm(h, @post_attention_layernorm.weight)
         x = __add(x, h)
         h = __rms_norm(x, @pre_feedforward_layernorm.weight)

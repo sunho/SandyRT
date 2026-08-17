@@ -31,6 +31,7 @@ enum class OpKind {
     Permute,
     PagedAppend,
     SlidingQueryKeyScore,
+    Attention,
     Softmax,
     Embedding,
     RoPE,
@@ -221,6 +222,8 @@ public:
     void createPagedAppend(Value* cache, Value* chunk);
     Value* createSlidingQueryKeyScore(Value* q, Value* k, int64_t window = 0, float scale = -1.0f);
     Value* createSlidingQueryKeyScore(Value* q, Value* k, Value* positionIds, int64_t window = 0, float scale = -1.0f);
+    Value* createAttention(Value* q, Value* k, Value* v, int64_t window = 0, float scale = -1.0f);
+    Value* createAttention(Value* q, Value* k, Value* v, Value* positionOffsets, int64_t window = 0, float scale = -1.0f);
     Value* createSoftmax(Value* x, int64_t dim = -1);
     Value* createEmbedding(Value* ids, Value* weight);
     Value* createRoPE(Value* x, float theta = 10000.0f, int64_t rotary_dim = -1, bool split_half = false);

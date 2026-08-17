@@ -53,9 +53,7 @@ func gemma_local_kv_attention(x Tensor) (Tensor, Tensor, Tensor) {
         q = __rope(q, rope_theta=10000.0, split_half=1)
         k = __rope(k, rope_theta=10000.0, split_half=1)
 
-        scores := __sliding_query_key_score(q, k, window=512, scale=1.0)
-        probs := __softmax(scores, dim=-1)
-        ctx := __matmul(probs, v)
+        ctx := __attention(q, k, v, window=512, scale=1.0)
 
         ctx = __permute(ctx, dims=[0, 2, 1, 3])
         ctx = __reshape(ctx, shape=[-1, 16, 2048])
@@ -86,9 +84,7 @@ func gemma_global_kv_attention(x Tensor) (Tensor, Tensor, Tensor) {
         q = __rope(q, rope_theta=1000000.0, rotary_dim=128, split_half=1)
         k = __rope(k, rope_theta=1000000.0, rotary_dim=128, split_half=1)
 
-        scores := __sliding_query_key_score(q, k, window=0, scale=1.0)
-        probs := __softmax(scores, dim=-1)
-        ctx := __matmul(probs, v)
+        ctx := __attention(q, k, v, window=0, scale=1.0)
 
         ctx = __permute(ctx, dims=[0, 2, 1, 3])
         ctx = __reshape(ctx, shape=[-1, 16, 4096])
@@ -106,9 +102,7 @@ func gemma_local_attention(x Tensor, k Tensor, v Tensor) Tensor {
         q = __rms_norm(q, @q_norm.weight)
         q = __rope(q, rope_theta=10000.0, split_half=1)
 
-        scores := __sliding_query_key_score(q, k, window=512, scale=1.0)
-        probs := __softmax(scores, dim=-1)
-        ctx := __matmul(probs, v)
+        ctx := __attention(q, k, v, window=512, scale=1.0)
 
         ctx = __permute(ctx, dims=[0, 2, 1, 3])
         ctx = __reshape(ctx, shape=[-1, 16, 2048])
@@ -126,9 +120,7 @@ func gemma_global_attention(x Tensor, k Tensor, v Tensor) Tensor {
         q = __rms_norm(q, @q_norm.weight)
         q = __rope(q, rope_theta=1000000.0, rotary_dim=128, split_half=1)
 
-        scores := __sliding_query_key_score(q, k, window=0, scale=1.0)
-        probs := __softmax(scores, dim=-1)
-        ctx := __matmul(probs, v)
+        ctx := __attention(q, k, v, window=0, scale=1.0)
 
         ctx = __permute(ctx, dims=[0, 2, 1, 3])
         ctx = __reshape(ctx, shape=[-1, 16, 4096])
@@ -234,9 +226,7 @@ func gemma_local_eval_kv_attention(x Tensor, position_id Tensor, k_cache Tensor,
         __paged_append(k_cache, k)
         __paged_append(v_cache, v)
 
-        scores := __sliding_query_key_score(q, k_cache, position_id, window=512, scale=1.0)
-        probs := __softmax(scores, dim=-1)
-        ctx := __matmul(probs, v_cache)
+        ctx := __attention(q, k_cache, v_cache, position_id, window=512, scale=1.0)
 
         ctx = __permute(ctx, dims=[0, 2, 1, 3])
         ctx = __reshape(ctx, shape=[-1, -1, 2048])
@@ -270,9 +260,7 @@ func gemma_global_eval_kv_attention(x Tensor, position_id Tensor, k_cache Tensor
         __paged_append(k_cache, k)
         __paged_append(v_cache, v)
 
-        scores := __sliding_query_key_score(q, k_cache, position_id, window=0, scale=1.0)
-        probs := __softmax(scores, dim=-1)
-        ctx := __matmul(probs, v_cache)
+        ctx := __attention(q, k_cache, v_cache, position_id, window=0, scale=1.0)
 
         ctx = __permute(ctx, dims=[0, 2, 1, 3])
         ctx = __reshape(ctx, shape=[-1, -1, 4096])
@@ -290,9 +278,7 @@ func gemma_local_eval_attention(x Tensor, position_id Tensor, k Tensor, v Tensor
         q = __rms_norm(q, @q_norm.weight)
         q = __rope(q, position_id, rope_theta=10000.0, split_half=1)
 
-        scores := __sliding_query_key_score(q, k, position_id, window=512, scale=1.0)
-        probs := __softmax(scores, dim=-1)
-        ctx := __matmul(probs, v)
+        ctx := __attention(q, k, v, position_id, window=512, scale=1.0)
 
         ctx = __permute(ctx, dims=[0, 2, 1, 3])
         ctx = __reshape(ctx, shape=[-1, -1, 2048])
@@ -310,9 +296,7 @@ func gemma_global_eval_attention(x Tensor, position_id Tensor, k Tensor, v Tenso
         q = __rms_norm(q, @q_norm.weight)
         q = __rope(q, position_id, rope_theta=1000000.0, rotary_dim=128, split_half=1)
 
-        scores := __sliding_query_key_score(q, k, position_id, window=0, scale=1.0)
-        probs := __softmax(scores, dim=-1)
-        ctx := __matmul(probs, v)
+        ctx := __attention(q, k, v, position_id, window=0, scale=1.0)
 
         ctx = __permute(ctx, dims=[0, 2, 1, 3])
         ctx = __reshape(ctx, shape=[-1, -1, 4096])

@@ -4,13 +4,6 @@ namespace sandy::ir::mid_ir {
 
 namespace {
 
-Result<int64_t> get_int_attr(const AttrMap& attrs, const std::string& name) {
-    auto it = attrs.find(name);
-    if (it == attrs.end() || it->second.kind != AttrValue::Int)
-        return make_error("missing int attr '" + name + "'");
-    return it->second.intVal;
-}
-
 float get_float_attr_or(const AttrMap& attrs, const std::string& name, float fallback) {
     auto it = attrs.find(name);
     if (it == attrs.end() || it->second.kind != AttrValue::Float)
@@ -249,193 +242,19 @@ BuiltinLowering BuiltinLowering::createDefault() {
         return std::vector<Value*>{builder.createSoftmax(operands[0], dim)};
     });
 
-    bl.add("kv_attention", [](Builder& builder,
-                               const std::vector<Value*>& operands,
-                               const AttrMap& attrs,
-                               int numResults) -> Result<std::vector<Value*>> {
-        if (numResults != 1 && numResults != 3)
-            return make_error("kv_attention expects 1 or 3 result(s)");
-        if (operands.size() != 5)
-            return make_error("kv_attention expects operands (x, q_weight, k_weight, v_weight, o_weight)");
-
-        auto headsResult = get_int_attr(attrs, "heads");
-        if (!headsResult) return make_error(headsResult.error());
-        int64_t heads = headsResult.take();
-
-        auto kvHeadsResult = get_int_attr(attrs, "kv_heads");
-        if (!kvHeadsResult) return make_error(kvHeadsResult.error());
-        int64_t kvHeads = kvHeadsResult.take();
-
-        auto headDimResult = get_int_attr(attrs, "head_dim");
-        if (!headDimResult) return make_error(headDimResult.error());
-        int64_t headDim = headDimResult.take();
-
-        int64_t window = get_int_attr_or(attrs, "window", 0);
-        float ropeTheta = get_float_attr_or(attrs, "rope_theta", 0.0f);
-        if (heads <= 0 || kvHeads <= 0 || headDim <= 0)
-            return make_error("kv_attention heads, kv_heads, and head_dim must be positive");
-        if (heads % kvHeads != 0)
-            return make_error("kv_attention heads must be divisible by kv_heads");
-        auto* x = operands[0];
-        int rank = x->shape.rank();
-        if (rank != 2 && rank != 3)
-            return make_error("kv_attention input must have rank 2 or rank 3");
-        int64_t hidden = x->shape.dim(rank - 1);
-        if (hidden < 0)
-            return make_error("kv_attention hidden dimension must be static");
-
-        auto* qWeightT = builder.createTranspose(operands[1]);
-        auto* kWeightT = builder.createTranspose(operands[2]);
-        auto* vWeightT = builder.createTranspose(operands[3]);
-        auto* oWeightT = builder.createTranspose(operands[4]);
-
-        auto* qFlat = builder.createMatMul(x, qWeightT);
-        auto* kFlat = builder.createMatMul(x, kWeightT);
-        auto* vFlat = builder.createMatMul(x, vWeightT);
-
-        Value* q = nullptr;
-        Value* k = nullptr;
-        Value* v = nullptr;
-        Value* contextFlat = nullptr;
-
-        if (rank == 3) {
-            int64_t batch = x->shape.dim(0);
-            int64_t seq = x->shape.dim(1);
-            if (batch < 0 || seq < 0)
-                return make_error("kv_attention batch and sequence dimensions must be static");
-
-            q = builder.createPermute(
-                builder.createReshape(qFlat, {batch, seq, heads, headDim}),
-                {0, 2, 1, 3});
-            k = builder.createPermute(
-                builder.createReshape(kFlat, {batch, seq, kvHeads, headDim}),
-                {0, 2, 1, 3});
-            v = builder.createPermute(
-                builder.createReshape(vFlat, {batch, seq, kvHeads, headDim}),
-                {0, 2, 1, 3});
-            if (ropeTheta > 0.0f) {
-                q = builder.createRoPE(q, ropeTheta);
-                k = builder.createRoPE(k, ropeTheta);
-            }
-
-            auto* scores = builder.createSlidingQueryKeyScore(q, k, window);
-            auto* probs = builder.createSoftmax(scores, -1);
-            auto* context = builder.createMatMul(probs, v);
-            auto* contextSeqMajor = builder.createPermute(context, {0, 2, 1, 3});
-            contextFlat = builder.createReshape(contextSeqMajor, {batch, seq, heads * headDim});
-        } else {
-            int64_t seq = x->shape.dim(0);
-            if (seq < 0)
-                return make_error("kv_attention sequence dimension must be static");
-
-            q = builder.createPermute(
-                builder.createReshape(qFlat, {seq, heads, headDim}),
-                {1, 0, 2});
-            k = builder.createPermute(
-                builder.createReshape(kFlat, {seq, kvHeads, headDim}),
-                {1, 0, 2});
-            v = builder.createPermute(
-                builder.createReshape(vFlat, {seq, kvHeads, headDim}),
-                {1, 0, 2});
-            if (ropeTheta > 0.0f) {
-                q = builder.createRoPE(q, ropeTheta);
-                k = builder.createRoPE(k, ropeTheta);
-            }
-
-            auto* scores = builder.createSlidingQueryKeyScore(q, k, window);
-            auto* probs = builder.createSoftmax(scores, -1);
-            auto* context = builder.createMatMul(probs, v);
-            auto* contextSeqMajor = builder.createPermute(context, {1, 0, 2});
-            contextFlat = builder.createReshape(contextSeqMajor, {seq, heads * headDim});
-        }
-
-        auto* out = builder.createMatMul(contextFlat, oWeightT);
-        if (numResults == 1)
-            return std::vector<Value*>{out};
-        return std::vector<Value*>{out, k, v};
-    });
-
     bl.add("attention", [](Builder& builder,
                             const std::vector<Value*>& operands,
                             const AttrMap& attrs,
                             int numResults) -> Result<std::vector<Value*>> {
         auto resultCount = expect_num_results("attention", numResults, 1);
         if (!resultCount) return make_error(resultCount.error());
-        if (operands.size() != 5)
-            return make_error("attention expects operands (x, k, v, q_weight, o_weight)");
-
-        auto headsResult = get_int_attr(attrs, "heads");
-        if (!headsResult) return make_error(headsResult.error());
-        int64_t heads = headsResult.take();
-
-        auto kvHeadsResult = get_int_attr(attrs, "kv_heads");
-        if (!kvHeadsResult) return make_error(kvHeadsResult.error());
-        int64_t kvHeads = kvHeadsResult.take();
-
-        auto headDimResult = get_int_attr(attrs, "head_dim");
-        if (!headDimResult) return make_error(headDimResult.error());
-        int64_t headDim = headDimResult.take();
-
+        if (operands.size() != 3 && operands.size() != 4)
+            return make_error("attention expects operands (q, k, v[, position_offsets])");
         int64_t window = get_int_attr_or(attrs, "window", 0);
-        float ropeTheta = get_float_attr_or(attrs, "rope_theta", 0.0f);
-        if (heads <= 0 || kvHeads <= 0 || headDim <= 0)
-            return make_error("attention heads, kv_heads, and head_dim must be positive");
-        if (heads % kvHeads != 0)
-            return make_error("attention heads must be divisible by kv_heads");
-        auto* x = operands[0];
-        auto* k = operands[1];
-        auto* v = operands[2];
-        int rank = x->shape.rank();
-        if (rank != 2 && rank != 3)
-            return make_error("attention input must have rank 2 or rank 3");
-
-        auto* qWeightT = builder.createTranspose(operands[3]);
-        auto* oWeightT = builder.createTranspose(operands[4]);
-        auto* qFlat = builder.createMatMul(x, qWeightT);
-
-        Value* q = nullptr;
-        Value* contextFlat = nullptr;
-
-        if (rank == 3) {
-            int64_t batch = x->shape.dim(0);
-            int64_t seq = x->shape.dim(1);
-            if (batch < 0 || seq < 0)
-                return make_error("attention batch and sequence dimensions must be static");
-            if (k->shape.rank() != 4 || v->shape.rank() != 4)
-                return make_error("attention k and v must have rank 4 for batched input");
-
-            q = builder.createPermute(
-                builder.createReshape(qFlat, {batch, seq, heads, headDim}),
-                {0, 2, 1, 3});
-            if (ropeTheta > 0.0f)
-                q = builder.createRoPE(q, ropeTheta);
-
-            auto* scores = builder.createSlidingQueryKeyScore(q, k, window);
-            auto* probs = builder.createSoftmax(scores, -1);
-            auto* context = builder.createMatMul(probs, v);
-            auto* contextSeqMajor = builder.createPermute(context, {0, 2, 1, 3});
-            contextFlat = builder.createReshape(contextSeqMajor, {batch, seq, heads * headDim});
-        } else {
-            int64_t seq = x->shape.dim(0);
-            if (seq < 0)
-                return make_error("attention sequence dimension must be static");
-            if (k->shape.rank() != 3 || v->shape.rank() != 3)
-                return make_error("attention k and v must have rank 3 for unbatched input");
-
-            q = builder.createPermute(
-                builder.createReshape(qFlat, {seq, heads, headDim}),
-                {1, 0, 2});
-            if (ropeTheta > 0.0f)
-                q = builder.createRoPE(q, ropeTheta);
-
-            auto* scores = builder.createSlidingQueryKeyScore(q, k, window);
-            auto* probs = builder.createSoftmax(scores, -1);
-            auto* context = builder.createMatMul(probs, v);
-            auto* contextSeqMajor = builder.createPermute(context, {1, 0, 2});
-            contextFlat = builder.createReshape(contextSeqMajor, {seq, heads * headDim});
-        }
-
-        return std::vector<Value*>{builder.createMatMul(contextFlat, oWeightT)};
+        float scale = get_float_attr_or(attrs, "scale", -1.0f);
+        if (operands.size() == 4)
+            return std::vector<Value*>{builder.createAttention(operands[0], operands[1], operands[2], operands[3], window, scale)};
+        return std::vector<Value*>{builder.createAttention(operands[0], operands[1], operands[2], window, scale)};
     });
 
     bl.add("embedding", [](Builder& builder,

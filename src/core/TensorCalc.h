@@ -89,6 +89,21 @@ Result<void> sliding_query_key_score(
     TensorRef k,
     int64_t window,
     MutableTensorRef out);
+Result<void> attention(
+    TensorRef q,
+    TensorRef k,
+    TensorRef v,
+    TensorRef position_offsets,
+    int64_t window,
+    float scale,
+    MutableTensorRef out);
+Result<void> attention(
+    TensorRef q,
+    TensorRef k,
+    TensorRef v,
+    int64_t window,
+    float scale,
+    MutableTensorRef out);
 Result<void> softmax(TensorRef x, int64_t dim, MutableTensorRef out);
 Result<void> embedding(TensorRef ids, TensorRef weight, MutableTensorRef out);
 Result<void> rope(TensorRef x, float theta, MutableTensorRef out);

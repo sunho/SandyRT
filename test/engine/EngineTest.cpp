@@ -2066,6 +2066,55 @@ TEST(CpuInterpretTest, SoftmaxAfterSlidingQueryKeyScore) {
     EXPECT_NEAR(read_f32(it->second->data(), 3), 1.0f - inv, 1.0e-6f);
 }
 
+TEST(CpuInterpretTest, AttentionUsesPerBatchPositionOffsets) {
+    sandy::ir::mid_ir::register_all_ops();
+
+    sandy::ir::mid_ir::Graph graph;
+    sandy::ir::mid_ir::Builder builder(graph);
+    auto* q = builder.createInput(0, sandy::core::Shape({2, 1, 1, 1}), sandy::core::DType::F32);
+    auto* k = builder.createInput(1, sandy::core::Shape({2, 1, 3, 1}), sandy::core::DType::F32);
+    auto* v = builder.createInput(2, sandy::core::Shape({2, 1, 3, 1}), sandy::core::DType::F32);
+    auto* offsets = builder.createInput(3, sandy::core::Shape({2}), sandy::core::DType::I32);
+    auto* out = builder.createAttention(q, k, v, offsets, 0, 1.0f);
+    sandy::ir::mid_ir::Value* outputs[] = {out};
+    builder.setOutputs(outputs);
+
+    auto engine = make_cpu_engine();
+
+    auto planResult = engine.compile(graph);
+    ASSERT_TRUE(planResult) << planResult.error();
+    auto plan = planResult.take();
+
+    std::vector<sandy::engine::TensorBufferPtr> inputs;
+    inputs.push_back(make_f32_buffer("q", sandy::core::Shape({2, 1, 1, 1}), {
+        1.0f,
+        1.0f,
+    }));
+    inputs.push_back(make_f32_buffer("k", sandy::core::Shape({2, 1, 3, 1}), {
+        1.0f, 1.0f, 1.0f,
+        1.0f, 1.0f, 1.0f,
+    }));
+    inputs.push_back(make_f32_buffer("v", sandy::core::Shape({2, 1, 3, 1}), {
+        10.0f, 20.0f, 30.0f,
+        100.0f, 200.0f, 300.0f,
+    }));
+    inputs.push_back(make_i32_buffer("position_offsets", sandy::core::Shape({2}), {
+        0, 2,
+    }));
+
+    sandy::engine::TensorMap weights;
+    auto runResult = engine.run(*plan, inputs, weights);
+    ASSERT_TRUE(runResult) << runResult.error();
+    auto outputsMap = outputs_to_map(runResult.take());
+
+    auto it = outputsMap.find("output0");
+    ASSERT_NE(it, outputsMap.end());
+    ASSERT_NE(it->second, nullptr);
+    EXPECT_EQ(it->second->desc().shape, sandy::core::Shape({2, 1, 1, 1}));
+    EXPECT_FLOAT_EQ(read_f32(it->second->data(), 0), 10.0f);
+    EXPECT_FLOAT_EQ(read_f32(it->second->data(), 1), 200.0f);
+}
+
 TEST(CpuInterpretTest, EmbeddingLoadsRowsFromFullWeightBuffer) {
     sandy::ir::mid_ir::register_all_ops();
 

@@ -1048,8 +1048,11 @@ Result<void> sliding_query_key_score_impl(
         positionCount = positionIds->desc.shape.numel();
         if (positionCount < 0)
             return make_error("sliding_query_key_score position_ids must have static shape");
-        if (positionCount != 1 && positionCount != tq)
-            return make_error("sliding_query_key_score position_ids numel must be 1 or query length");
+        if (positionCount != 1 && positionCount != tq &&
+            !(rank == 4 && positionCount == batch)) {
+            return make_error(
+                "sliding_query_key_score position_ids numel must be 1, query length, or batch size");
+        }
     }
 
     std::vector<int64_t> outDims;
@@ -1072,8 +1075,12 @@ Result<void> sliding_query_key_score_impl(
             for (int64_t qi = 0; qi < tq; qi++) {
                 int64_t queryPosition = qi;
                 if (positionIds) {
-                    auto positionIndex = positionCount == 1 ? 0 : qi;
-                    queryPosition = read_index(*positionIds, static_cast<size_t>(positionIndex));
+                    if (rank == 4 && positionCount == batch) {
+                        queryPosition = read_index(*positionIds, static_cast<size_t>(b)) + qi;
+                    } else {
+                        auto positionIndex = positionCount == 1 ? 0 : qi;
+                        queryPosition = read_index(*positionIds, static_cast<size_t>(positionIndex));
+                    }
                     if (queryPosition < 0)
                         return make_error("sliding_query_key_score position_ids must be non-negative");
                 }
@@ -1139,6 +1146,176 @@ Result<void> sliding_query_key_score(
         int64_t window,
         MutableTensorRef out) {
     return sliding_query_key_score(q, k, window, -1.0f, out);
+}
+
+Result<void> attention_impl(
+        TensorRef q,
+        TensorRef k,
+        TensorRef v,
+        const TensorRef* positionOffsets,
+        int64_t window,
+        float scale,
+        MutableTensorRef out) {
+    auto qFloat = require_float_tensor(q, "attention q");
+    if (!qFloat) return make_error(qFloat.error());
+    auto kFloat = require_float_tensor(k, "attention k");
+    if (!kFloat) return make_error(kFloat.error());
+    auto vFloat = require_float_tensor(v, "attention v");
+    if (!vFloat) return make_error(vFloat.error());
+    auto sameQK = require_same_dtype(q.desc.dtype, k.desc.dtype, "attention");
+    if (!sameQK) return make_error(sameQK.error());
+    auto sameQV = require_same_dtype(q.desc.dtype, v.desc.dtype, "attention");
+    if (!sameQV) return make_error(sameQV.error());
+
+    int rank = q.desc.shape.rank();
+    if ((rank != 3 && rank != 4) ||
+        k.desc.shape.rank() != rank ||
+        v.desc.shape.rank() != rank) {
+        return make_error("attention q, k, and v must all have rank 3 or rank 4");
+    }
+    if (window < 0)
+        return make_error("attention window must be >= 0");
+
+    int64_t batch = rank == 4 ? q.desc.shape.dim(0) : 1;
+    int64_t kBatch = rank == 4 ? k.desc.shape.dim(0) : 1;
+    int64_t vBatch = rank == 4 ? v.desc.shape.dim(0) : 1;
+    int64_t heads = q.desc.shape.dim(rank - 3);
+    int64_t kvHeads = k.desc.shape.dim(rank - 3);
+    int64_t vHeads = v.desc.shape.dim(rank - 3);
+    int64_t tq = q.desc.shape.dim(rank - 2);
+    int64_t tk = k.desc.shape.dim(rank - 2);
+    int64_t tv = v.desc.shape.dim(rank - 2);
+    int64_t headDim = q.desc.shape.dim(rank - 1);
+    int64_t kHeadDim = k.desc.shape.dim(rank - 1);
+    int64_t vHeadDim = v.desc.shape.dim(rank - 1);
+    if (batch < 0 || kBatch < 0 || vBatch < 0 ||
+        heads < 0 || kvHeads < 0 || vHeads < 0 ||
+        tq < 0 || tk < 0 || tv < 0 ||
+        headDim < 0 || kHeadDim < 0 || vHeadDim < 0) {
+        return make_error("attention inputs must have static shape");
+    }
+    if (batch != kBatch || batch != vBatch)
+        return make_error("attention batch dimension mismatch");
+    if (kvHeads != vHeads)
+        return make_error("attention k and v head count mismatch");
+    if (tk != tv)
+        return make_error("attention k and v sequence dimension mismatch");
+    if (headDim != kHeadDim || headDim != vHeadDim)
+        return make_error("attention head dimension mismatch");
+    if (heads <= 0 || kvHeads <= 0 || heads % kvHeads != 0)
+        return make_error("attention heads must be divisible by kv_heads");
+
+    if (positionOffsets) {
+        if (positionOffsets->desc.dtype != DType::I32 &&
+            positionOffsets->desc.dtype != DType::I64) {
+            return make_error("attention position_offsets must be i32 or i64");
+        }
+        int64_t offsetsNumel = positionOffsets->desc.shape.numel();
+        if (offsetsNumel < 0)
+            return make_error("attention position_offsets must have static shape");
+        if (rank == 4 && offsetsNumel != batch)
+            return make_error("attention position_offsets length must match batch");
+        if (rank == 3 && offsetsNumel != 1)
+            return make_error("attention unbatched position_offsets must have one element");
+    }
+
+    auto output = require_output(out, q.desc.shape, q.desc.dtype, "attention");
+    if (!output) return make_error(output.error());
+
+    int64_t headsPerKv = heads / kvHeads;
+    if (scale <= 0.0f)
+        scale = 1.0f / std::sqrt(static_cast<float>(headDim));
+
+    std::vector<float> scores(static_cast<size_t>(tk), 0.0f);
+    for (int64_t b = 0; b < batch; b++) {
+        int64_t basePosition = 0;
+        if (positionOffsets) {
+            basePosition = read_index(
+                *positionOffsets,
+                static_cast<size_t>(rank == 4 ? b : 0));
+            if (basePosition < 0)
+                return make_error("attention position_offsets must be non-negative");
+        }
+        for (int64_t h = 0; h < heads; h++) {
+            int64_t kh = h / headsPerKv;
+            for (int64_t qi = 0; qi < tq; qi++) {
+                int64_t queryPosition = basePosition + qi;
+                int64_t minKey = 0;
+                if (window > 0)
+                    minKey = std::max<int64_t>(0, queryPosition + 1 - window);
+
+                float maxScore = -std::numeric_limits<float>::infinity();
+                for (int64_t ki = 0; ki < tk; ki++) {
+                    float score = -std::numeric_limits<float>::infinity();
+                    if (ki <= queryPosition && ki >= minKey) {
+                        float acc = 0.0f;
+                        for (int64_t d = 0; d < headDim; d++) {
+                            size_t qIndex = rank == 4
+                                ? static_cast<size_t>(((b * heads + h) * tq + qi) * headDim + d)
+                                : static_cast<size_t>((h * tq + qi) * headDim + d);
+                            size_t kIndex = rank == 4
+                                ? static_cast<size_t>(((b * kvHeads + kh) * tk + ki) * headDim + d)
+                                : static_cast<size_t>((kh * tk + ki) * headDim + d);
+                            acc += q.load_float(qIndex) * k.load_float(kIndex);
+                        }
+                        score = acc * scale;
+                    }
+                    scores[static_cast<size_t>(ki)] = score;
+                    maxScore = std::max(maxScore, score);
+                }
+
+                double sum = 0.0;
+                if (!(std::isinf(maxScore) && maxScore < 0.0f)) {
+                    for (int64_t ki = 0; ki < tk; ki++)
+                        sum += std::exp(static_cast<double>(scores[static_cast<size_t>(ki)] - maxScore));
+                }
+
+                for (int64_t d = 0; d < headDim; d++) {
+                    float acc = 0.0f;
+                    if (sum != 0.0) {
+                        float invSum = 1.0f / static_cast<float>(sum);
+                        for (int64_t ki = 0; ki < tk; ki++) {
+                            float score = scores[static_cast<size_t>(ki)];
+                            if (std::isinf(score) && score < 0.0f)
+                                continue;
+                            float prob = std::exp(score - maxScore) * invSum;
+                            size_t vIndex = rank == 4
+                                ? static_cast<size_t>(((b * kvHeads + kh) * tk + ki) * headDim + d)
+                                : static_cast<size_t>((kh * tk + ki) * headDim + d);
+                            acc += prob * v.load_float(vIndex);
+                        }
+                    }
+                    size_t outIndex = rank == 4
+                        ? static_cast<size_t>(((b * heads + h) * tq + qi) * headDim + d)
+                        : static_cast<size_t>((h * tq + qi) * headDim + d);
+                    out.store_float(outIndex, acc);
+                }
+            }
+        }
+    }
+
+    return {};
+}
+
+Result<void> attention(
+        TensorRef q,
+        TensorRef k,
+        TensorRef v,
+        TensorRef positionOffsets,
+        int64_t window,
+        float scale,
+        MutableTensorRef out) {
+    return attention_impl(q, k, v, &positionOffsets, window, scale, out);
+}
+
+Result<void> attention(
+        TensorRef q,
+        TensorRef k,
+        TensorRef v,
+        int64_t window,
+        float scale,
+        MutableTensorRef out) {
+    return attention_impl(q, k, v, nullptr, window, scale, out);
 }
 
 Result<void> softmax(TensorRef x, int64_t dim, MutableTensorRef out) {

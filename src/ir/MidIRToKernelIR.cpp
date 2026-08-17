@@ -649,6 +649,83 @@ Result<void> lower_sliding_query_key_score(
     return {};
 }
 
+Result<void> lower_attention(
+    Graph& graph,
+    const mid_ir::Op& op,
+    ValueMap& valueMap)
+{
+    if (op.operands.size() != 3 && op.operands.size() != 4) {
+        return make_error("attention lowering expects three or four operands");
+    }
+    auto query = mapped_value(valueMap, op.operands[0]);
+    if (!query)
+        return make_error(query.error());
+    auto key = mapped_value(valueMap, op.operands[1]);
+    if (!key)
+        return make_error(key.error());
+    auto value = mapped_value(valueMap, op.operands[2]);
+    if (!value)
+        return make_error(value.error());
+    auto output = add_single_result_value(graph, op, valueMap);
+    if (!output)
+        return make_error(output.error());
+    auto window = attr_int_or(op.attrs, "window", 0);
+    if (!window)
+        return make_error(window.error());
+    auto scale = attr_float_or(op.attrs, "scale", -1.0);
+    if (!scale)
+        return make_error(scale.error());
+
+    const auto& qShape = op.operands[0]->shape;
+    const auto& kShape = op.operands[1]->shape;
+    int rank = qShape.rank();
+    std::vector<int64_t> scoreDims;
+    if (rank == 4)
+        scoreDims.push_back(qShape.dim(0));
+    scoreDims.push_back(qShape.dim(rank - 3));
+    scoreDims.push_back(qShape.dim(rank - 2));
+    scoreDims.push_back(kShape.dim(rank - 2));
+
+    auto scores = graph.addValue(ValueType{
+        ValueKind::Tensor,
+        op.operands[0]->dtype,
+        core::Shape(scoreDims),
+    });
+    auto probs = graph.addValue(ValueType{
+        ValueKind::Tensor,
+        op.operands[0]->dtype,
+        core::Shape(std::move(scoreDims)),
+    });
+
+    if (op.operands.size() == 4) {
+        auto positionOffsets = mapped_value(valueMap, op.operands[3]);
+        if (!positionOffsets)
+            return make_error(positionOffsets.error());
+        graph.addOp<SlidingQueryKeyScoreKernelOp>(
+            query.take(),
+            key.take(),
+            positionOffsets.take(),
+            scores,
+            window.take(),
+            scale.take());
+    } else {
+        graph.addOp<SlidingQueryKeyScoreKernelOp>(
+            query.take(),
+            key.take(),
+            scores,
+            window.take(),
+            scale.take());
+    }
+    graph.addOp<SoftmaxKernelOp>(scores, probs, -1);
+    graph.addOp<MatMulKernelOp>(
+        probs,
+        value.take(),
+        output.take(),
+        false,
+        false);
+    return {};
+}
+
 Result<void> lower_op(
     Graph& graph,
     const mid_ir::Op& op,
@@ -684,6 +761,8 @@ Result<void> lower_op(
             return lower_paged_append(graph, op, valueMap);
         case mid_ir::OpKind::SlidingQueryKeyScore:
             return lower_sliding_query_key_score(graph, op, valueMap);
+        case mid_ir::OpKind::Attention:
+            return lower_attention(graph, op, valueMap);
         case mid_ir::OpKind::Softmax:
             return lower_softmax(graph, op, valueMap);
         case mid_ir::OpKind::Embedding:

@@ -114,6 +114,29 @@ Result<void> runMidIROpOnCpu(
                 scale.take(),
                 outputs[0]);
         }
+        case ir::mid_ir::OpKind::Attention: {
+            auto window = attr_int_or(op.attrs, "window", 0);
+            if (!window) return make_error(window.error());
+            auto scale = attr_float_or(op.attrs, "scale", -1.0f);
+            if (!scale) return make_error(scale.error());
+            if (inputs.size() == 4) {
+                return core::attention(
+                    inputs[0],
+                    inputs[1],
+                    inputs[2],
+                    inputs[3],
+                    window.take(),
+                    scale.take(),
+                    outputs[0]);
+            }
+            return core::attention(
+                inputs[0],
+                inputs[1],
+                inputs[2],
+                window.take(),
+                scale.take(),
+                outputs[0]);
+        }
         case ir::mid_ir::OpKind::Softmax: {
             auto dim = attr_int_or(op.attrs, "dim", -1);
             if (!dim) return make_error(dim.error());
