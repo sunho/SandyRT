@@ -21,15 +21,6 @@ Result<void> launch_cuda_softmax(
     return unimplemented("softmax");
 }
 
-Result<void> launch_cuda_norm(
-        const CudaLaunchContext& context,
-        const CudaNormProgram&) {
-    auto valid = validate_context(context, 1, 1, "norm");
-    if (!valid)
-        return make_error(valid.error());
-    return unimplemented("norm");
-}
-
 Result<void> launch_cuda_rope(
         const CudaLaunchContext& context,
         const CudaRoPEProgram&) {

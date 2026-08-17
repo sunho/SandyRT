@@ -624,3 +624,206 @@ TEST(CudaDeviceTest, RunMatMulF32GroupedBatchHeads) {
             4.0f, 40.0f,
         });
 }
+
+TEST(CudaDeviceTest, RunRMSNormF32WithWeight) {
+    if (auto reason = cuda_device_skip_reason(); !reason.empty())
+        GTEST_SKIP() << reason;
+    namespace kir = sandy::ir::kernel_ir;
+
+    kir::Graph graph;
+    auto x = graph.addValue(tensor_type({2, 4}));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 0, ""},
+        x);
+    auto weight = graph.addValue(tensor_type({4}));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 1, ""},
+        weight);
+    auto output = graph.addValue(tensor_type({2, 4}));
+    auto* op = graph.addOp<kir::NormKernelOp>(
+        kir::NormKind::RMSNorm,
+        std::vector<kir::ValueId>{x, weight},
+        output,
+        1.0e-6);
+    graph.setOutputs({output});
+
+    sandy::device::CudaDevice device;
+    auto compiled = device.compile(graph);
+    ASSERT_TRUE(compiled) << compiled.error();
+
+    auto xHost = make_f32_buffer(
+        "x",
+        sandy::core::Shape({2, 4}),
+        {1.0f, 2.0f, 3.0f, 4.0f, 2.0f, 0.0f, -2.0f, 4.0f});
+    auto weightHost = make_f32_buffer(
+        "weight",
+        sandy::core::Shape({4}),
+        {1.0f, 0.5f, 2.0f, -1.0f});
+    auto xBuffer = device.load(*xHost);
+    ASSERT_TRUE(xBuffer) << xBuffer.error();
+    auto weightBuffer = device.load(*weightHost);
+    ASSERT_TRUE(weightBuffer) << weightBuffer.error();
+    auto outputBuffer = device.alloc(sandy::core::TensorDesc({2, 4}, sandy::core::DType::F32));
+    ASSERT_TRUE(outputBuffer) << outputBuffer.error();
+
+    std::vector<sandy::device::DeviceRunValue> inputs = {
+        tensor_view(device, *xBuffer, xHost->desc()),
+        tensor_view(device, *weightBuffer, weightHost->desc()),
+    };
+    std::vector<sandy::device::DeviceRunValue> outputs = {
+        tensor_view(
+            device,
+            *outputBuffer,
+            sandy::core::TensorDesc({2, 4}, sandy::core::DType::F32)),
+    };
+    auto run = device.run(*compiled, op->id(), inputs, outputs);
+    ASSERT_TRUE(run) << run.error();
+
+    float inv0 = 1.0f / std::sqrt(30.0f / 4.0f + 1.0e-6f);
+    float inv1 = 1.0f / std::sqrt(24.0f / 4.0f + 1.0e-6f);
+    expect_f32_output(
+        device,
+        *outputBuffer,
+        {
+            1.0f * inv0,
+            2.0f * inv0 * 0.5f,
+            3.0f * inv0 * 2.0f,
+            4.0f * inv0 * -1.0f,
+            2.0f * inv1,
+            0.0f,
+            -2.0f * inv1 * 2.0f,
+            4.0f * inv1 * -1.0f,
+        });
+}
+
+TEST(CudaDeviceTest, RunRMSNormF32WithoutWeight) {
+    if (auto reason = cuda_device_skip_reason(); !reason.empty())
+        GTEST_SKIP() << reason;
+    namespace kir = sandy::ir::kernel_ir;
+
+    kir::Graph graph;
+    auto x = graph.addValue(tensor_type({1, 4}));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 0, ""},
+        x);
+    auto output = graph.addValue(tensor_type({1, 4}));
+    auto* op = graph.addOp<kir::NormKernelOp>(
+        kir::NormKind::RMSNorm,
+        std::vector<kir::ValueId>{x},
+        output,
+        1.0e-6);
+    graph.setOutputs({output});
+
+    sandy::device::CudaDevice device;
+    auto compiled = device.compile(graph);
+    ASSERT_TRUE(compiled) << compiled.error();
+
+    auto xHost = make_f32_buffer(
+        "x",
+        sandy::core::Shape({1, 4}),
+        {1.0f, -1.0f, 3.0f, -3.0f});
+    auto xBuffer = device.load(*xHost);
+    ASSERT_TRUE(xBuffer) << xBuffer.error();
+    auto outputBuffer = device.alloc(sandy::core::TensorDesc({1, 4}, sandy::core::DType::F32));
+    ASSERT_TRUE(outputBuffer) << outputBuffer.error();
+
+    std::vector<sandy::device::DeviceRunValue> inputs = {
+        tensor_view(device, *xBuffer, xHost->desc()),
+    };
+    std::vector<sandy::device::DeviceRunValue> outputs = {
+        tensor_view(
+            device,
+            *outputBuffer,
+            sandy::core::TensorDesc({1, 4}, sandy::core::DType::F32)),
+    };
+    auto run = device.run(*compiled, op->id(), inputs, outputs);
+    ASSERT_TRUE(run) << run.error();
+
+    float inv = 1.0f / std::sqrt(20.0f / 4.0f + 1.0e-6f);
+    expect_f32_output(
+        device,
+        *outputBuffer,
+        {1.0f * inv, -1.0f * inv, 3.0f * inv, -3.0f * inv});
+}
+
+TEST(CudaDeviceTest, RunLayerNormF32) {
+    if (auto reason = cuda_device_skip_reason(); !reason.empty())
+        GTEST_SKIP() << reason;
+    namespace kir = sandy::ir::kernel_ir;
+
+    kir::Graph graph;
+    auto x = graph.addValue(tensor_type({2, 3}));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 0, ""},
+        x);
+    auto weight = graph.addValue(tensor_type({3}));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 1, ""},
+        weight);
+    auto bias = graph.addValue(tensor_type({3}));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 2, ""},
+        bias);
+    auto output = graph.addValue(tensor_type({2, 3}));
+    auto* op = graph.addOp<kir::NormKernelOp>(
+        kir::NormKind::LayerNorm,
+        std::vector<kir::ValueId>{x, weight, bias},
+        output,
+        1.0e-5);
+    graph.setOutputs({output});
+
+    sandy::device::CudaDevice device;
+    auto compiled = device.compile(graph);
+    ASSERT_TRUE(compiled) << compiled.error();
+
+    auto xHost = make_f32_buffer(
+        "x",
+        sandy::core::Shape({2, 3}),
+        {1.0f, 2.0f, 3.0f, 2.0f, 4.0f, 4.0f});
+    auto weightHost = make_f32_buffer(
+        "weight",
+        sandy::core::Shape({3}),
+        {1.0f, 2.0f, -1.0f});
+    auto biasHost = make_f32_buffer(
+        "bias",
+        sandy::core::Shape({3}),
+        {0.5f, -0.5f, 1.0f});
+    auto xBuffer = device.load(*xHost);
+    ASSERT_TRUE(xBuffer) << xBuffer.error();
+    auto weightBuffer = device.load(*weightHost);
+    ASSERT_TRUE(weightBuffer) << weightBuffer.error();
+    auto biasBuffer = device.load(*biasHost);
+    ASSERT_TRUE(biasBuffer) << biasBuffer.error();
+    auto outputBuffer = device.alloc(sandy::core::TensorDesc({2, 3}, sandy::core::DType::F32));
+    ASSERT_TRUE(outputBuffer) << outputBuffer.error();
+
+    std::vector<sandy::device::DeviceRunValue> inputs = {
+        tensor_view(device, *xBuffer, xHost->desc()),
+        tensor_view(device, *weightBuffer, weightHost->desc()),
+        tensor_view(device, *biasBuffer, biasHost->desc()),
+    };
+    std::vector<sandy::device::DeviceRunValue> outputs = {
+        tensor_view(
+            device,
+            *outputBuffer,
+            sandy::core::TensorDesc({2, 3}, sandy::core::DType::F32)),
+    };
+    auto run = device.run(*compiled, op->id(), inputs, outputs);
+    ASSERT_TRUE(run) << run.error();
+
+    float mean0 = 2.0f;
+    float inv0 = 1.0f / std::sqrt(2.0f / 3.0f + 1.0e-5f);
+    float mean1 = 10.0f / 3.0f;
+    float inv1 = 1.0f / std::sqrt(8.0f / 9.0f + 1.0e-5f);
+    expect_f32_output(
+        device,
+        *outputBuffer,
+        {
+            (1.0f - mean0) * inv0 + 0.5f,
+            (2.0f - mean0) * inv0 * 2.0f - 0.5f,
+            (3.0f - mean0) * inv0 * -1.0f + 1.0f,
+            (2.0f - mean1) * inv1 + 0.5f,
+            (4.0f - mean1) * inv1 * 2.0f - 0.5f,
+            (4.0f - mean1) * inv1 * -1.0f + 1.0f,
+        });
+}
