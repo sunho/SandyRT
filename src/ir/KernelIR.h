@@ -76,6 +76,7 @@ enum class OpKind {
     NormKernel,
     RoPEKernel,
     SlidingQueryKeyScoreKernel,
+    AttentionKernel,
     CustomKernel,
 };
 
@@ -572,6 +573,44 @@ public:
     std::span<const ValueId> outputs() const override { return outputs_; }
 
     const char* name() const override { return "sliding_query_key_score_kernel"; }
+    Result<void> verify(const Graph& graph) const override;
+
+private:
+    std::vector<ValueId> inputs_;
+    std::array<ValueId, 1> outputs_;
+    int64_t window_ = 0;
+    double scale_ = -1.0;
+};
+
+class AttentionKernelOp final : public Op {
+public:
+    AttentionKernelOp(
+        OpId id,
+        ValueId query,
+        ValueId key,
+        ValueId value,
+        ValueId output,
+        int64_t window,
+        double scale,
+        DeviceId device = 0);
+    AttentionKernelOp(
+        OpId id,
+        ValueId query,
+        ValueId key,
+        ValueId value,
+        ValueId positionOffsets,
+        ValueId output,
+        int64_t window,
+        double scale,
+        DeviceId device = 0);
+
+    int64_t window() const { return window_; }
+    double scale() const { return scale_; }
+
+    std::span<const ValueId> inputs() const override { return inputs_; }
+    std::span<const ValueId> outputs() const override { return outputs_; }
+
+    const char* name() const override { return "attention_kernel"; }
     Result<void> verify(const Graph& graph) const override;
 
 private:

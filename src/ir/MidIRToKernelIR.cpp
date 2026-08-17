@@ -652,7 +652,8 @@ Result<void> lower_sliding_query_key_score(
 Result<void> lower_attention(
     Graph& graph,
     const mid_ir::Op& op,
-    ValueMap& valueMap)
+    ValueMap& valueMap,
+    bool fuseAttention)
 {
     if (op.operands.size() != 3 && op.operands.size() != 4) {
         return make_error("attention lowering expects three or four operands");
@@ -675,6 +676,31 @@ Result<void> lower_attention(
     auto scale = attr_float_or(op.attrs, "scale", -1.0);
     if (!scale)
         return make_error(scale.error());
+
+    if (fuseAttention) {
+        if (op.operands.size() == 4) {
+            auto positionOffsets = mapped_value(valueMap, op.operands[3]);
+            if (!positionOffsets)
+                return make_error(positionOffsets.error());
+            graph.addOp<AttentionKernelOp>(
+                query.take(),
+                key.take(),
+                value.take(),
+                positionOffsets.take(),
+                output.take(),
+                window.take(),
+                scale.take());
+        } else {
+            graph.addOp<AttentionKernelOp>(
+                query.take(),
+                key.take(),
+                value.take(),
+                output.take(),
+                window.take(),
+                scale.take());
+        }
+        return {};
+    }
 
     const auto& qShape = op.operands[0]->shape;
     const auto& kShape = op.operands[1]->shape;
@@ -729,7 +755,8 @@ Result<void> lower_attention(
 Result<void> lower_op(
     Graph& graph,
     const mid_ir::Op& op,
-    ValueMap& valueMap)
+    ValueMap& valueMap,
+    const LoweringOptions& options)
 {
     switch (op.kind) {
         case mid_ir::OpKind::Input:
@@ -762,7 +789,7 @@ Result<void> lower_op(
         case mid_ir::OpKind::SlidingQueryKeyScore:
             return lower_sliding_query_key_score(graph, op, valueMap);
         case mid_ir::OpKind::Attention:
-            return lower_attention(graph, op, valueMap);
+            return lower_attention(graph, op, valueMap, options.fusor.attention);
         case mid_ir::OpKind::Softmax:
             return lower_softmax(graph, op, valueMap);
         case mid_ir::OpKind::Embedding:
@@ -780,6 +807,10 @@ Result<void> lower_op(
 
 } // namespace
 
+MidIRToKernelIRLowering::MidIRToKernelIRLowering(LoweringOptions options)
+    : options_(std::move(options))
+{}
+
 Result<std::unique_ptr<Graph>> MidIRToKernelIRLowering::lower(
     const mid_ir::Graph& midGraph)
 {
@@ -787,7 +818,7 @@ Result<std::unique_ptr<Graph>> MidIRToKernelIRLowering::lower(
     ValueMap valueMap;
 
     for (const auto* op : midGraph.entry()->ops) {
-        auto result = lower_op(*graph, *op, valueMap);
+        auto result = lower_op(*graph, *op, valueMap, options_);
         if (!result)
             return make_error(result.error());
     }
@@ -809,8 +840,10 @@ Result<std::unique_ptr<Graph>> MidIRToKernelIRLowering::lower(
     return graph;
 }
 
-Result<std::unique_ptr<Graph>> lowerMidIRToKernelIR(const mid_ir::Graph& graph) {
-    MidIRToKernelIRLowering lowering;
+Result<std::unique_ptr<Graph>> lowerMidIRToKernelIR(
+        const mid_ir::Graph& graph,
+        const LoweringOptions& options) {
+    MidIRToKernelIRLowering lowering(options);
     return lowering.lower(graph);
 }
 

@@ -257,6 +257,13 @@ Result<DeviceCompiledGraphId> CpuDevice::compile(const ir::kernel_ir::Graph& gra
                 kernel.scale = score.scale();
                 break;
             }
+            case ir::kernel_ir::OpKind::AttentionKernel: {
+                const auto& attention =
+                    static_cast<const ir::kernel_ir::AttentionKernelOp&>(op);
+                kernel.window = attention.window();
+                kernel.scale = attention.scale();
+                break;
+            }
             case ir::kernel_ir::OpKind::ReductionKernel:
                 return make_error("cpu device does not support reduction kernels yet");
             case ir::kernel_ir::OpKind::CustomKernel: {
@@ -874,6 +881,35 @@ Result<void> CpuDevice::run(
             return core::sliding_query_key_score(
                 *q,
                 *k,
+                kernel.window,
+                static_cast<float>(kernel.scale),
+                *out);
+        }
+        case ir::kernel_ir::OpKind::AttentionKernel: {
+            auto q = inputRef(0);
+            if (!q) return make_error(q.error());
+            auto k = inputRef(1);
+            if (!k) return make_error(k.error());
+            auto v = inputRef(2);
+            if (!v) return make_error(v.error());
+            auto out = outputRef(0);
+            if (!out) return make_error(out.error());
+            if (inputs.size() == 4) {
+                auto positionOffsets = inputRef(3);
+                if (!positionOffsets) return make_error(positionOffsets.error());
+                return core::attention(
+                    *q,
+                    *k,
+                    *v,
+                    *positionOffsets,
+                    kernel.window,
+                    static_cast<float>(kernel.scale),
+                    *out);
+            }
+            return core::attention(
+                *q,
+                *k,
+                *v,
                 kernel.window,
                 static_cast<float>(kernel.scale),
                 *out);

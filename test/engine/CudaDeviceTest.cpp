@@ -1,14 +1,19 @@
 #include "CudaDevice.h"
 #include "KernelIR.h"
+#include "TensorCalc.h"
 
 #include <cuda_runtime.h>
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <initializer_list>
+#include <limits>
 #include <memory>
+#include <optional>
+#include <random>
 #include <span>
 #include <string>
 #include <utility>
@@ -35,6 +40,14 @@ std::vector<uint8_t> f32_bytes(std::initializer_list<float> values) {
     for (float value : values) {
         std::memcpy(bytes.data() + index * sizeof(float), &value, sizeof(float));
         index++;
+    }
+    return bytes;
+}
+
+std::vector<uint8_t> f32_bytes(std::span<const float> values) {
+    std::vector<uint8_t> bytes(values.size() * sizeof(float));
+    for (size_t index = 0; index < values.size(); index++) {
+        std::memcpy(bytes.data() + index * sizeof(float), &values[index], sizeof(float));
     }
     return bytes;
 }
@@ -66,6 +79,15 @@ std::shared_ptr<TestTensorBuffer> make_f32_buffer(
     return std::make_shared<TestTensorBuffer>(
         sandy::core::TensorDesc(name, std::move(shape), sandy::core::DType::F32),
         f32_bytes(values));
+}
+
+std::shared_ptr<TestTensorBuffer> make_f32_buffer(
+        const std::string& name,
+        sandy::core::Shape shape,
+        const std::vector<float>& values) {
+    return std::make_shared<TestTensorBuffer>(
+        sandy::core::TensorDesc(name, std::move(shape), sandy::core::DType::F32),
+        f32_bytes(std::span<const float>(values.data(), values.size())));
 }
 
 std::shared_ptr<TestTensorBuffer> make_i32_buffer(
@@ -143,6 +165,239 @@ void expect_f32_output(
         EXPECT_NEAR(read_f32(data, index), value, 1.0e-5f);
         index++;
     }
+}
+
+void expect_f32_output_near(
+        sandy::device::CudaDevice& device,
+        sandy::device::DeviceBufferId buffer,
+        const std::vector<float>& expected,
+        float tolerance = 1.0e-4f) {
+    auto read = device.read(buffer);
+    ASSERT_TRUE(read) << read.error();
+    auto access = (*read)->access();
+    ASSERT_TRUE(access) << access.error();
+    auto data = (*access).data();
+    ASSERT_EQ(data.size(), expected.size() * sizeof(float));
+
+    for (size_t index = 0; index < expected.size(); index++) {
+        EXPECT_NEAR(read_f32(data, index), expected[index], tolerance)
+            << "at flat index " << index;
+    }
+}
+
+std::vector<float> make_pattern(size_t count, float scale, float bias) {
+    std::vector<float> values(count);
+    for (size_t i = 0; i < count; i++) {
+        int centered = static_cast<int>((i * 17 + 13) % 29) - 14;
+        values[i] = bias + scale * static_cast<float>(centered);
+    }
+    return values;
+}
+
+std::vector<float> make_uniform_values(
+        std::mt19937& rng,
+        size_t count,
+        float minValue,
+        float maxValue) {
+    std::uniform_real_distribution<float> values(minValue, maxValue);
+    std::vector<float> result(count);
+    for (float& value : result)
+        value = values(rng);
+    return result;
+}
+
+Result<std::vector<float>> attention_reference(
+        const std::vector<float>& q,
+        const std::vector<float>& k,
+        const std::vector<float>& v,
+        int64_t batch,
+        int64_t qHeads,
+        int64_t kvHeads,
+        int64_t tq,
+        int64_t tk,
+        int64_t headDim,
+        int64_t window,
+        float scale,
+        const std::optional<std::vector<int64_t>>& positionOffsets = std::nullopt) {
+    auto qDesc = sandy::core::TensorDesc({batch, qHeads, tq, headDim}, sandy::core::DType::F32);
+    auto kDesc = sandy::core::TensorDesc({batch, kvHeads, tk, headDim}, sandy::core::DType::F32);
+    auto vDesc = sandy::core::TensorDesc({batch, kvHeads, tk, headDim}, sandy::core::DType::F32);
+    auto outDesc = sandy::core::TensorDesc({batch, qHeads, tq, headDim}, sandy::core::DType::F32);
+
+    auto qBytes = f32_bytes(std::span<const float>(q.data(), q.size()));
+    auto kBytes = f32_bytes(std::span<const float>(k.data(), k.size()));
+    auto vBytes = f32_bytes(std::span<const float>(v.data(), v.size()));
+    std::vector<uint8_t> outBytes(
+        static_cast<size_t>(batch * qHeads * tq * headDim) * sizeof(float));
+
+    auto qRef = sandy::core::make_tensor_ref(qDesc, qBytes);
+    if (!qRef) return make_error(qRef.error());
+    auto kRef = sandy::core::make_tensor_ref(kDesc, kBytes);
+    if (!kRef) return make_error(kRef.error());
+    auto vRef = sandy::core::make_tensor_ref(vDesc, vBytes);
+    if (!vRef) return make_error(vRef.error());
+    auto outRef = sandy::core::make_mutable_tensor_ref(outDesc, outBytes);
+    if (!outRef) return make_error(outRef.error());
+
+    if (positionOffsets) {
+        std::vector<uint8_t> positionBytes(positionOffsets->size() * sizeof(int64_t));
+        for (size_t i = 0; i < positionOffsets->size(); i++) {
+            std::memcpy(
+                positionBytes.data() + i * sizeof(int64_t),
+                &(*positionOffsets)[i],
+                sizeof(int64_t));
+        }
+        auto positionRef = sandy::core::make_tensor_ref(
+            sandy::core::TensorDesc({batch}, sandy::core::DType::I64),
+            positionBytes);
+        if (!positionRef) return make_error(positionRef.error());
+        auto result = sandy::core::attention(
+            *qRef,
+            *kRef,
+            *vRef,
+            *positionRef,
+            window,
+            scale,
+            *outRef);
+        if (!result) return make_error(result.error());
+    } else {
+        auto result = sandy::core::attention(
+            *qRef,
+            *kRef,
+            *vRef,
+            window,
+            scale,
+            *outRef);
+        if (!result) return make_error(result.error());
+    }
+
+    std::vector<float> output(static_cast<size_t>(batch * qHeads * tq * headDim));
+    for (size_t i = 0; i < output.size(); i++)
+        output[i] = read_f32(outBytes, i);
+    return output;
+}
+
+void run_attention_test(
+        int64_t batch,
+        int64_t qHeads,
+        int64_t kvHeads,
+        int64_t tq,
+        int64_t tk,
+        int64_t headDim,
+        int64_t window,
+        float scale,
+        const std::vector<float>& qValues,
+        const std::vector<float>& kValues,
+        const std::vector<float>& vValues,
+        const std::optional<std::vector<int64_t>>& positionOffsets = std::nullopt,
+        float tolerance = 1.0e-4f) {
+    namespace kir = sandy::ir::kernel_ir;
+
+    kir::Graph graph;
+    auto q = graph.addValue(tensor_type({batch, qHeads, tq, headDim}));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 0, ""},
+        q);
+    auto k = graph.addValue(tensor_type({batch, kvHeads, tk, headDim}));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 1, ""},
+        k);
+    auto v = graph.addValue(tensor_type({batch, kvHeads, tk, headDim}));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 2, ""},
+        v);
+    auto output = graph.addValue(tensor_type({batch, qHeads, tq, headDim}));
+
+    kir::AttentionKernelOp* op = nullptr;
+    if (positionOffsets) {
+        auto positions = graph.addValue(tensor_type({batch}, sandy::core::DType::I64));
+        graph.addOp<kir::InputOp>(
+            kir::InputSource{kir::InputSourceKind::Argument, 3, ""},
+            positions);
+        op = graph.addOp<kir::AttentionKernelOp>(
+            q,
+            k,
+            v,
+            positions,
+            output,
+            window,
+            scale);
+    } else {
+        op = graph.addOp<kir::AttentionKernelOp>(
+            q,
+            k,
+            v,
+            output,
+            window,
+            scale);
+    }
+    graph.setOutputs({output});
+
+    sandy::device::CudaDevice device;
+    auto compiled = device.compile(graph);
+    ASSERT_TRUE(compiled) << compiled.error();
+
+    auto qHost = make_f32_buffer("q", sandy::core::Shape({batch, qHeads, tq, headDim}), qValues);
+    auto kHost = make_f32_buffer("k", sandy::core::Shape({batch, kvHeads, tk, headDim}), kValues);
+    auto vHost = make_f32_buffer("v", sandy::core::Shape({batch, kvHeads, tk, headDim}), vValues);
+    auto qBuffer = device.load(*qHost);
+    ASSERT_TRUE(qBuffer) << qBuffer.error();
+    auto kBuffer = device.load(*kHost);
+    ASSERT_TRUE(kBuffer) << kBuffer.error();
+    auto vBuffer = device.load(*vHost);
+    ASSERT_TRUE(vBuffer) << vBuffer.error();
+    auto outputBuffer = device.alloc(
+        sandy::core::TensorDesc({batch, qHeads, tq, headDim}, sandy::core::DType::F32));
+    ASSERT_TRUE(outputBuffer) << outputBuffer.error();
+
+    std::vector<sandy::device::DeviceRunValue> inputs = {
+        tensor_view(device, *qBuffer, qHost->desc()),
+        tensor_view(device, *kBuffer, kHost->desc()),
+        tensor_view(device, *vBuffer, vHost->desc()),
+    };
+    std::shared_ptr<TestTensorBuffer> positionHost;
+    sandy::device::DeviceBufferId positionBuffer = 0;
+    if (positionOffsets) {
+        std::vector<uint8_t> bytes(positionOffsets->size() * sizeof(int64_t));
+        for (size_t i = 0; i < positionOffsets->size(); i++) {
+            std::memcpy(
+                bytes.data() + i * sizeof(int64_t),
+                &(*positionOffsets)[i],
+                sizeof(int64_t));
+        }
+        positionHost = std::make_shared<TestTensorBuffer>(
+            sandy::core::TensorDesc({batch}, sandy::core::DType::I64),
+            std::move(bytes));
+        auto loadedPosition = device.load(*positionHost);
+        ASSERT_TRUE(loadedPosition) << loadedPosition.error();
+        positionBuffer = *loadedPosition;
+        inputs.push_back(tensor_view(device, positionBuffer, positionHost->desc()));
+    }
+
+    std::vector<sandy::device::DeviceRunValue> outputs = {
+        tensor_view(
+            device,
+            *outputBuffer,
+            sandy::core::TensorDesc({batch, qHeads, tq, headDim}, sandy::core::DType::F32)),
+    };
+    auto run = device.run(*compiled, op->id(), inputs, outputs);
+    ASSERT_TRUE(run) << run.error();
+
+    auto expected = attention_reference(
+        qValues,
+        kValues,
+        vValues,
+        batch,
+        qHeads,
+        kvHeads,
+        tq,
+        tk,
+        headDim,
+        window,
+        scale,
+        positionOffsets);
+    ASSERT_TRUE(expected) << expected.error();
+    expect_f32_output_near(device, *outputBuffer, expected.take(), tolerance);
 }
 
 } // namespace
@@ -719,6 +974,380 @@ TEST(CudaDeviceTest, RunSoftmaxRejectsNonLastDim) {
     auto run = device.run(*compiled, op->id(), inputs, outputs);
     ASSERT_FALSE(run);
     EXPECT_NE(run.error().find("only supports last dimension"), std::string::npos);
+}
+
+TEST(CudaDeviceTest, RunAttentionPrefillF32FullCausalHeadDim64MatchesCpu) {
+    if (auto reason = cuda_device_skip_reason(); !reason.empty())
+        GTEST_SKIP() << reason;
+
+    int64_t batch = 1;
+    int64_t qHeads = 1;
+    int64_t kvHeads = 1;
+    int64_t tq = 4;
+    int64_t tk = 4;
+    int64_t headDim = 64;
+    run_attention_test(
+        batch,
+        qHeads,
+        kvHeads,
+        tq,
+        tk,
+        headDim,
+        0,
+        0.125f,
+        make_pattern(static_cast<size_t>(batch * qHeads * tq * headDim), 0.01f, 0.02f),
+        make_pattern(static_cast<size_t>(batch * kvHeads * tk * headDim), 0.015f, -0.01f),
+        make_pattern(static_cast<size_t>(batch * kvHeads * tk * headDim), 0.02f, 0.03f));
+}
+
+TEST(CudaDeviceTest, RunAttentionPrefillF32SlidingWindowHeadDim64MatchesCpu) {
+    if (auto reason = cuda_device_skip_reason(); !reason.empty())
+        GTEST_SKIP() << reason;
+
+    int64_t batch = 1;
+    int64_t qHeads = 1;
+    int64_t kvHeads = 1;
+    int64_t tq = 6;
+    int64_t tk = 6;
+    int64_t headDim = 64;
+    run_attention_test(
+        batch,
+        qHeads,
+        kvHeads,
+        tq,
+        tk,
+        headDim,
+        2,
+        0.125f,
+        make_pattern(static_cast<size_t>(batch * qHeads * tq * headDim), 0.011f, 0.01f),
+        make_pattern(static_cast<size_t>(batch * kvHeads * tk * headDim), 0.013f, -0.02f),
+        make_pattern(static_cast<size_t>(batch * kvHeads * tk * headDim), 0.017f, 0.04f));
+}
+
+TEST(CudaDeviceTest, RunAttentionPrefillF32GroupedQueryHeadsMatchesCpu) {
+    if (auto reason = cuda_device_skip_reason(); !reason.empty())
+        GTEST_SKIP() << reason;
+
+    int64_t batch = 2;
+    int64_t qHeads = 4;
+    int64_t kvHeads = 2;
+    int64_t tq = 5;
+    int64_t tk = 5;
+    int64_t headDim = 64;
+    run_attention_test(
+        batch,
+        qHeads,
+        kvHeads,
+        tq,
+        tk,
+        headDim,
+        3,
+        0.125f,
+        make_pattern(static_cast<size_t>(batch * qHeads * tq * headDim), 0.007f, -0.01f),
+        make_pattern(static_cast<size_t>(batch * kvHeads * tk * headDim), 0.009f, 0.02f),
+        make_pattern(static_cast<size_t>(batch * kvHeads * tk * headDim), 0.012f, -0.03f));
+}
+
+TEST(CudaDeviceTest, RunAttentionPrefillF32BatchedPositionOffsetsMatchesCpu) {
+    if (auto reason = cuda_device_skip_reason(); !reason.empty())
+        GTEST_SKIP() << reason;
+
+    int64_t batch = 2;
+    int64_t qHeads = 2;
+    int64_t kvHeads = 1;
+    int64_t tq = 3;
+    int64_t tk = 8;
+    int64_t headDim = 64;
+    run_attention_test(
+        batch,
+        qHeads,
+        kvHeads,
+        tq,
+        tk,
+        headDim,
+        4,
+        0.125f,
+        make_pattern(static_cast<size_t>(batch * qHeads * tq * headDim), 0.008f, 0.01f),
+        make_pattern(static_cast<size_t>(batch * kvHeads * tk * headDim), 0.01f, -0.02f),
+        make_pattern(static_cast<size_t>(batch * kvHeads * tk * headDim), 0.014f, 0.03f),
+        std::vector<int64_t>{2, 5});
+}
+
+TEST(CudaDeviceTest, RunAttentionPrefillF32GemmaLocalHeadDim256MatchesCpu) {
+    if (auto reason = cuda_device_skip_reason(); !reason.empty())
+        GTEST_SKIP() << reason;
+
+    int64_t batch = 1;
+    int64_t qHeads = 8;
+    int64_t kvHeads = 1;
+    int64_t tq = 4;
+    int64_t tk = 4;
+    int64_t headDim = 256;
+    run_attention_test(
+        batch,
+        qHeads,
+        kvHeads,
+        tq,
+        tk,
+        headDim,
+        512,
+        1.0f,
+        make_pattern(static_cast<size_t>(batch * qHeads * tq * headDim), 0.0015f, 0.0f),
+        make_pattern(static_cast<size_t>(batch * kvHeads * tk * headDim), 0.0012f, 0.01f),
+        make_pattern(static_cast<size_t>(batch * kvHeads * tk * headDim), 0.003f, -0.02f));
+}
+
+TEST(CudaDeviceTest, RunAttentionPrefillF32GemmaGlobalHeadDim512MatchesCpu) {
+    if (auto reason = cuda_device_skip_reason(); !reason.empty())
+        GTEST_SKIP() << reason;
+
+    int64_t batch = 1;
+    int64_t qHeads = 8;
+    int64_t kvHeads = 2;
+    int64_t tq = 3;
+    int64_t tk = 3;
+    int64_t headDim = 512;
+    run_attention_test(
+        batch,
+        qHeads,
+        kvHeads,
+        tq,
+        tk,
+        headDim,
+        0,
+        1.0f,
+        make_pattern(static_cast<size_t>(batch * qHeads * tq * headDim), 0.001f, 0.01f),
+        make_pattern(static_cast<size_t>(batch * kvHeads * tk * headDim), 0.0011f, -0.01f),
+        make_pattern(static_cast<size_t>(batch * kvHeads * tk * headDim), 0.0025f, 0.0f));
+}
+
+TEST(CudaDeviceTest, RunAttentionDecoderF32LongKvFullContextMatchesCpu) {
+    if (auto reason = cuda_device_skip_reason(); !reason.empty())
+        GTEST_SKIP() << reason;
+
+    int64_t batch = 1;
+    int64_t qHeads = 1;
+    int64_t kvHeads = 1;
+    int64_t tq = 1;
+    int64_t tk = 300;
+    int64_t headDim = 64;
+    run_attention_test(
+        batch,
+        qHeads,
+        kvHeads,
+        tq,
+        tk,
+        headDim,
+        0,
+        0.125f,
+        make_pattern(static_cast<size_t>(batch * qHeads * tq * headDim), 0.006f, 0.01f),
+        make_pattern(static_cast<size_t>(batch * kvHeads * tk * headDim), 0.004f, -0.005f),
+        make_pattern(static_cast<size_t>(batch * kvHeads * tk * headDim), 0.005f, 0.02f),
+        std::vector<int64_t>{tk - 1});
+}
+
+TEST(CudaDeviceTest, RunAttentionDecoderF32LongKvSlidingWindowMatchesCpu) {
+    if (auto reason = cuda_device_skip_reason(); !reason.empty())
+        GTEST_SKIP() << reason;
+
+    int64_t batch = 1;
+    int64_t qHeads = 2;
+    int64_t kvHeads = 1;
+    int64_t tq = 1;
+    int64_t tk = 257;
+    int64_t headDim = 64;
+    run_attention_test(
+        batch,
+        qHeads,
+        kvHeads,
+        tq,
+        tk,
+        headDim,
+        17,
+        0.125f,
+        make_pattern(static_cast<size_t>(batch * qHeads * tq * headDim), 0.005f, -0.01f),
+        make_pattern(static_cast<size_t>(batch * kvHeads * tk * headDim), 0.003f, 0.02f),
+        make_pattern(static_cast<size_t>(batch * kvHeads * tk * headDim), 0.006f, -0.03f),
+        std::vector<int64_t>{tk - 1});
+}
+
+TEST(CudaDeviceTest, RunAttentionDecoderF32LongKvGroupedQueryHeadsMatchesCpu) {
+    if (auto reason = cuda_device_skip_reason(); !reason.empty())
+        GTEST_SKIP() << reason;
+
+    int64_t batch = 2;
+    int64_t qHeads = 4;
+    int64_t kvHeads = 2;
+    int64_t tq = 1;
+    int64_t tk = 260;
+    int64_t headDim = 64;
+    run_attention_test(
+        batch,
+        qHeads,
+        kvHeads,
+        tq,
+        tk,
+        headDim,
+        0,
+        0.125f,
+        make_pattern(static_cast<size_t>(batch * qHeads * tq * headDim), 0.004f, 0.0f),
+        make_pattern(static_cast<size_t>(batch * kvHeads * tk * headDim), 0.003f, 0.01f),
+        make_pattern(static_cast<size_t>(batch * kvHeads * tk * headDim), 0.005f, -0.02f),
+        std::vector<int64_t>{tk - 1, tk - 3});
+}
+
+TEST(CudaDeviceTest, RunAttentionF32RandomUniformFuzzMatchesCpu) {
+    if (auto reason = cuda_device_skip_reason(); !reason.empty())
+        GTEST_SKIP() << reason;
+
+    constexpr int kIterations = 1000;
+    constexpr uint32_t kSeed = 0x5a17d00du;
+    std::mt19937 rng(kSeed);
+
+    const std::vector<int64_t> headDims = {64, 64, 64, 128, 256, 512};
+    const std::vector<int64_t> groups = {1, 1, 2, 4};
+    std::uniform_int_distribution<int> percent(0, 99);
+
+    for (int iteration = 0; iteration < kIterations; iteration++) {
+        int64_t headDim = headDims[static_cast<size_t>(percent(rng)) % headDims.size()];
+        int64_t batch = percent(rng) < 25 ? 2 : 1;
+        int64_t kvHeads = percent(rng) < 20 ? 2 : 1;
+        int64_t group = groups[static_cast<size_t>(percent(rng)) % groups.size()];
+        if (headDim >= 256)
+            group = std::min<int64_t>(group, 2);
+        int64_t qHeads = kvHeads * group;
+
+        bool decoder = percent(rng) < 35;
+        int64_t tq = decoder
+            ? 1
+            : static_cast<int64_t>(2 + (percent(rng) % (headDim >= 256 ? 3 : 5)));
+        int64_t tk = decoder
+            ? static_cast<int64_t>(1 + (percent(rng) % 384))
+            : static_cast<int64_t>(1 + (percent(rng) % (headDim >= 256 ? 8 : 12)));
+
+        bool slidingWindow = percent(rng) < 70;
+        int64_t window = slidingWindow
+            ? static_cast<int64_t>(1 + (percent(rng) % (tk + tq + 4)))
+            : 0;
+        float scale = (0.5f + static_cast<float>(percent(rng)) / 99.0f * 1.5f) /
+            std::sqrt(static_cast<float>(headDim));
+
+        bool usePositionOffsets = decoder || percent(rng) < 50;
+        std::optional<std::vector<int64_t>> positionOffsets;
+        if (usePositionOffsets) {
+            positionOffsets = std::vector<int64_t>(static_cast<size_t>(batch));
+            int64_t maxOffset = tk + tq + 4;
+            for (int64_t b = 0; b < batch; b++)
+                (*positionOffsets)[static_cast<size_t>(b)] =
+                    static_cast<int64_t>(percent(rng) % (maxOffset + 1));
+        }
+
+        SCOPED_TRACE(
+            ::testing::Message()
+            << "seed=" << kSeed
+            << " iteration=" << iteration
+            << " batch=" << batch
+            << " q_heads=" << qHeads
+            << " kv_heads=" << kvHeads
+            << " tq=" << tq
+            << " tk=" << tk
+            << " head_dim=" << headDim
+            << " window=" << window
+            << " positions=" << usePositionOffsets);
+
+        run_attention_test(
+            batch,
+            qHeads,
+            kvHeads,
+            tq,
+            tk,
+            headDim,
+            window,
+            scale,
+            make_uniform_values(
+                rng,
+                static_cast<size_t>(batch * qHeads * tq * headDim),
+                -0.35f,
+                0.35f),
+            make_uniform_values(
+                rng,
+                static_cast<size_t>(batch * kvHeads * tk * headDim),
+                -0.35f,
+                0.35f),
+            make_uniform_values(
+                rng,
+                static_cast<size_t>(batch * kvHeads * tk * headDim),
+                -0.75f,
+                0.75f),
+            positionOffsets,
+            5.0e-4f);
+        if (::testing::Test::HasFatalFailure())
+            return;
+    }
+}
+
+TEST(CudaDeviceTest, RunAttentionRejectsUnsupportedHeadDim) {
+    if (auto reason = cuda_device_skip_reason(); !reason.empty())
+        GTEST_SKIP() << reason;
+    namespace kir = sandy::ir::kernel_ir;
+
+    kir::Graph graph;
+    auto q = graph.addValue(tensor_type({1, 1, 1, 32}));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 0, ""},
+        q);
+    auto k = graph.addValue(tensor_type({1, 1, 1, 32}));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 1, ""},
+        k);
+    auto v = graph.addValue(tensor_type({1, 1, 1, 32}));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 2, ""},
+        v);
+    auto output = graph.addValue(tensor_type({1, 1, 1, 32}));
+    auto* op = graph.addOp<kir::AttentionKernelOp>(q, k, v, output, 0, 1.0);
+    graph.setOutputs({output});
+
+    sandy::device::CudaDevice device;
+    auto compiled = device.compile(graph);
+    ASSERT_TRUE(compiled) << compiled.error();
+
+    auto qHost = make_f32_buffer(
+        "q",
+        sandy::core::Shape({1, 1, 1, 32}),
+        make_pattern(32, 0.01f, 0.0f));
+    auto kHost = make_f32_buffer(
+        "k",
+        sandy::core::Shape({1, 1, 1, 32}),
+        make_pattern(32, 0.01f, 0.0f));
+    auto vHost = make_f32_buffer(
+        "v",
+        sandy::core::Shape({1, 1, 1, 32}),
+        make_pattern(32, 0.01f, 0.0f));
+    auto qBuffer = device.load(*qHost);
+    ASSERT_TRUE(qBuffer) << qBuffer.error();
+    auto kBuffer = device.load(*kHost);
+    ASSERT_TRUE(kBuffer) << kBuffer.error();
+    auto vBuffer = device.load(*vHost);
+    ASSERT_TRUE(vBuffer) << vBuffer.error();
+    auto outputBuffer = device.alloc(
+        sandy::core::TensorDesc({1, 1, 1, 32}, sandy::core::DType::F32));
+    ASSERT_TRUE(outputBuffer) << outputBuffer.error();
+
+    std::vector<sandy::device::DeviceRunValue> inputs = {
+        tensor_view(device, *qBuffer, qHost->desc()),
+        tensor_view(device, *kBuffer, kHost->desc()),
+        tensor_view(device, *vBuffer, vHost->desc()),
+    };
+    std::vector<sandy::device::DeviceRunValue> outputs = {
+        tensor_view(
+            device,
+            *outputBuffer,
+            sandy::core::TensorDesc({1, 1, 1, 32}, sandy::core::DType::F32)),
+    };
+    auto run = device.run(*compiled, op->id(), inputs, outputs);
+    ASSERT_FALSE(run);
+    EXPECT_NE(run.error().find("cuda attention unsupported head dimension"), std::string::npos);
 }
 
 TEST(CudaDeviceTest, RunRoPEF32ImplicitPositions) {

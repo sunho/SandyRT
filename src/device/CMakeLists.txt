@@ -11,6 +11,7 @@ if(SANDY_ENABLE_CUDA)
     cuda/CudaRuntime.cpp
     cuda/CudaDevice.cpp
     cuda/CudaPagedTensor.cpp
+    cuda/CudaAttentionKernels.cu
     cuda/CudaElementwiseKernels.cu
     cuda/CudaGatherKernels.cu
     cuda/CudaKernels.cu
@@ -55,6 +56,7 @@ if(SANDY_ENABLE_CUDA)
 
   set_source_files_properties(
     cuda/CudaElementwiseKernels.cu
+    cuda/CudaAttentionKernels.cu
     cuda/CudaGatherKernels.cu
     cuda/CudaKernels.cu
     cuda/CudaMatMulKernels.cu

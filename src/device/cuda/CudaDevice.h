@@ -58,6 +58,7 @@ private:
         CudaNormProgram,
         CudaRoPEProgram,
         CudaSlidingQueryKeyScoreProgram,
+        CudaAttentionProgram,
         CudaCustomProgram>;
 
     struct CudaDeviceBuffer {

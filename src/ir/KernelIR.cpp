@@ -389,6 +389,11 @@ std::string op_attr_string(const Op& op) {
             return " window=" + std::to_string(score.window()) +
                    " scale=" + std::to_string(score.scale());
         }
+        case OpKind::AttentionKernel: {
+            const auto& attention = static_cast<const AttentionKernelOp&>(op);
+            return " window=" + std::to_string(attention.window()) +
+                   " scale=" + std::to_string(attention.scale());
+        }
         case OpKind::CustomKernel: {
             const auto& custom = static_cast<const CustomKernelOp&>(op);
             return " name=\"" + custom.customName() + "\"";
@@ -416,6 +421,7 @@ const char* op_kind_name(OpKind kind) {
         case OpKind::RoPEKernel: return "rope_kernel";
         case OpKind::SlidingQueryKeyScoreKernel:
             return "sliding_query_key_score_kernel";
+        case OpKind::AttentionKernel: return "attention_kernel";
         case OpKind::CustomKernel: return "custom_kernel";
     }
     return "?";
@@ -1033,6 +1039,61 @@ Result<void> SlidingQueryKeyScoreKernelOp::verify(const Graph& graph) const {
         auto dtype = graph.value(inputs_[2]).type.dtype;
         if (dtype != core::DType::I32 && dtype != core::DType::I64) {
             return make_error(op_ref(id()) + " sliding score position_ids must be i32 or i64");
+        }
+    }
+    return {};
+}
+
+AttentionKernelOp::AttentionKernelOp(
+    OpId id,
+    ValueId query,
+    ValueId key,
+    ValueId value,
+    ValueId output,
+    int64_t window,
+    double scale,
+    DeviceId device)
+    : Op(id, OpKind::AttentionKernel, device),
+      inputs_{query, key, value},
+      outputs_{output},
+      window_(window),
+      scale_(scale)
+{}
+
+AttentionKernelOp::AttentionKernelOp(
+    OpId id,
+    ValueId query,
+    ValueId key,
+    ValueId value,
+    ValueId positionOffsets,
+    ValueId output,
+    int64_t window,
+    double scale,
+    DeviceId device)
+    : Op(id, OpKind::AttentionKernel, device),
+      inputs_{query, key, value, positionOffsets},
+      outputs_{output},
+      window_(window),
+      scale_(scale)
+{}
+
+Result<void> AttentionKernelOp::verify(const Graph& graph) const {
+    if (inputs_.size() != 3 && inputs_.size() != 4) {
+        return make_error(op_ref(id()) + " attention expects 3 or 4 input(s)");
+    }
+    if (auto result = verify_values_exist(graph, inputs(), "input", *this); !result) {
+        return result;
+    }
+    if (auto result = verify_values_exist(graph, outputs(), "output", *this); !result) {
+        return result;
+    }
+    if (window_ < 0) {
+        return make_error(op_ref(id()) + " attention window must be non-negative");
+    }
+    if (inputs_.size() == 4) {
+        auto dtype = graph.value(inputs_[3]).type.dtype;
+        if (dtype != core::DType::I32 && dtype != core::DType::I64) {
+            return make_error(op_ref(id()) + " attention position_offsets must be i32 or i64");
         }
     }
     return {};

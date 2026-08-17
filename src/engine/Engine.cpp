@@ -962,11 +962,17 @@ Engine::Engine(
         copier_ = std::make_unique<HostBounceDeviceWiseCopier>();
 }
 
-Result<std::unique_ptr<CompiledKernelGraph>> Engine::compile(const ir::mid_ir::Graph& graph) {
+Result<std::unique_ptr<CompiledKernelGraph>> Engine::compile(
+        const ir::mid_ir::Graph& graph,
+        const EngineCompileOptions* options) {
     if (devices_.empty())
         return make_error("engine has no devices");
 
-    auto lowered = ir::kernel_ir::lowerMidIRToKernelIR(graph);
+    ir::kernel_ir::LoweringOptions loweringOptions;
+    if (options)
+        loweringOptions.fusor = options->fusor;
+
+    auto lowered = ir::kernel_ir::lowerMidIRToKernelIR(graph, loweringOptions);
     if (!lowered)
         return make_error(lowered.error());
 

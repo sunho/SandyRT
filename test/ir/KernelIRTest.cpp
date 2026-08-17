@@ -386,3 +386,42 @@ TEST_F(MidIRToKernelIRTest, LowersConstantAndScalarBroadcastMul) {
     EXPECT_EQ(graph->value(mulOp.outputs()[0]).type.dtype,
               sandy::core::DType::BF16);
 }
+
+TEST_F(MidIRToKernelIRTest, AttentionFusorOptionControlsLowering) {
+    mid_ir::Graph midGraph;
+    mid_ir::Builder builder(midGraph);
+
+    auto* q = builder.createInput(
+        0, sandy::core::Shape({1, 8, 16, 256}), sandy::core::DType::BF16);
+    auto* k = builder.createInput(
+        1, sandy::core::Shape({1, 2, 16, 256}), sandy::core::DType::BF16);
+    auto* v = builder.createInput(
+        2, sandy::core::Shape({1, 2, 16, 256}), sandy::core::DType::BF16);
+    auto* attention = builder.createAttention(q, k, v, 512, 1.0f);
+    mid_ir::Value* outputs[] = {attention};
+    builder.setOutputs(outputs);
+
+    auto defaultLowered = kernel_ir::lowerMidIRToKernelIR(midGraph);
+    ASSERT_TRUE(defaultLowered) << defaultLowered.error();
+    auto defaultGraph = defaultLowered.take();
+    ASSERT_EQ(defaultGraph->ops().size(), 6u);
+    EXPECT_EQ(defaultGraph->ops()[3]->kind(),
+              kernel_ir::OpKind::SlidingQueryKeyScoreKernel);
+    EXPECT_EQ(defaultGraph->ops()[4]->kind(), kernel_ir::OpKind::SoftmaxKernel);
+    EXPECT_EQ(defaultGraph->ops()[5]->kind(), kernel_ir::OpKind::MatMulKernel);
+
+    kernel_ir::LoweringOptions options;
+    options.fusor.attention = true;
+    auto fusedLowered = kernel_ir::lowerMidIRToKernelIR(midGraph, options);
+    ASSERT_TRUE(fusedLowered) << fusedLowered.error();
+    auto fusedGraph = fusedLowered.take();
+    ASSERT_EQ(fusedGraph->ops().size(), 4u);
+    ASSERT_EQ(fusedGraph->ops()[3]->kind(), kernel_ir::OpKind::AttentionKernel);
+
+    const auto& attentionOp =
+        static_cast<const kernel_ir::AttentionKernelOp&>(*fusedGraph->ops()[3]);
+    EXPECT_EQ(attentionOp.inputs().size(), 3u);
+    EXPECT_EQ(attentionOp.window(), 512);
+    EXPECT_EQ(attentionOp.scale(), 1.0);
+    EXPECT_EQ(fusedGraph->outputs()[0], attentionOp.outputs()[0]);
+}

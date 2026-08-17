@@ -1,3 +1,20 @@
+function(sandy_prefer_active_cxx_stdlib target)
+  if(SANDY_ENABLE_CUDA AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    execute_process(
+      COMMAND ${CMAKE_CXX_COMPILER} -print-file-name=libstdc++.so
+      OUTPUT_VARIABLE SANDY_ACTIVE_LIBSTDCXX
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+    if(EXISTS "${SANDY_ACTIVE_LIBSTDCXX}")
+      get_filename_component(SANDY_ACTIVE_LIBSTDCXX_DIR "${SANDY_ACTIVE_LIBSTDCXX}" DIRECTORY)
+      target_link_options(${target}
+        BEFORE PRIVATE
+        "-L${SANDY_ACTIVE_LIBSTDCXX_DIR}"
+      )
+    endif()
+  endif()
+endfunction()
+
 add_executable(sandygo_tests
   sandygo/LexerTest.cpp
   sandygo/ParserTest.cpp
@@ -149,6 +166,7 @@ target_link_libraries(engine_tests
   EngineLib
   GTest::gtest_main
 )
+sandy_prefer_active_cxx_stdlib(engine_tests)
 
 set_target_properties(engine_tests PROPERTIES
   CXX_STANDARD 20
@@ -167,6 +185,7 @@ if(SANDY_ENABLE_CUDA)
     EngineLib
     GTest::gtest_main
   )
+  sandy_prefer_active_cxx_stdlib(cuda_device_tests)
 
   set_target_properties(cuda_device_tests PROPERTIES
     CXX_STANDARD 20

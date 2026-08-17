@@ -5,6 +5,7 @@
 #include "EngineTypes.h"
 #include "KernelIR.h"
 #include "MidIR.h"
+#include "MidIRToKernelIR.h"
 #include "Result.h"
 
 #include <cstddef>
@@ -30,13 +31,19 @@ struct EngineRunOptions {
     std::function<void(const EngineProfileEvent&)> profileKernel;
 };
 
+struct EngineCompileOptions {
+    ir::kernel_ir::FusorOptions fusor;
+};
+
 class Engine {
 public:
     explicit Engine(
         std::vector<std::unique_ptr<device::Device>> devices,
         std::unique_ptr<device::DeviceWiseCopier> copier = nullptr);
 
-    Result<std::unique_ptr<CompiledKernelGraph>> compile(const ir::mid_ir::Graph& graph);
+    Result<std::unique_ptr<CompiledKernelGraph>> compile(
+        const ir::mid_ir::Graph& graph,
+        const EngineCompileOptions* options = nullptr);
 
     Result<std::vector<TensorBufferPtr>> run(
         const CompiledKernelGraph& compiled,

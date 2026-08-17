@@ -79,6 +79,11 @@ struct CudaSlidingQueryKeyScoreProgram {
     double scale = -1.0;
 };
 
+struct CudaAttentionProgram {
+    int64_t window = 0;
+    double scale = -1.0;
+};
+
 struct CudaCustomProgram {
     std::string customName;
 };
@@ -112,6 +117,10 @@ Result<void> launch_cuda_rope(
 Result<void> launch_cuda_sliding_query_key_score(
     const CudaLaunchContext& context,
     const CudaSlidingQueryKeyScoreProgram& program);
+
+Result<void> launch_cuda_attention(
+    const CudaLaunchContext& context,
+    const CudaAttentionProgram& program);
 
 Result<void> launch_cuda_reduction(
     const CudaLaunchContext& context,

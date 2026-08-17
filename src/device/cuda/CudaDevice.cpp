@@ -159,6 +159,15 @@ Result<DeviceCompiledGraphId> CudaDevice::compile(const ir::kernel_ir::Graph& gr
                 };
                 break;
             }
+            case ir::kernel_ir::OpKind::AttentionKernel: {
+                const auto& attention =
+                    static_cast<const ir::kernel_ir::AttentionKernelOp&>(op);
+                kernel.program = CudaAttentionProgram{
+                    attention.window(),
+                    attention.scale(),
+                };
+                break;
+            }
             case ir::kernel_ir::OpKind::CustomKernel: {
                 const auto& custom = static_cast<const ir::kernel_ir::CustomKernelOp&>(op);
                 kernel.program = CudaCustomProgram{custom.customName()};
@@ -379,6 +388,10 @@ Result<void> CudaDevice::run(
             return launch_cuda_sliding_query_key_score(
                 context,
                 std::get<CudaSlidingQueryKeyScoreProgram>(kernel.program));
+        case ir::kernel_ir::OpKind::AttentionKernel:
+            return launch_cuda_attention(
+                context,
+                std::get<CudaAttentionProgram>(kernel.program));
         case ir::kernel_ir::OpKind::CustomKernel:
             return launch_cuda_custom(
                 context,
