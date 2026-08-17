@@ -3,15 +3,6 @@
 
 namespace sandy::device {
 
-Result<void> launch_cuda_layout_transform(
-        const CudaLaunchContext& context,
-        const CudaLayoutTransformProgram&) {
-    auto valid = validate_context(context, 1, 1, "layout_transform");
-    if (!valid)
-        return make_error(valid.error());
-    return unimplemented("layout_transform");
-}
-
 Result<void> launch_cuda_sliding_query_key_score(
         const CudaLaunchContext& context,
         const CudaSlidingQueryKeyScoreProgram&) {

@@ -30,7 +30,7 @@ core::Shape zero_grow_shape(core::Shape shape, int64_t growDim) {
 } // namespace
 
 Session::Session(
-        device::CpuDevice& device,
+        device::Device& device,
         engine::Engine& engine,
         const engine::CompiledKernelGraph& compiled,
         const engine::TensorMap& weights,

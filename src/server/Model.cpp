@@ -1,6 +1,10 @@
 #include "Model.h"
 
 #include "Compiler.h"
+#include "CpuDevice.h"
+#ifdef SANDY_SERVER_ENABLE_CUDA
+#include "CudaDevice.h"
+#endif
 
 #include <memory>
 #include <mutex>
@@ -105,13 +109,24 @@ Result<void> Model::initialize() {
     if (!midResult)
         return make_error(midResult.error());
 
-    auto cpu = std::make_unique<device::CpuDevice>();
-    cpuDevice_ = cpu.get();
+    std::unique_ptr<device::Device> device;
+#ifdef SANDY_SERVER_ENABLE_CUDA
+    device = std::make_unique<device::CudaDevice>();
+    backend_ = "cuda";
+#else
+    device = std::make_unique<device::CpuDevice>();
+    backend_ = "cpu";
+#endif
+    device_ = device.get();
     std::vector<std::unique_ptr<device::Device>> devices;
-    devices.push_back(std::move(cpu));
+    devices.push_back(std::move(device));
     engine_ = std::make_unique<engine::Engine>(std::move(devices));
 
-    auto compiled = engine_->compile(**midResult);
+    engine::EngineCompileOptions compileOptions;
+#ifdef SANDY_SERVER_ENABLE_CUDA
+    compileOptions.fusor.attention = true;
+#endif
+    auto compiled = engine_->compile(**midResult, &compileOptions);
     if (!compiled)
         return make_error(compiled.error());
     compiled_ = compiled.take();
@@ -123,7 +138,7 @@ Result<GenerateResult> Model::generate(
         int32_t maxTokens,
         const std::vector<int64_t>& stopTokenIds) {
     std::lock_guard<std::mutex> lock(generateMutex_);
-    if (!engine_ || !compiled_ || !cpuDevice_)
+    if (!engine_ || !compiled_ || !device_)
         return make_error("model is not initialized");
 
     std::vector<int64_t> effectiveStopTokens = stopTokenIds;
@@ -139,7 +154,7 @@ Result<GenerateResult> Model::generate(
             effectiveStopTokens.push_back(config_.eosTokenId);
     }
 
-    Session session(*cpuDevice_, *engine_, *compiled_, weightMap_, config_.session);
+    Session session(*device_, *engine_, *compiled_, weightMap_, config_.session);
     return session.generate(inputIds, maxTokens, effectiveStopTokens);
 }
 

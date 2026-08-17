@@ -4,6 +4,7 @@ build-release/
 build-fast/
 build-server/
 build-server-cublas/
+build-server-cuda/
 build-cublas/
 build-cublas12/
 build-cuda/

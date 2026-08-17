@@ -48,6 +48,8 @@ def repo_root() -> pathlib.Path:
 
 def default_runner(root: pathlib.Path) -> pathlib.Path:
     for runner in [
+        root / "build-cuda/test/cuda_runner",
+        root / "build-cuda/cuda_runner",
         root / "build-cublas12/cpu_runner",
         root / "build-cublas/cpu_runner",
         root / "build-fast/cpu_runner",
@@ -57,6 +59,21 @@ def default_runner(root: pathlib.Path) -> pathlib.Path:
         if runner.exists():
             return runner
     return root / "build-fast/cpu_runner"
+
+
+def default_eval_runner(root: pathlib.Path) -> pathlib.Path:
+    for runner in [
+        root / "build-cuda/test/cuda_multi_gemma4_runner",
+        root / "build-cuda/cuda_multi_gemma4_runner",
+        root / "build-cublas12/multi_gemma4_runner",
+        root / "build-cublas/multi_gemma4_runner",
+        root / "build-fast/multi_gemma4_runner",
+        root / "build-opt/test/multi_gemma4_runner",
+        root / "build/test/multi_gemma4_runner",
+    ]:
+        if runner.exists():
+            return runner
+    return root / "build-cuda/test/cuda_multi_gemma4_runner"
 
 
 @dataclass(frozen=True)
@@ -335,6 +352,13 @@ def parse_runner_topk(stdout: str, token_index: int) -> list[tuple[int, float]]:
     raise RuntimeError(f"cpu_runner output did not contain top5[{token_index}]")
 
 
+def parse_generated(stdout: str) -> list[int]:
+    match = re.search(r"^\[generated\](.*)$", stdout, re.MULTILINE)
+    if not match:
+        return []
+    return [int(part) for part in match.group(1).split()]
+
+
 def main() -> int:
     root = repo_root()
     parser = argparse.ArgumentParser(description="Prepare and run Sandy TinyLlama 1.1B Chat BF16.")
@@ -345,10 +369,15 @@ def main() -> int:
                         help="Directory or safetensors file with original HF weights.")
     parser.add_argument("--sandy-weights", default=None, type=pathlib.Path)
     parser.add_argument("--model", default=root / "src/models/tinyllama.sandy.go", type=pathlib.Path)
+    parser.add_argument("--eval-model", default=root / "src/models/tinyllama/eval_token.sandy.go", type=pathlib.Path)
     parser.add_argument("--runner", default=default_runner(root), type=pathlib.Path)
+    parser.add_argument("--eval-runner", default=default_eval_runner(root), type=pathlib.Path)
     parser.add_argument("--max-seq", default=MAX_SEQ, type=int)
+    parser.add_argument("--max-answer-tokens", default=1, type=int)
     parser.add_argument("--ids", type=parse_ids, default=None,
                         help="Comma-separated token ids. Skips tokenizer loading.")
+    parser.add_argument("--eval-token", action="store_true",
+                        help="Run the decoder eval-token model with paged KV caches.")
     parser.add_argument("--download", action="store_true",
                         help="Download the HF snapshot if artifacts are missing.")
     parser.add_argument("--force-convert", action="store_true")
@@ -357,10 +386,6 @@ def main() -> int:
     parser.add_argument("--instrument", action="store_true",
                         help="Print per-kernel CPU engine timing from cpu_runner.")
     args = parser.parse_args()
-
-    if args.max_seq != MAX_SEQ:
-        print(f"this SandyGo model is fixed to max_seq={MAX_SEQ}", file=sys.stderr)
-        return 1
 
     artifacts = args.artifacts
     hf_weights = args.hf_weights or artifacts
@@ -384,6 +409,54 @@ def main() -> int:
     else:
         tokenizer = load_tokenizer(artifacts, args.model_id)
         ids, rendered_prompt = encode_prompt(args.prompt, artifacts, args.model_id)
+
+    if rendered_prompt is not None:
+        print(f"[chat] rendered prompt:\n{rendered_prompt}")
+    print(f"[tokenizer] ids: {ids}")
+
+    if args.eval_token:
+        if args.max_answer_tokens < 0:
+            print("--max-answer-tokens must be >= 0", file=sys.stderr)
+            return 1
+        if not args.eval_runner.exists():
+            print(f"missing eval-token runner: {args.eval_runner}", file=sys.stderr)
+            print("build with: cmake --build build-cuda --target cuda_multi_gemma4_runner", file=sys.stderr)
+            return 1
+        if not args.eval_model.exists():
+            print(f"missing eval-token model: {args.eval_model}", file=sys.stderr)
+            return 1
+
+        cmd = [
+            str(args.eval_runner),
+            "--eval-token",
+            "--architecture", "tinyllama",
+        ]
+        if args.instrument:
+            cmd.append("--profile")
+        cmd.extend([
+            str(args.eval_model),
+            str(sandy_weights),
+            str(args.max_answer_tokens),
+            *[str(token_id) for token_id in ids],
+        ])
+        print("[run]", " ".join(cmd))
+        result = subprocess.run(cmd, text=True, capture_output=True)
+        if result.stdout:
+            print(result.stdout, end="")
+        if result.stderr:
+            print(result.stderr, end="", file=sys.stderr)
+        if result.returncode != 0:
+            return result.returncode
+        generated = parse_generated(result.stdout)
+        if tokenizer is not None and generated:
+            print("[generated decoded]")
+            print(tokenizer.decode(generated, skip_special_tokens=False))
+        return 0
+
+    if args.max_seq != MAX_SEQ:
+        print(f"this SandyGo model is fixed to max_seq={MAX_SEQ}", file=sys.stderr)
+        return 1
+
     if args.keep_input:
         input_path = artifacts / "input_latest.safetensors"
     else:
@@ -392,11 +465,8 @@ def main() -> int:
         input_path = pathlib.Path(tmp_name)
     token_index = write_input(input_path, ids, args.max_seq)
 
-    if rendered_prompt is not None:
-        print(f"[chat] rendered prompt:\n{rendered_prompt}")
     if len(ids) > args.max_seq:
         print(f"[input] prompt has {len(ids)} tokens; using last {args.max_seq}", file=sys.stderr)
-    print(f"[tokenizer] ids: {ids}")
     print(f"[input] next-token logits position: {token_index}")
     print(f"[input] safetensors: {input_path}")
     print(f"[weights] sandy: {sandy_weights}")

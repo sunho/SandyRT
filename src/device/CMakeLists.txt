@@ -15,6 +15,7 @@ if(SANDY_ENABLE_CUDA)
     cuda/CudaElementwiseKernels.cu
     cuda/CudaGatherKernels.cu
     cuda/CudaKernels.cu
+    cuda/CudaLayoutTransformKernels.cu
     cuda/CudaMatMulKernels.cu
     cuda/CudaNormKernels.cu
     cuda/CudaRoPEKernels.cu
@@ -59,6 +60,7 @@ if(SANDY_ENABLE_CUDA)
     cuda/CudaAttentionKernels.cu
     cuda/CudaGatherKernels.cu
     cuda/CudaKernels.cu
+    cuda/CudaLayoutTransformKernels.cu
     cuda/CudaMatMulKernels.cu
     cuda/CudaNormKernels.cu
     cuda/CudaRoPEKernels.cu

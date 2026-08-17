@@ -1,5 +1,8 @@
 #include "Compiler.h"
 #include "CpuDevice.h"
+#ifdef SANDY_RUNNER_ENABLE_CUDA
+#include "CudaDevice.h"
+#endif
 #include "Engine.h"
 #include "SafeTensorWeights.h"
 
@@ -27,6 +30,7 @@ namespace {
 constexpr int kGemma4E2BLocalCacheCount = 12;
 constexpr int kGemma4E2BGlobalCacheCount = 3;
 constexpr int kGemma4E2BKVLayerCount = 15;
+constexpr int kTinyLlamaKVLayerCount = 22;
 
 class HostTensorBuffer final : public sandy::core::TensorBuffer {
 public:
@@ -141,12 +145,11 @@ Result<std::pair<int64_t, float>> argmax_at(
 }
 
 struct EvalTokenCaches {
-    sandy::device::DevicePagedPoolId localPool = 0;
-    sandy::device::DevicePagedPoolId globalPool = 0;
-    std::array<sandy::device::DevicePagedTensorId, kGemma4E2BLocalCacheCount> localK{};
-    std::array<sandy::device::DevicePagedTensorId, kGemma4E2BLocalCacheCount> localV{};
-    std::array<sandy::device::DevicePagedTensorId, kGemma4E2BGlobalCacheCount> globalK{};
-    std::array<sandy::device::DevicePagedTensorId, kGemma4E2BGlobalCacheCount> globalV{};
+    struct Group {
+        sandy::device::DevicePagedPoolId pool = 0;
+        std::vector<sandy::device::DevicePagedTensorId> tensors;
+    };
+    std::vector<Group> groups;
 };
 
 struct ProfileStat {
@@ -162,7 +165,7 @@ double elapsed_ms(Clock::time_point start, Clock::time_point end) {
 }
 
 Result<sandy::device::DevicePagedTensorView> paged_view(
-        sandy::device::CpuDevice& device,
+        sandy::device::Device& device,
         sandy::device::DevicePagedTensorId tensor) {
     auto meta = device.pagedMeta(tensor);
     if (!meta)
@@ -171,8 +174,8 @@ Result<sandy::device::DevicePagedTensorView> paged_view(
 }
 
 Result<sandy::engine::RunTensorTuple> make_paged_tuple(
-        sandy::device::CpuDevice& device,
-        const std::array<sandy::device::DevicePagedTensorId, kGemma4E2BLocalCacheCount>& ids) {
+        sandy::device::Device& device,
+        const std::vector<sandy::device::DevicePagedTensorId>& ids) {
     sandy::engine::RunTensorTuple tuple;
     tuple.elements.reserve(ids.size());
     for (auto id : ids) {
@@ -184,100 +187,120 @@ Result<sandy::engine::RunTensorTuple> make_paged_tuple(
     return tuple;
 }
 
-Result<sandy::engine::RunTensorTuple> make_global_paged_tuple(
-        sandy::device::CpuDevice& device,
-        const std::array<sandy::device::DevicePagedTensorId, kGemma4E2BGlobalCacheCount>& ids) {
-    sandy::engine::RunTensorTuple tuple;
-    tuple.elements.reserve(ids.size());
-    for (auto id : ids) {
-        auto view = paged_view(device, id);
-        if (!view)
-            return make_error(view.error());
-        tuple.elements.push_back(view.take());
+Result<void> add_cache_group(
+        sandy::device::Device& device,
+        EvalTokenCaches& caches,
+        int count,
+        sandy::core::Shape shape,
+        int64_t growDim,
+        int64_t pageSize) {
+    sandy::device::DevicePagedPoolDesc poolDesc;
+    poolDesc.templateDesc = sandy::core::TensorDesc(shape, sandy::core::DType::BF16);
+    poolDesc.growDim = growDim;
+    poolDesc.pageSize = pageSize;
+
+    auto pool = device.createPagedPool(poolDesc);
+    if (!pool)
+        return make_error(pool.error());
+
+    EvalTokenCaches::Group group;
+    group.pool = *pool;
+    group.tensors.reserve(static_cast<size_t>(count));
+
+    auto initialDims = shape.dims();
+    initialDims[static_cast<size_t>(growDim)] = 0;
+    sandy::core::Shape initialShape(std::move(initialDims));
+    for (int i = 0; i < count; i++) {
+        auto tensor = device.allocPaged(group.pool, initialShape);
+        if (!tensor)
+            return make_error(tensor.error());
+        group.tensors.push_back(*tensor);
     }
-    return tuple;
+
+    caches.groups.push_back(std::move(group));
+    return {};
 }
 
-Result<EvalTokenCaches> create_eval_token_caches(sandy::device::CpuDevice& device) {
-    sandy::device::DevicePagedPoolDesc localPoolDesc;
-    localPoolDesc.templateDesc = sandy::core::TensorDesc(
-        sandy::core::Shape({1, 1, sandy::core::Shape::kDynamic, 256}),
-        sandy::core::DType::BF16);
-    localPoolDesc.growDim = 2;
-    localPoolDesc.pageSize = 16;
-
-    sandy::device::DevicePagedPoolDesc globalPoolDesc;
-    globalPoolDesc.templateDesc = sandy::core::TensorDesc(
-        sandy::core::Shape({1, 1, sandy::core::Shape::kDynamic, 512}),
-        sandy::core::DType::BF16);
-    globalPoolDesc.growDim = 2;
-    globalPoolDesc.pageSize = 16;
-
+Result<EvalTokenCaches> create_eval_token_caches(
+        sandy::device::Device& device,
+        std::string_view architecture) {
     EvalTokenCaches caches;
-    auto localPool = device.createPagedPool(localPoolDesc);
-    if (!localPool)
-        return make_error(localPool.error());
-    caches.localPool = *localPool;
-
-    auto globalPool = device.createPagedPool(globalPoolDesc);
-    if (!globalPool)
-        return make_error(globalPool.error());
-    caches.globalPool = *globalPool;
-
-    for (auto& id : caches.localK) {
-        auto tensor = device.allocPaged(caches.localPool, sandy::core::Shape({1, 1, 0, 256}));
-        if (!tensor)
-            return make_error(tensor.error());
-        id = *tensor;
-    }
-    for (auto& id : caches.localV) {
-        auto tensor = device.allocPaged(caches.localPool, sandy::core::Shape({1, 1, 0, 256}));
-        if (!tensor)
-            return make_error(tensor.error());
-        id = *tensor;
-    }
-    for (auto& id : caches.globalK) {
-        auto tensor = device.allocPaged(caches.globalPool, sandy::core::Shape({1, 1, 0, 512}));
-        if (!tensor)
-            return make_error(tensor.error());
-        id = *tensor;
-    }
-    for (auto& id : caches.globalV) {
-        auto tensor = device.allocPaged(caches.globalPool, sandy::core::Shape({1, 1, 0, 512}));
-        if (!tensor)
-            return make_error(tensor.error());
-        id = *tensor;
+    if (architecture == "tinyllama") {
+        auto k = add_cache_group(
+            device,
+            caches,
+            kTinyLlamaKVLayerCount,
+            sandy::core::Shape({1, 4, sandy::core::Shape::kDynamic, 64}),
+            2,
+            16);
+        if (!k)
+            return make_error(k.error());
+        auto v = add_cache_group(
+            device,
+            caches,
+            kTinyLlamaKVLayerCount,
+            sandy::core::Shape({1, 4, sandy::core::Shape::kDynamic, 64}),
+            2,
+            16);
+        if (!v)
+            return make_error(v.error());
+        return caches;
     }
 
+    auto localK = add_cache_group(
+        device,
+        caches,
+        kGemma4E2BLocalCacheCount,
+        sandy::core::Shape({1, 1, sandy::core::Shape::kDynamic, 256}),
+        2,
+        16);
+    if (!localK)
+        return make_error(localK.error());
+    auto localV = add_cache_group(
+        device,
+        caches,
+        kGemma4E2BLocalCacheCount,
+        sandy::core::Shape({1, 1, sandy::core::Shape::kDynamic, 256}),
+        2,
+        16);
+    if (!localV)
+        return make_error(localV.error());
+    auto globalK = add_cache_group(
+        device,
+        caches,
+        kGemma4E2BGlobalCacheCount,
+        sandy::core::Shape({1, 1, sandy::core::Shape::kDynamic, 512}),
+        2,
+        16);
+    if (!globalK)
+        return make_error(globalK.error());
+    auto globalV = add_cache_group(
+        device,
+        caches,
+        kGemma4E2BGlobalCacheCount,
+        sandy::core::Shape({1, 1, sandy::core::Shape::kDynamic, 512}),
+        2,
+        16);
+    if (!globalV)
+        return make_error(globalV.error());
     return caches;
 }
 
 Result<std::vector<sandy::engine::RunInput>> make_eval_inputs(
-        sandy::device::CpuDevice& device,
+        sandy::device::Device& device,
         const EvalTokenCaches& caches,
         int64_t token,
         int64_t position) {
-    auto localK = make_paged_tuple(device, caches.localK);
-    if (!localK)
-        return make_error(localK.error());
-    auto localV = make_paged_tuple(device, caches.localV);
-    if (!localV)
-        return make_error(localV.error());
-    auto globalK = make_global_paged_tuple(device, caches.globalK);
-    if (!globalK)
-        return make_error(globalK.error());
-    auto globalV = make_global_paged_tuple(device, caches.globalV);
-    if (!globalV)
-        return make_error(globalV.error());
-
     std::vector<sandy::engine::RunInput> inputs;
-    inputs.reserve(6);
+    inputs.reserve(2 + caches.groups.size());
     inputs.push_back(make_i64_buffer("input_id", sandy::core::Shape({1, 1}), token));
     inputs.push_back(make_i64_buffer("position_id", sandy::core::Shape({1}), position));
-    inputs.push_back(localK.take());
-    inputs.push_back(localV.take());
-    inputs.push_back(globalK.take());
-    inputs.push_back(globalV.take());
+    for (const auto& group : caches.groups) {
+        auto tuple = make_paged_tuple(device, group.tensors);
+        if (!tuple)
+            return make_error(tuple.error());
+        inputs.push_back(tuple.take());
+    }
     return inputs;
 }
 
@@ -314,57 +337,11 @@ Result<sandy::engine::TensorBufferPtr> require_tensor_output(
     return *tensor;
 }
 
-Result<void> append_eval_outputs(
-        sandy::device::CpuDevice& device,
-        EvalTokenCaches& caches,
-        std::vector<sandy::engine::RunOutput>& outputs) {
-    auto nextK = require_tuple_output(outputs, 0);
-    if (!nextK)
-        return make_error(nextK.error());
-    auto nextV = require_tuple_output(outputs, 1);
-    if (!nextV)
-        return make_error(nextV.error());
-    if ((*nextK)->elements.size() != kGemma4E2BKVLayerCount ||
-        (*nextV)->elements.size() != kGemma4E2BKVLayerCount) {
-        return make_error("runner expected 15 K/V tensors from eval-token graph");
-    }
-
-    int localIndex = 0;
-    int globalIndex = 0;
-    for (int layer = 0; layer < kGemma4E2BKVLayerCount; layer++) {
-        auto k = require_tensor_tuple_element(**nextK, static_cast<size_t>(layer));
-        if (!k)
-            return make_error(k.error());
-        auto v = require_tensor_tuple_element(**nextV, static_cast<size_t>(layer));
-        if (!v)
-            return make_error(v.error());
-
-        if (layer % 5 == 4) {
-            auto appendK = device.appendPaged(caches.globalK[globalIndex], **k);
-            if (!appendK)
-                return make_error(appendK.error());
-            auto appendV = device.appendPaged(caches.globalV[globalIndex], **v);
-            if (!appendV)
-                return make_error(appendV.error());
-            globalIndex++;
-        } else {
-            auto appendK = device.appendPaged(caches.localK[localIndex], **k);
-            if (!appendK)
-                return make_error(appendK.error());
-            auto appendV = device.appendPaged(caches.localV[localIndex], **v);
-            if (!appendV)
-                return make_error(appendV.error());
-            localIndex++;
-        }
-    }
-
-    return {};
-}
-
 void usage() {
     fprintf(stderr,
             "usage: multi_gemma4_runner "
-            "[--eval-token] [--profile] <program.sandy.go> <weights.safetensors> "
+            "[--eval-token] [--architecture gemma4e2b|tinyllama] [--profile] "
+            "<program.sandy.go> <weights.safetensors> "
             "<emit_count> <token_id>...\n");
 }
 
@@ -375,10 +352,18 @@ int main(int argc, char* argv[]) {
     bool evalTokenMode = false;
     bool profile = false;
     bool dumpKernelIR = false;
+    std::string architecture = "gemma4e2b";
     while (arg < argc && std::string_view(argv[arg]).starts_with("--")) {
         std::string_view option(argv[arg]);
         if (option == "--eval-token") {
             evalTokenMode = true;
+        } else if (option == "--architecture") {
+            if (arg + 1 >= argc) {
+                fprintf(stderr, "--architecture requires a value\n");
+                usage();
+                return 1;
+            }
+            architecture = argv[++arg];
         } else if (option == "--profile") {
             profile = true;
         } else if (option == "--dump-kernel-ir") {
@@ -444,12 +429,21 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
-        auto cpu = std::make_unique<sandy::device::CpuDevice>();
-        auto* cpuDevice = cpu.get();
+        std::unique_ptr<sandy::device::Device> device;
+#ifdef SANDY_RUNNER_ENABLE_CUDA
+        device = std::make_unique<sandy::device::CudaDevice>();
+#else
+        device = std::make_unique<sandy::device::CpuDevice>();
+#endif
+        auto* runtimeDevice = device.get();
         std::vector<std::unique_ptr<sandy::device::Device>> devices;
-        devices.push_back(std::move(cpu));
+        devices.push_back(std::move(device));
         sandy::engine::Engine engine(std::move(devices));
-        auto planResult = engine.compile(**midResult);
+        sandy::engine::EngineCompileOptions compileOptions;
+#ifdef SANDY_RUNNER_ENABLE_CUDA
+        compileOptions.fusor.attention = true;
+#endif
+        auto planResult = engine.compile(**midResult, &compileOptions);
         if (!planResult) {
             fprintf(stderr, "plan error: %s\n", planResult.error().c_str());
             return 1;
@@ -459,7 +453,7 @@ int main(int argc, char* argv[]) {
             return 0;
         }
 
-        auto caches = create_eval_token_caches(*cpuDevice);
+        auto caches = create_eval_token_caches(*runtimeDevice, architecture);
         if (!caches) {
             fprintf(stderr, "cache creation error: %s\n", caches.error().c_str());
             return 1;
@@ -482,7 +476,7 @@ int main(int argc, char* argv[]) {
         }
 
         auto evalOnce = [&](int64_t token, int64_t position) {
-            auto inputs = make_eval_inputs(*cpuDevice, *caches, token, position);
+            auto inputs = make_eval_inputs(*runtimeDevice, *caches, token, position);
             if (!inputs)
                 return Result<std::vector<sandy::engine::RunOutput>>(make_error(inputs.error()));
             auto start = Clock::now();
@@ -620,9 +614,17 @@ int main(int argc, char* argv[]) {
         }
 
         std::vector<std::unique_ptr<sandy::device::Device>> devices;
+#ifdef SANDY_RUNNER_ENABLE_CUDA
+        devices.push_back(std::make_unique<sandy::device::CudaDevice>());
+#else
         devices.push_back(std::make_unique<sandy::device::CpuDevice>());
+#endif
         sandy::engine::Engine engine(std::move(devices));
-        auto planResult = engine.compile(**midResult);
+        sandy::engine::EngineCompileOptions compileOptions;
+#ifdef SANDY_RUNNER_ENABLE_CUDA
+        compileOptions.fusor.attention = true;
+#endif
+        auto planResult = engine.compile(**midResult, &compileOptions);
         if (!planResult) {
             fprintf(stderr, "plan error at step %lld: %s\n",
                     static_cast<long long>(step),

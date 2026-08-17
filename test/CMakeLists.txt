@@ -211,6 +211,30 @@ set_target_properties(cpu_runner PROPERTIES
   CXX_STANDARD_REQUIRED ON
 )
 
+if(SANDY_ENABLE_CUDA)
+  add_executable(cuda_runner
+    engine/CpuRunner.cpp
+  )
+
+  target_compile_definitions(cuda_runner
+    PRIVATE
+    SANDY_RUNNER_ENABLE_CUDA
+  )
+
+  target_link_libraries(cuda_runner
+    PRIVATE
+    SandyCompilerLib
+    EngineLib
+    WeightLib
+  )
+  sandy_prefer_active_cxx_stdlib(cuda_runner)
+
+  set_target_properties(cuda_runner PROPERTIES
+    CXX_STANDARD 20
+    CXX_STANDARD_REQUIRED ON
+  )
+endif()
+
 add_executable(multi_gemma4_runner
   engine/MultiGemmaRunner.cpp
 )
@@ -226,3 +250,27 @@ set_target_properties(multi_gemma4_runner PROPERTIES
   CXX_STANDARD 20
   CXX_STANDARD_REQUIRED ON
 )
+
+if(SANDY_ENABLE_CUDA)
+  add_executable(cuda_multi_gemma4_runner
+    engine/MultiGemmaRunner.cpp
+  )
+
+  target_compile_definitions(cuda_multi_gemma4_runner
+    PRIVATE
+    SANDY_RUNNER_ENABLE_CUDA
+  )
+
+  target_link_libraries(cuda_multi_gemma4_runner
+    PRIVATE
+    SandyCompilerLib
+    EngineLib
+    WeightLib
+  )
+  sandy_prefer_active_cxx_stdlib(cuda_multi_gemma4_runner)
+
+  set_target_properties(cuda_multi_gemma4_runner PROPERTIES
+    CXX_STANDARD 20
+    CXX_STANDARD_REQUIRED ON
+  )
+endif()

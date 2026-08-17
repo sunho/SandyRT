@@ -290,6 +290,19 @@ Result<core::TensorDesc> resolve_output_desc(
             outDims.push_back(k->shape.dim(rank - 2));
             return desc_with_shape(graph, output, core::Shape(std::move(outDims)));
         }
+        case OpKind::AttentionKernel: {
+            auto q = lookup_runtime_desc(views, op.inputs()[0]);
+            if (!q)
+                return make_error(q.error());
+            auto v = lookup_runtime_desc(views, op.inputs()[2]);
+            if (!v)
+                return make_error(v.error());
+            auto dims = q->shape.dims();
+            if (dims.empty())
+                return make_error("attention query rank must be >= 1");
+            dims.back() = v->shape.dim(v->shape.rank() - 1);
+            return desc_with_shape(graph, output, core::Shape(std::move(dims)));
+        }
         case OpKind::CustomKernel: {
             const auto& custom = static_cast<const ir::kernel_ir::CustomKernelOp&>(op);
             if (custom.customName() == "linear") {

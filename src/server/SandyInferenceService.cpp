@@ -27,7 +27,7 @@ grpc::Status SandyInferenceService::ModelInfo(
 
     const auto& config = model_->config();
     response->set_model_id(config.modelId);
-    response->set_backend("cpu");
+    response->set_backend(model_->backend());
     response->set_max_context_tokens(config.maxContextTokens);
     return grpc::Status::OK;
 }

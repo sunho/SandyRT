@@ -1,6 +1,6 @@
 #pragma once
 
-#include "CpuDevice.h"
+#include "Device.h"
 #include "Engine.h"
 #include "EngineTypes.h"
 #include "Result.h"
@@ -35,7 +35,7 @@ struct SessionConfig {
 class Session {
 public:
     Session(
-        device::CpuDevice& device,
+        device::Device& device,
         engine::Engine& engine,
         const engine::CompiledKernelGraph& compiled,
         const engine::TensorMap& weights,
@@ -64,7 +64,7 @@ private:
     bool shouldStop(int64_t token, const std::unordered_set<int64_t>& stopTokens) const;
     void destroyCaches();
 
-    device::CpuDevice& device_;
+    device::Device& device_;
     engine::Engine& engine_;
     const engine::CompiledKernelGraph& compiled_;
     const engine::TensorMap& weights_;

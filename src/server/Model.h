@@ -1,6 +1,6 @@
 #pragma once
 
-#include "CpuDevice.h"
+#include "Device.h"
 #include "Engine.h"
 #include "EngineTypes.h"
 #include "Result.h"
@@ -36,6 +36,7 @@ public:
         const std::vector<int64_t>& stopTokenIds);
 
     const ModelConfig& config() const { return config_; }
+    const std::string& backend() const { return backend_; }
 
 private:
     explicit Model(ModelConfig config);
@@ -47,7 +48,8 @@ private:
     engine::TensorMap weightMap_;
     std::unique_ptr<engine::CompiledKernelGraph> compiled_;
     std::unique_ptr<engine::Engine> engine_;
-    device::CpuDevice* cpuDevice_ = nullptr;
+    device::Device* device_ = nullptr;
+    std::string backend_ = "cpu";
     std::mutex generateMutex_;
 };
 

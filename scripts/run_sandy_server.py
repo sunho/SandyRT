@@ -17,6 +17,7 @@ def repo_root() -> pathlib.Path:
 
 def default_worker(root: pathlib.Path) -> pathlib.Path:
     for worker in [
+        root / "build-server-cuda/src/server/sandy_grpc_worker",
         root / "build-server-cublas/src/server/sandy_grpc_worker",
         root / "build-server/src/server/sandy_grpc_worker",
         root / "build/src/server/sandy_grpc_worker",
@@ -53,6 +54,16 @@ def with_pythonpath(root: pathlib.Path) -> dict[str, str]:
     package_root = str(root / "python")
     existing = env.get("PYTHONPATH")
     env["PYTHONPATH"] = package_root if not existing else package_root + os.pathsep + existing
+    return env
+
+
+def with_cuda_worker_env() -> dict[str, str]:
+    env = os.environ.copy()
+    wsl_lib = "/usr/lib/wsl/lib"
+    current = env.get("LD_LIBRARY_PATH")
+    parts = current.split(os.pathsep) if current else []
+    if wsl_lib not in parts:
+        env["LD_LIBRARY_PATH"] = wsl_lib if not current else wsl_lib + os.pathsep + current
     return env
 
 
@@ -108,7 +119,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--architecture",
-        default="gemma4e2b",
+        default="tinyllama",
         choices=["gemma4e2b", "gemma4e4b", "gemma", "tinyllama"],
     )
     parser.add_argument("--worker", default=default_worker(root), type=pathlib.Path)
@@ -153,7 +164,7 @@ def main() -> int:
     if not args.worker.exists():
         print(f"missing sandy_grpc_worker: {args.worker}", file=sys.stderr)
         print(
-            "build with: python3 scripts/build_sandy_server_cublas.py",
+            "build with: python3 scripts/build_sandy_server_cuda.py",
             file=sys.stderr,
         )
         return 1
@@ -191,7 +202,7 @@ def main() -> int:
     ]
 
     print("[start]", " ".join(worker_cmd))
-    worker = popen(worker_cmd)
+    worker = popen(worker_cmd, env=with_cuda_worker_env())
     time.sleep(0.5)
     if worker.poll() is not None:
         return worker.returncode or 1

@@ -1,5 +1,8 @@
 #include "Compiler.h"
 #include "CpuDevice.h"
+#ifdef SANDY_RUNNER_ENABLE_CUDA
+#include "CudaDevice.h"
+#endif
 #include "Engine.h"
 #include "Interpreter.h"
 #include "Lexer.h"
@@ -345,6 +348,10 @@ void print_tensor(const std::string& name, sandy::core::TensorBuffer& buffer) {
 } // namespace
 
 int main(int argc, char* argv[]) {
+    const char* runnerName = "cpu_runner";
+#ifdef SANDY_RUNNER_ENABLE_CUDA
+    runnerName = "cuda_runner";
+#endif
     bool instrument = false;
     int arg = 1;
     if (argc >= 2 && std::strcmp(argv[1], "--instrument") == 0) {
@@ -352,7 +359,7 @@ int main(int argc, char* argv[]) {
         arg = 2;
     }
     if (argc - arg != 3) {
-        fprintf(stderr, "usage: cpu_runner [--instrument] <program.sandy.go> <weights.safetensors> <inputs.safetensors>\n");
+        fprintf(stderr, "usage: %s [--instrument] <program.sandy.go> <weights.safetensors> <inputs.safetensors>\n", runnerName);
         return 1;
     }
 
@@ -430,11 +437,25 @@ int main(int argc, char* argv[]) {
     midGraph->dump();
     printStage("dump_mid_ir");
 
-    printf("[7/8] compiling cpu kernel graph\n");
+    printf("[7/8] compiling %s kernel graph\n",
+#ifdef SANDY_RUNNER_ENABLE_CUDA
+           "cuda"
+#else
+           "cpu"
+#endif
+    );
     std::vector<std::unique_ptr<sandy::device::Device>> devices;
+#ifdef SANDY_RUNNER_ENABLE_CUDA
+    devices.push_back(std::make_unique<sandy::device::CudaDevice>());
+#else
     devices.push_back(std::make_unique<sandy::device::CpuDevice>());
+#endif
     sandy::engine::Engine engine(std::move(devices));
-    auto graphResult = engine.compile(*midGraph);
+    sandy::engine::EngineCompileOptions compileOptions;
+#ifdef SANDY_RUNNER_ENABLE_CUDA
+    compileOptions.fusor.attention = true;
+#endif
+    auto graphResult = engine.compile(*midGraph, &compileOptions);
     if (!graphResult) {
         fprintf(stderr, "compile error: %s\n", graphResult.error().c_str());
         return 1;
