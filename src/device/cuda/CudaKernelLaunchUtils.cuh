@@ -18,7 +18,7 @@ inline Result<void> validate_context(
     if (context.outputs.size() < minOutputs)
         return make_error(std::string("cuda ") + kernelName + " output arity mismatch");
     for (const auto& input : context.inputs) {
-        if (!input.data && input.bytes != 0)
+        if (!input.data && (input.paged ? input.pageCount != 0 : input.bytes != 0))
             return make_error(std::string("cuda ") + kernelName + " input buffer is null");
     }
     for (const auto& output : context.outputs) {

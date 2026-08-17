@@ -124,9 +124,7 @@ Result<DeviceRoPEProgram> pack_rope_program(
 __device__ int64_t load_index_at_storage(
         const cuda_kernel::TensorArg& tensor,
         int64_t index) {
-    if (tensor.dtype == core::DType::I32)
-        return static_cast<int64_t>(static_cast<const int32_t*>(tensor.data)[index]);
-    return static_cast<const int64_t*>(tensor.data)[index];
+    return cuda_kernel::load_int_at_storage(tensor, index);
 }
 
 __device__ bool rope_position(

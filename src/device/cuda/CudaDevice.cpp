@@ -69,18 +69,12 @@ Result<DeviceCompiledGraphId> CudaDevice::compile(const ir::kernel_ir::Graph& gr
     if (!verify)
         return make_error(verify.error());
 
-    for (const auto& value : graph.values()) {
-        if (value.type.kind == ir::kernel_ir::ValueKind::PagedTensor) {
-            return make_error(
-                "cuda device KernelIR runner does not support paged tensor values yet");
-        }
-    }
-
     CudaDeviceGraph compiled;
     for (const auto& opPtr : graph.ops()) {
         const auto& op = *opPtr;
         if (op.kind() == ir::kernel_ir::OpKind::Input ||
             op.kind() == ir::kernel_ir::OpKind::TensorTupleCreate ||
+            op.kind() == ir::kernel_ir::OpKind::PagedAppend ||
             op.kind() == ir::kernel_ir::OpKind::DeviceTransfer) {
             continue;
         }
@@ -174,7 +168,9 @@ Result<DeviceCompiledGraphId> CudaDevice::compile(const ir::kernel_ir::Graph& gr
                 break;
             }
             case ir::kernel_ir::OpKind::Input:
+            case ir::kernel_ir::OpKind::TensorTupleCreate:
             case ir::kernel_ir::OpKind::DeviceTransfer:
+            case ir::kernel_ir::OpKind::PagedAppend:
                 break;
         }
 
@@ -318,14 +314,41 @@ Result<void> CudaDevice::run(
     inputViews.reserve(inputs.size());
     for (const auto& input : inputs) {
         auto* tensor = std::get_if<DeviceTensorView>(&input);
-        if (!tensor)
-            return make_error("cuda device kernel input must be a dense tensor view");
-        auto view = buffer_view(tensor->buffer, false);
+        if (tensor) {
+            auto view = buffer_view(tensor->buffer, false);
+            if (!view)
+                return make_error(view.error());
+            auto viewValue = view.take();
+            viewValue.view = tensor->view;
+            inputViews.push_back(std::move(viewValue));
+            continue;
+        }
+
+        auto* paged = std::get_if<DevicePagedTensorView>(&input);
+        if (!paged)
+            return make_error("cuda device kernel input must be a tensor view");
+
+        auto synced = sync_paged_tensor_table(paged->tensor);
+        if (!synced)
+            return make_error(synced.error());
+        auto pagedView = paged_tensor_view(paged->tensor);
+        if (!pagedView)
+            return make_error(pagedView.error());
+        auto pagedValue = pagedView.take();
+
+        auto view = defaultView(pagedValue.meta.logicalDesc);
         if (!view)
             return make_error(view.error());
-        auto viewValue = view.take();
-        viewValue.view = tensor->view;
-        inputViews.push_back(std::move(viewValue));
+        inputViews.push_back(CudaDeviceBufferView{
+            pagedValue.pageTable,
+            view.take(),
+            pagedValue.pageBytes * static_cast<size_t>(pagedValue.meta.pageCount),
+            true,
+            pagedValue.meta.growDim,
+            pagedValue.meta.pageSize,
+            pagedValue.meta.pageCount,
+            pagedValue.meta.pageElementCount,
+        });
     }
 
     std::vector<CudaDeviceBufferView> outputViews;

@@ -67,9 +67,7 @@ Result<DeviceGatherProgram> pack_gather_program(const CudaLaunchContext& context
 __device__ int64_t load_index_at_storage(
         const cuda_kernel::TensorArg& tensor,
         int64_t index) {
-    if (tensor.dtype == core::DType::I32)
-        return static_cast<int64_t>(static_cast<const int32_t*>(tensor.data)[index]);
-    return static_cast<const int64_t*>(tensor.data)[index];
+    return cuda_kernel::load_int_at_storage(tensor, index);
 }
 
 __global__ void gather_kernel(DeviceGatherProgram program, int* errorFlag) {

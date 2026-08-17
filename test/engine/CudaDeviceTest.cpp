@@ -137,6 +137,19 @@ sandy::ir::kernel_ir::ValueType tensor_type(
     };
 }
 
+sandy::ir::kernel_ir::ValueType paged_tensor_type(
+        sandy::core::Shape shape,
+        sandy::core::DType dtype,
+        int64_t growDim,
+        int64_t pageSize) {
+    return sandy::ir::kernel_ir::ValueType{
+        sandy::ir::kernel_ir::ValueKind::PagedTensor,
+        dtype,
+        std::move(shape),
+        sandy::ir::kernel_ir::PagedTensorMeta{growDim, pageSize},
+    };
+}
+
 sandy::device::DeviceTensorView tensor_view(
         sandy::device::CudaDevice& device,
         sandy::device::DeviceBufferId buffer,
@@ -147,6 +160,14 @@ sandy::device::DeviceTensorView tensor_view(
         buffer,
         view.take(),
     };
+}
+
+sandy::device::DevicePagedTensorView paged_tensor_view(
+        sandy::device::CudaDevice& device,
+        sandy::device::DevicePagedTensorId tensor) {
+    auto meta = device.pagedMeta(tensor);
+    EXPECT_TRUE(meta) << meta.error();
+    return sandy::device::DevicePagedTensorView{tensor, meta.take()};
 }
 
 void expect_f32_output(
@@ -451,6 +472,200 @@ TEST(CudaDeviceTest, RunChainedElementwiseF32) {
         {0.0f, std::tanh(1.0f), std::tanh(2.0f)});
 }
 
+TEST(CudaDeviceTest, CompileAcceptsPagedTensorKernelInput) {
+    if (auto reason = cuda_device_skip_reason(); !reason.empty())
+        GTEST_SKIP() << reason;
+    namespace kir = sandy::ir::kernel_ir;
+
+    kir::Graph graph;
+    auto input = graph.addValue(
+        paged_tensor_type(
+            sandy::core::Shape({1, 1, sandy::core::Shape::kDynamic, 64}),
+            sandy::core::DType::F32,
+            2,
+            16));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 0, ""},
+        input);
+    auto output = graph.addValue(tensor_type({1, 1, sandy::core::Shape::kDynamic, 64}));
+    graph.addOp<kir::ElementwiseKernelOp>(
+        std::vector<kir::ElementwiseInput>{
+            kir::ElementwiseInput{input, kir::BroadcastMode::None},
+        },
+        output,
+        0,
+        std::vector<kir::ScalarNode>{
+            kir::ScalarNode{0, kir::ScalarOp::Load, sandy::core::DType::F32, 0, 0.0, {}},
+        });
+    graph.setOutputs({output});
+
+    sandy::device::CudaDevice device;
+    auto compiled = device.compile(graph);
+    ASSERT_TRUE(compiled) << compiled.error();
+}
+
+TEST(CudaDeviceTest, RunElementwiseReadsPagedTensorF32) {
+    if (auto reason = cuda_device_skip_reason(); !reason.empty())
+        GTEST_SKIP() << reason;
+    namespace kir = sandy::ir::kernel_ir;
+
+    kir::Graph graph;
+    auto input = graph.addValue(
+        paged_tensor_type(
+            sandy::core::Shape({2, sandy::core::Shape::kDynamic, 4}),
+            sandy::core::DType::F32,
+            1,
+            2));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 0, ""},
+        input);
+    auto output = graph.addValue(tensor_type({2, sandy::core::Shape::kDynamic, 4}));
+    auto* op = graph.addOp<kir::ElementwiseKernelOp>(
+        std::vector<kir::ElementwiseInput>{
+            kir::ElementwiseInput{input, kir::BroadcastMode::None},
+        },
+        output,
+        2,
+        std::vector<kir::ScalarNode>{
+            kir::ScalarNode{0, kir::ScalarOp::Load, sandy::core::DType::F32, 0, 0.0, {}},
+            kir::ScalarNode{1, kir::ScalarOp::Constant, sandy::core::DType::F32, 0, 1.0, {}},
+            kir::ScalarNode{2, kir::ScalarOp::Add, sandy::core::DType::F32, 0, 0.0, {0, 1}},
+        });
+    graph.setOutputs({output});
+
+    sandy::device::CudaDevice device;
+    auto compiled = device.compile(graph);
+    ASSERT_TRUE(compiled) << compiled.error();
+
+    sandy::device::DevicePagedPoolDesc poolDesc;
+    poolDesc.templateDesc = sandy::core::TensorDesc(
+        sandy::core::Shape({2, sandy::core::Shape::kDynamic, 4}),
+        sandy::core::DType::F32);
+    poolDesc.growDim = 1;
+    poolDesc.pageSize = 2;
+    auto pool = device.createPagedPool(poolDesc);
+    ASSERT_TRUE(pool) << pool.error();
+    auto paged = device.allocPaged(*pool, sandy::core::Shape({2, 0, 4}));
+    ASSERT_TRUE(paged) << paged.error();
+
+    std::vector<float> values(24);
+    for (size_t i = 0; i < values.size(); i++)
+        values[i] = static_cast<float>(i);
+    auto chunk = make_f32_buffer("chunk", sandy::core::Shape({2, 3, 4}), values);
+    auto append = device.appendPaged(*paged, *chunk);
+    ASSERT_TRUE(append) << append.error();
+
+    auto outputBuffer = device.alloc(
+        sandy::core::TensorDesc({2, 3, 4}, sandy::core::DType::F32));
+    ASSERT_TRUE(outputBuffer) << outputBuffer.error();
+
+    std::vector<sandy::device::DeviceRunValue> inputs = {
+        paged_tensor_view(device, *paged),
+    };
+    std::vector<sandy::device::DeviceRunValue> outputs = {
+        tensor_view(
+            device,
+            *outputBuffer,
+            sandy::core::TensorDesc({2, 3, 4}, sandy::core::DType::F32)),
+    };
+    auto run = device.run(*compiled, op->id(), inputs, outputs);
+    ASSERT_TRUE(run) << run.error();
+
+    std::vector<float> expected(24);
+    for (size_t i = 0; i < expected.size(); i++)
+        expected[i] = static_cast<float>(i + 1);
+    expect_f32_output_near(device, *outputBuffer, expected);
+
+    EXPECT_TRUE(device.deallocPaged(*paged));
+    EXPECT_TRUE(device.destroyPagedPool(*pool));
+}
+
+TEST(CudaDeviceTest, RunElementwiseRefreshesPagedTensorMetaAtLaunch) {
+    if (auto reason = cuda_device_skip_reason(); !reason.empty())
+        GTEST_SKIP() << reason;
+    namespace kir = sandy::ir::kernel_ir;
+
+    kir::Graph graph;
+    auto input = graph.addValue(
+        paged_tensor_type(
+            sandy::core::Shape({2, sandy::core::Shape::kDynamic, 4}),
+            sandy::core::DType::F32,
+            1,
+            2));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 0, ""},
+        input);
+    auto output = graph.addValue(tensor_type({2, sandy::core::Shape::kDynamic, 4}));
+    auto* op = graph.addOp<kir::ElementwiseKernelOp>(
+        std::vector<kir::ElementwiseInput>{
+            kir::ElementwiseInput{input, kir::BroadcastMode::None},
+        },
+        output,
+        0,
+        std::vector<kir::ScalarNode>{
+            kir::ScalarNode{0, kir::ScalarOp::Load, sandy::core::DType::F32, 0, 0.0, {}},
+        });
+    graph.setOutputs({output});
+
+    sandy::device::CudaDevice device;
+    auto compiled = device.compile(graph);
+    ASSERT_TRUE(compiled) << compiled.error();
+
+    sandy::device::DevicePagedPoolDesc poolDesc;
+    poolDesc.templateDesc = sandy::core::TensorDesc(
+        sandy::core::Shape({2, sandy::core::Shape::kDynamic, 4}),
+        sandy::core::DType::F32);
+    poolDesc.growDim = 1;
+    poolDesc.pageSize = 2;
+    auto pool = device.createPagedPool(poolDesc);
+    ASSERT_TRUE(pool) << pool.error();
+    auto paged = device.allocPaged(*pool, sandy::core::Shape({2, 0, 4}));
+    ASSERT_TRUE(paged) << paged.error();
+    auto staleView = paged_tensor_view(device, *paged);
+
+    auto first = make_f32_buffer(
+        "first",
+        sandy::core::Shape({2, 1, 4}),
+        {0.0f, 1.0f, 2.0f, 3.0f,
+         4.0f, 5.0f, 6.0f, 7.0f});
+    auto second = make_f32_buffer(
+        "second",
+        sandy::core::Shape({2, 2, 4}),
+        {8.0f, 9.0f, 10.0f, 11.0f,
+         12.0f, 13.0f, 14.0f, 15.0f,
+         16.0f, 17.0f, 18.0f, 19.0f,
+         20.0f, 21.0f, 22.0f, 23.0f});
+    ASSERT_TRUE(device.appendPaged(*paged, *first));
+    ASSERT_TRUE(device.appendPaged(*paged, *second));
+
+    auto outputBuffer = device.alloc(
+        sandy::core::TensorDesc({2, 3, 4}, sandy::core::DType::F32));
+    ASSERT_TRUE(outputBuffer) << outputBuffer.error();
+
+    std::vector<sandy::device::DeviceRunValue> inputs = {staleView};
+    std::vector<sandy::device::DeviceRunValue> outputs = {
+        tensor_view(
+            device,
+            *outputBuffer,
+            sandy::core::TensorDesc({2, 3, 4}, sandy::core::DType::F32)),
+    };
+    auto run = device.run(*compiled, op->id(), inputs, outputs);
+    ASSERT_TRUE(run) << run.error();
+
+    std::vector<float> expected = {
+        0.0f, 1.0f, 2.0f, 3.0f,
+        8.0f, 9.0f, 10.0f, 11.0f,
+        12.0f, 13.0f, 14.0f, 15.0f,
+        4.0f, 5.0f, 6.0f, 7.0f,
+        16.0f, 17.0f, 18.0f, 19.0f,
+        20.0f, 21.0f, 22.0f, 23.0f,
+    };
+    expect_f32_output_near(device, *outputBuffer, expected);
+
+    EXPECT_TRUE(device.deallocPaged(*paged));
+    EXPECT_TRUE(device.destroyPagedPool(*pool));
+}
+
 TEST(CudaDeviceTest, RunSuffixBroadcastAddF32) {
     if (auto reason = cuda_device_skip_reason(); !reason.empty())
         GTEST_SKIP() << reason;
@@ -736,6 +951,82 @@ TEST(CudaDeviceTest, RunMatMulF32) {
     ASSERT_TRUE(run) << run.error();
 
     expect_f32_output(device, *outputBuffer, {58.0f, 64.0f, 139.0f, 154.0f});
+}
+
+TEST(CudaDeviceTest, RunMatMulRejectsPagedOperand) {
+    if (auto reason = cuda_device_skip_reason(); !reason.empty())
+        GTEST_SKIP() << reason;
+    namespace kir = sandy::ir::kernel_ir;
+
+    kir::Graph graph;
+    auto lhs = graph.addValue(
+        paged_tensor_type(
+            sandy::core::Shape({sandy::core::Shape::kDynamic, 3}),
+            sandy::core::DType::F32,
+            0,
+            2));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 0, ""},
+        lhs);
+    auto rhs = graph.addValue(tensor_type({3, 2}));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 1, ""},
+        rhs);
+    auto output = graph.addValue(tensor_type({2, 2}));
+    auto* op = graph.addOp<kir::MatMulKernelOp>(
+        lhs,
+        rhs,
+        output,
+        false,
+        false);
+    graph.setOutputs({output});
+
+    sandy::device::CudaDevice device;
+    auto compiled = device.compile(graph);
+    ASSERT_TRUE(compiled) << compiled.error();
+
+    sandy::device::DevicePagedPoolDesc poolDesc;
+    poolDesc.templateDesc = sandy::core::TensorDesc(
+        sandy::core::Shape({sandy::core::Shape::kDynamic, 3}),
+        sandy::core::DType::F32);
+    poolDesc.growDim = 0;
+    poolDesc.pageSize = 2;
+    auto pool = device.createPagedPool(poolDesc);
+    ASSERT_TRUE(pool) << pool.error();
+    auto paged = device.allocPaged(*pool, sandy::core::Shape({2, 3}));
+    ASSERT_TRUE(paged) << paged.error();
+    auto chunk = make_f32_buffer(
+        "lhs",
+        sandy::core::Shape({2, 3}),
+        {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f});
+    ASSERT_TRUE(device.appendPaged(*paged, *chunk));
+
+    auto rhsHost = make_f32_buffer(
+        "rhs",
+        sandy::core::Shape({3, 2}),
+        {7.0f, 8.0f, 9.0f, 10.0f, 11.0f, 12.0f});
+    auto rhsBuffer = device.load(*rhsHost);
+    ASSERT_TRUE(rhsBuffer) << rhsBuffer.error();
+    auto outputBuffer = device.alloc(
+        sandy::core::TensorDesc({2, 2}, sandy::core::DType::F32));
+    ASSERT_TRUE(outputBuffer) << outputBuffer.error();
+
+    std::vector<sandy::device::DeviceRunValue> inputs = {
+        paged_tensor_view(device, *paged),
+        tensor_view(device, *rhsBuffer, rhsHost->desc()),
+    };
+    std::vector<sandy::device::DeviceRunValue> outputs = {
+        tensor_view(
+            device,
+            *outputBuffer,
+            sandy::core::TensorDesc({2, 2}, sandy::core::DType::F32)),
+    };
+    auto run = device.run(*compiled, op->id(), inputs, outputs);
+    ASSERT_FALSE(run);
+    EXPECT_NE(run.error().find("matmul does not support paged tensor"), std::string::npos);
+
+    EXPECT_TRUE(device.deallocPaged(*paged));
+    EXPECT_TRUE(device.destroyPagedPool(*pool));
 }
 
 TEST(CudaDeviceTest, RunMatMulF32TransposedRhs) {
@@ -1194,6 +1485,148 @@ TEST(CudaDeviceTest, RunAttentionDecoderF32LongKvGroupedQueryHeadsMatchesCpu) {
         make_pattern(static_cast<size_t>(batch * kvHeads * tk * headDim), 0.003f, 0.01f),
         make_pattern(static_cast<size_t>(batch * kvHeads * tk * headDim), 0.005f, -0.02f),
         std::vector<int64_t>{tk - 1, tk - 3});
+}
+
+TEST(CudaDeviceTest, RunAttentionReadsPagedKeyValueCacheF32) {
+    if (auto reason = cuda_device_skip_reason(); !reason.empty())
+        GTEST_SKIP() << reason;
+    namespace kir = sandy::ir::kernel_ir;
+
+    int64_t batch = 1;
+    int64_t qHeads = 2;
+    int64_t kvHeads = 1;
+    int64_t tq = 1;
+    int64_t tk = 3;
+    int64_t headDim = 64;
+    float scale = 0.125f;
+
+    kir::Graph graph;
+    auto q = graph.addValue(tensor_type({batch, qHeads, tq, headDim}));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 0, ""},
+        q);
+    auto k = graph.addValue(
+        paged_tensor_type(
+            sandy::core::Shape({batch, kvHeads, sandy::core::Shape::kDynamic, headDim}),
+            sandy::core::DType::F32,
+            2,
+            2));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 1, ""},
+        k);
+    auto v = graph.addValue(
+        paged_tensor_type(
+            sandy::core::Shape({batch, kvHeads, sandy::core::Shape::kDynamic, headDim}),
+            sandy::core::DType::F32,
+            2,
+            2));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 2, ""},
+        v);
+    auto positions = graph.addValue(tensor_type({batch}, sandy::core::DType::I64));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 3, ""},
+        positions);
+    auto output = graph.addValue(tensor_type({batch, qHeads, tq, headDim}));
+    auto* op = graph.addOp<kir::AttentionKernelOp>(
+        q,
+        k,
+        v,
+        positions,
+        output,
+        0,
+        scale);
+    graph.setOutputs({output});
+
+    sandy::device::CudaDevice device;
+    auto compiled = device.compile(graph);
+    ASSERT_TRUE(compiled) << compiled.error();
+
+    auto qValues = make_pattern(
+        static_cast<size_t>(batch * qHeads * tq * headDim),
+        0.006f,
+        0.01f);
+    auto kValues = make_pattern(
+        static_cast<size_t>(batch * kvHeads * tk * headDim),
+        0.004f,
+        -0.005f);
+    auto vValues = make_pattern(
+        static_cast<size_t>(batch * kvHeads * tk * headDim),
+        0.005f,
+        0.02f);
+
+    auto qHost = make_f32_buffer("q", sandy::core::Shape({batch, qHeads, tq, headDim}), qValues);
+    auto qBuffer = device.load(*qHost);
+    ASSERT_TRUE(qBuffer) << qBuffer.error();
+
+    sandy::device::DevicePagedPoolDesc poolDesc;
+    poolDesc.templateDesc = sandy::core::TensorDesc(
+        sandy::core::Shape({batch, kvHeads, sandy::core::Shape::kDynamic, headDim}),
+        sandy::core::DType::F32);
+    poolDesc.growDim = 2;
+    poolDesc.pageSize = 2;
+    auto kPool = device.createPagedPool(poolDesc);
+    ASSERT_TRUE(kPool) << kPool.error();
+    auto vPool = device.createPagedPool(poolDesc);
+    ASSERT_TRUE(vPool) << vPool.error();
+    auto kPaged = device.allocPaged(*kPool, sandy::core::Shape({batch, kvHeads, 0, headDim}));
+    ASSERT_TRUE(kPaged) << kPaged.error();
+    auto vPaged = device.allocPaged(*vPool, sandy::core::Shape({batch, kvHeads, 0, headDim}));
+    ASSERT_TRUE(vPaged) << vPaged.error();
+
+    auto kChunk = make_f32_buffer(
+        "k",
+        sandy::core::Shape({batch, kvHeads, tk, headDim}),
+        kValues);
+    auto vChunk = make_f32_buffer(
+        "v",
+        sandy::core::Shape({batch, kvHeads, tk, headDim}),
+        vValues);
+    ASSERT_TRUE(device.appendPaged(*kPaged, *kChunk));
+    ASSERT_TRUE(device.appendPaged(*vPaged, *vChunk));
+
+    auto positionHost = make_i64_buffer("positions", sandy::core::Shape({batch}), {tk - 1});
+    auto positionBuffer = device.load(*positionHost);
+    ASSERT_TRUE(positionBuffer) << positionBuffer.error();
+    auto outputBuffer = device.alloc(
+        sandy::core::TensorDesc({batch, qHeads, tq, headDim}, sandy::core::DType::F32));
+    ASSERT_TRUE(outputBuffer) << outputBuffer.error();
+
+    std::vector<sandy::device::DeviceRunValue> inputs = {
+        tensor_view(device, *qBuffer, qHost->desc()),
+        paged_tensor_view(device, *kPaged),
+        paged_tensor_view(device, *vPaged),
+        tensor_view(device, *positionBuffer, positionHost->desc()),
+    };
+    std::vector<sandy::device::DeviceRunValue> outputs = {
+        tensor_view(
+            device,
+            *outputBuffer,
+            sandy::core::TensorDesc({batch, qHeads, tq, headDim}, sandy::core::DType::F32)),
+    };
+    auto run = device.run(*compiled, op->id(), inputs, outputs);
+    ASSERT_TRUE(run) << run.error();
+
+    auto expected = attention_reference(
+        qValues,
+        kValues,
+        vValues,
+        batch,
+        qHeads,
+        kvHeads,
+        tq,
+        tk,
+        headDim,
+        0,
+        scale,
+        std::vector<int64_t>{tk - 1});
+    ASSERT_TRUE(expected) << expected.error();
+    expect_f32_output_near(device, *outputBuffer, expected.take());
+
+    EXPECT_TRUE(device.deallocPaged(*kPaged));
+    EXPECT_TRUE(device.deallocPaged(*vPaged));
+    EXPECT_TRUE(device.destroyPagedPool(*kPool));
+    EXPECT_TRUE(device.destroyPagedPool(*vPool));
 }
 
 TEST(CudaDeviceTest, RunAttentionF32RandomUniformFuzzMatchesCpu) {

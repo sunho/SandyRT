@@ -59,10 +59,7 @@ __device__ int64_t device_min_i64(int64_t lhs, int64_t rhs) {
 }
 
 __device__ int64_t load_index(const cuda_kernel::TensorArg& tensor, int64_t linear) {
-    int64_t storage = cuda_kernel::storage_index(tensor, linear);
-    if (tensor.dtype == core::DType::I32)
-        return static_cast<int64_t>(static_cast<const int32_t*>(tensor.data)[storage]);
-    return static_cast<const int64_t*>(tensor.data)[storage];
+    return cuda_kernel::load_int(tensor, linear);
 }
 
 __device__ int64_t q_linear_index(

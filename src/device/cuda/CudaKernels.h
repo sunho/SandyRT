@@ -19,6 +19,11 @@ struct CudaDeviceBufferView {
     void* data = nullptr;
     TensorViewDesc view;
     size_t bytes = 0;
+    bool paged = false;
+    int64_t growDim = -1;
+    int64_t pageSize = -1;
+    int64_t pageCount = 0;
+    int64_t pageElementCount = 0;
 };
 
 struct CudaDevicePagedTensorView {

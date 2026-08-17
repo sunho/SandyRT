@@ -81,6 +81,8 @@ Result<MatMulShape> validate_matmul(
     const auto& rhs = context.inputs[1].view;
     const auto& output = context.outputs[0].view;
 
+    if (context.inputs[0].paged || context.inputs[1].paged)
+        return make_error("cuda matmul does not support paged tensor operands");
     if (lhs.desc.dtype != rhs.desc.dtype || lhs.desc.dtype != output.desc.dtype)
         return make_error("cuda matmul operands must have same dtype");
     if (!is_float_compute_dtype(lhs.desc.dtype))
