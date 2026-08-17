@@ -11,6 +11,28 @@ namespace sandy::device {
 
 namespace {
 
+const char* cublas_status_name(cublasStatus_t status) {
+    switch (status) {
+        case CUBLAS_STATUS_SUCCESS: return "CUBLAS_STATUS_SUCCESS";
+        case CUBLAS_STATUS_NOT_INITIALIZED: return "CUBLAS_STATUS_NOT_INITIALIZED";
+        case CUBLAS_STATUS_ALLOC_FAILED: return "CUBLAS_STATUS_ALLOC_FAILED";
+        case CUBLAS_STATUS_INVALID_VALUE: return "CUBLAS_STATUS_INVALID_VALUE";
+        case CUBLAS_STATUS_ARCH_MISMATCH: return "CUBLAS_STATUS_ARCH_MISMATCH";
+        case CUBLAS_STATUS_MAPPING_ERROR: return "CUBLAS_STATUS_MAPPING_ERROR";
+        case CUBLAS_STATUS_EXECUTION_FAILED: return "CUBLAS_STATUS_EXECUTION_FAILED";
+        case CUBLAS_STATUS_INTERNAL_ERROR: return "CUBLAS_STATUS_INTERNAL_ERROR";
+        case CUBLAS_STATUS_NOT_SUPPORTED: return "CUBLAS_STATUS_NOT_SUPPORTED";
+        case CUBLAS_STATUS_LICENSE_ERROR: return "CUBLAS_STATUS_LICENSE_ERROR";
+    }
+    return "CUBLAS_STATUS_UNKNOWN";
+}
+
+Result<void> cublas_check(cublasStatus_t status, const std::string& context) {
+    if (status == CUBLAS_STATUS_SUCCESS)
+        return {};
+    return make_error(context + ": " + cublas_status_name(status));
+}
+
 class CudaHostTensorBuffer final : public core::TensorBuffer {
 public:
     CudaHostTensorBuffer(core::TensorDesc desc, std::vector<uint8_t> data)
@@ -39,6 +61,10 @@ CudaDevice::CudaDevice(int cudaDevice)
 CudaDevice::~CudaDevice() {
     pagedTensors_.clear();
     pagedPools_.clear();
+    if (cublasHandle_) {
+        cudaSetDevice(cudaDevice_);
+        cublasDestroy(cublasHandle_);
+    }
     if (stream_) {
         cudaSetDevice(cudaDevice_);
         cudaStreamDestroy(stream_);
@@ -62,6 +88,25 @@ Result<void> CudaDevice::ensure_stream() {
     if (stream_)
         return {};
     return cuda_check(cudaStreamCreate(&stream_), "cudaStreamCreate");
+}
+
+Result<void> CudaDevice::ensure_cublas_handle() {
+    auto stream = ensure_stream();
+    if (!stream)
+        return make_error(stream.error());
+    if (cublasHandle_)
+        return {};
+
+    auto created = cublas_check(cublasCreate(&cublasHandle_), "cublasCreate");
+    if (!created)
+        return make_error(created.error());
+    auto setStream = cublas_check(cublasSetStream(cublasHandle_, stream_), "cublasSetStream");
+    if (!setStream) {
+        cublasDestroy(cublasHandle_);
+        cublasHandle_ = nullptr;
+        return make_error(setStream.error());
+    }
+    return {};
 }
 
 Result<DeviceCompiledGraphId> CudaDevice::compile(const ir::kernel_ir::Graph& graph) {
@@ -186,6 +231,9 @@ Result<DeviceBufferId> CudaDevice::alloc(core::TensorDesc desc) {
     auto stream = ensure_stream();
     if (!stream)
         return make_error(stream.error());
+    auto cublas = ensure_cublas_handle();
+    if (!cublas)
+        return make_error(cublas.error());
     auto bytes = tensor_byte_size(desc);
     if (!bytes)
         return make_error(bytes.error());
@@ -368,6 +416,7 @@ Result<void> CudaDevice::run(
     CudaLaunchContext context{
         cudaDevice_,
         stream_,
+        cublasHandle_,
         opId,
         inputViews,
         outputViews,

@@ -6,6 +6,7 @@
 #include "Result.h"
 #include "Tensor.h"
 
+#include <cublas_v2.h>
 #include <cuda_runtime.h>
 
 #include <cstddef>
@@ -35,6 +36,7 @@ struct CudaDevicePagedTensorView {
 struct CudaLaunchContext {
     int cudaDevice = 0;
     cudaStream_t stream = nullptr;
+    cublasHandle_t cublas = nullptr;
     ir::kernel_ir::OpId op = ir::kernel_ir::kInvalidOpId;
     std::span<const CudaDeviceBufferView> inputs;
     std::span<const CudaDeviceBufferView> outputs;

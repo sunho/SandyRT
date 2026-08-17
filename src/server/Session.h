@@ -38,7 +38,7 @@ public:
         device::Device& device,
         engine::Engine& engine,
         const engine::CompiledKernelGraph& compiled,
-        const engine::TensorMap& weights,
+        const engine::DeviceWeightMap& weights,
         SessionConfig config);
     Session(const Session&) = delete;
     Session& operator=(const Session&) = delete;
@@ -67,7 +67,7 @@ private:
     device::Device& device_;
     engine::Engine& engine_;
     const engine::CompiledKernelGraph& compiled_;
-    const engine::TensorMap& weights_;
+    const engine::DeviceWeightMap& weights_;
     SessionConfig config_;
     Sampler sampler_;
     std::vector<CacheGroup> caches_;

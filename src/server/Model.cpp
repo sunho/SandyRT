@@ -130,6 +130,11 @@ Result<void> Model::initialize() {
     if (!compiled)
         return make_error(compiled.error());
     compiled_ = compiled.take();
+
+    auto deviceWeights = engine_->loadWeights(*compiled_, weightMap_);
+    if (!deviceWeights)
+        return make_error(deviceWeights.error());
+    deviceWeights_ = deviceWeights.take();
     return {};
 }
 
@@ -138,7 +143,7 @@ Result<GenerateResult> Model::generate(
         int32_t maxTokens,
         const std::vector<int64_t>& stopTokenIds) {
     std::lock_guard<std::mutex> lock(generateMutex_);
-    if (!engine_ || !compiled_ || !device_)
+    if (!engine_ || !compiled_ || !device_ || !deviceWeights_)
         return make_error("model is not initialized");
 
     std::vector<int64_t> effectiveStopTokens = stopTokenIds;
@@ -154,7 +159,7 @@ Result<GenerateResult> Model::generate(
             effectiveStopTokens.push_back(config_.eosTokenId);
     }
 
-    Session session(*device_, *engine_, *compiled_, weightMap_, config_.session);
+    Session session(*device_, *engine_, *compiled_, *deviceWeights_, config_.session);
     return session.generate(inputIds, maxTokens, effectiveStopTokens);
 }
 

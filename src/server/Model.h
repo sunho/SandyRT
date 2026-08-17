@@ -47,6 +47,7 @@ private:
     std::unique_ptr<weight::EagerSafeTensorWeights> weights_;
     engine::TensorMap weightMap_;
     std::unique_ptr<engine::CompiledKernelGraph> compiled_;
+    std::unique_ptr<engine::DeviceWeightMap> deviceWeights_;
     std::unique_ptr<engine::Engine> engine_;
     device::Device* device_ = nullptr;
     std::string backend_ = "cpu";

@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <memory>
 #include <unordered_map>
+#include <string>
 #include <variant>
 #include <vector>
 
@@ -40,6 +41,20 @@ struct CompiledKernelGraph {
     // Legacy single-device fields kept for tests and manually constructed graphs.
     uint32_t device = 0;
     DeviceCompiledGraphId deviceGraph = 0;
+};
+
+struct DeviceWeightMap {
+    DeviceWeightMap() = default;
+    DeviceWeightMap(const DeviceWeightMap&) = delete;
+    DeviceWeightMap& operator=(const DeviceWeightMap&) = delete;
+    DeviceWeightMap(DeviceWeightMap&&) = default;
+    DeviceWeightMap& operator=(DeviceWeightMap&&) = default;
+
+    struct DeviceWeights {
+        std::unordered_map<std::string, DeviceTensorView> tensors;
+    };
+
+    std::unordered_map<ir::kernel_ir::DeviceId, DeviceWeights> weightsByDevice;
 };
 
 } // namespace sandy::engine

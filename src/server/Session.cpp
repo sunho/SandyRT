@@ -33,7 +33,7 @@ Session::Session(
         device::Device& device,
         engine::Engine& engine,
         const engine::CompiledKernelGraph& compiled,
-        const engine::TensorMap& weights,
+        const engine::DeviceWeightMap& weights,
         SessionConfig config)
     : device_(device),
       engine_(engine),

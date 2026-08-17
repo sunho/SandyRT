@@ -244,26 +244,14 @@ Result<void> launch_cuda_matmul(
     auto rhs = rhsArg.take();
     auto output = outputArg.take();
 
-    cublasHandle_t handle = nullptr;
-    auto create = cublas_check(cublasCreate(&handle), "cublasCreate");
-    if (!create)
-        return make_error(create.error());
-    auto destroyHandle = [&]() {
-        if (handle)
-            cublasDestroy(handle);
-    };
-
-    auto stream = cublas_check(cublasSetStream(handle, context.stream), "cublasSetStream");
-    if (!stream) {
-        destroyHandle();
-        return make_error(stream.error());
-    }
+    if (!context.cublas)
+        return make_error("cuda matmul missing cuBLAS handle");
 
     bool flattenSharedRhs = !program.transposeLhs && matmulShape.rhsRank == 2;
     if (flattenSharedRhs) {
         int64_t rows = matmulShape.batchNumel * matmulShape.m;
         auto gemm = run_cublas_gemm(
-            handle,
+            context.cublas,
             lhs,
             rhs,
             output,
@@ -273,7 +261,6 @@ Result<void> launch_cuda_matmul(
             0,
             0,
             0);
-        destroyHandle();
         if (!gemm)
             return make_error(gemm.error());
         return {};
@@ -285,7 +272,7 @@ Result<void> launch_cuda_matmul(
         int64_t outputOffset = matmul_batch_offset(batch, matmulShape.batchShape, output);
 
         auto gemm = run_cublas_gemm(
-            handle,
+            context.cublas,
             lhs,
             rhs,
             output,
@@ -296,12 +283,10 @@ Result<void> launch_cuda_matmul(
             rhsOffset,
             outputOffset);
         if (!gemm) {
-            destroyHandle();
             return make_error(gemm.error());
         }
     }
 
-    destroyHandle();
     return {};
 }
 

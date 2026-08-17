@@ -34,12 +34,34 @@ using ir::kernel_ir::PagedAppendOp;
 using ir::kernel_ir::ValueId;
 using ir::kernel_ir::ValueType;
 
+using Clock = std::chrono::steady_clock;
+
+void profile_stage(
+        const EngineRunOptions* options,
+        const std::string& stage,
+        Clock::time_point start,
+        Clock::time_point end,
+        size_t opIndex = 0,
+        ir::kernel_ir::OpId op = ir::kernel_ir::kInvalidOpId,
+        OpKind opKind = OpKind::Input) {
+    if (!options || !options->profileStage)
+        return;
+    options->profileStage({
+        stage,
+        opIndex,
+        op,
+        opKind,
+        std::chrono::duration<double, std::milli>(end - start).count(),
+    });
+}
+
 struct RuntimeState {
     std::unordered_map<ValueId, DeviceBufferId> buffers;
     std::unordered_map<ValueId, DevicePagedTensorView> pagedTensors;
     std::unordered_map<ValueId, TensorViewDesc> views;
     std::unordered_map<ValueId, uint32_t> bufferDevices;
     std::unordered_map<ValueId, std::vector<ValueId>> tensorTuples;
+    std::unordered_set<ValueId> borrowedBuffers;
     std::vector<size_t> remainingUses;
     std::vector<bool> isOutput;
 };
@@ -359,7 +381,7 @@ Result<void> dealloc_value(
         }
     }
 
-    if (!shared) {
+    if (!shared && state.borrowedBuffers.find(value) == state.borrowedBuffers.end()) {
         auto dealloc = (*device)->dealloc(bufferId);
         if (!dealloc)
             return make_error(dealloc.error());
@@ -367,6 +389,7 @@ Result<void> dealloc_value(
     state.buffers.erase(value);
     state.views.erase(value);
     state.bufferDevices.erase(value);
+    state.borrowedBuffers.erase(value);
     return {};
 }
 
@@ -543,6 +566,48 @@ Result<void> bind_input_op(
     state.buffers[output] = loaded.take();
     state.views[output] = view.take();
     state.bufferDevices[output] = defaultDeviceId;
+    return {};
+}
+
+Result<void> bind_input_op(
+        Device& defaultDevice,
+        DeviceId defaultDeviceId,
+        const Graph& graph,
+        const InputOp& inputOp,
+        std::span<const RunInput> inputs,
+        const DeviceWeightMap& weights,
+        RuntimeState& state) {
+    if (inputOp.source().kind != InputSourceKind::Weight) {
+        TensorMap emptyWeights;
+        return bind_input_op(
+            defaultDevice,
+            defaultDeviceId,
+            graph,
+            inputOp,
+            inputs,
+            emptyWeights,
+            state);
+    }
+
+    auto output = inputOp.outputs()[0];
+    auto deviceIt = weights.weightsByDevice.find(defaultDeviceId);
+    if (deviceIt == weights.weightsByDevice.end())
+        return make_error("missing device weights for device: " + std::to_string(defaultDeviceId));
+    auto weightIt = deviceIt->second.tensors.find(inputOp.source().name);
+    if (weightIt == deviceIt->second.tensors.end())
+        return make_error("missing device weight buffer: " + inputOp.source().name);
+
+    auto verify = verify_desc_matches_type(
+        weightIt->second.view.desc,
+        graph.value(output).type,
+        "value %" + std::to_string(output));
+    if (!verify)
+        return make_error(verify.error());
+
+    state.buffers[output] = weightIt->second.buffer;
+    state.views[output] = weightIt->second.view;
+    state.bufferDevices[output] = defaultDeviceId;
+    state.borrowedBuffers.insert(output);
     return {};
 }
 
@@ -827,20 +892,58 @@ Result<void> run_kernel_op(
         size_t opIndex,
         RuntimeState& state,
         const EngineRunOptions* options) {
+    auto allocateStart = Clock::now();
     auto allocated = allocate_kernel_outputs(graph, device, opDevice, op, state);
+    auto allocateEnd = Clock::now();
+    profile_stage(
+        options,
+        "kernel.allocate_outputs",
+        allocateStart,
+        allocateEnd,
+        opIndex,
+        op.id(),
+        op.kind());
     if (!allocated)
         return make_error(allocated.error());
 
+    auto collectInputStart = Clock::now();
     auto inputViews = collect_input_views(state, op, opDevice);
+    auto collectInputEnd = Clock::now();
+    profile_stage(
+        options,
+        "kernel.collect_inputs",
+        collectInputStart,
+        collectInputEnd,
+        opIndex,
+        op.id(),
+        op.kind());
     if (!inputViews)
         return make_error(inputViews.error());
+    auto collectOutputStart = Clock::now();
     auto outputViews = collect_output_views(state, op);
+    auto collectOutputEnd = Clock::now();
+    profile_stage(
+        options,
+        "kernel.collect_outputs",
+        collectOutputStart,
+        collectOutputEnd,
+        opIndex,
+        op.id(),
+        op.kind());
     if (!outputViews)
         return make_error(outputViews.error());
 
-    auto start = std::chrono::steady_clock::now();
+    auto start = Clock::now();
     auto runResult = device.run(deviceGraph, op.id(), *inputViews, *outputViews);
-    auto end = std::chrono::steady_clock::now();
+    auto end = Clock::now();
+    profile_stage(
+        options,
+        "kernel.device_run",
+        start,
+        end,
+        opIndex,
+        op.id(),
+        op.kind());
     if (options && options->profileKernel) {
         auto elapsed = std::chrono::duration<double, std::milli>(end - start).count();
         options->profileKernel({
@@ -954,12 +1057,15 @@ Result<void> dealloc_remaining_buffers(
         auto leftoverDevice = lookup_device(devices, deviceIt->second);
         if (!leftoverDevice)
             return make_error(leftoverDevice.error());
-        auto dealloc = (*leftoverDevice)->dealloc(it->second);
-        if (!dealloc)
-            return make_error(dealloc.error());
+        if (state.borrowedBuffers.find(value) == state.borrowedBuffers.end()) {
+            auto dealloc = (*leftoverDevice)->dealloc(it->second);
+            if (!dealloc)
+                return make_error(dealloc.error());
+        }
         it = state.buffers.erase(it);
         state.views.erase(value);
         state.bufferDevices.erase(value);
+        state.borrowedBuffers.erase(value);
     }
     return {};
 }
@@ -1026,10 +1132,117 @@ Result<std::unique_ptr<CompiledKernelGraph>> Engine::compile(
     return compiled;
 }
 
+Result<std::unique_ptr<DeviceWeightMap>> Engine::loadWeights(
+        const CompiledKernelGraph& compiled,
+        const TensorMap& weights) {
+    if (devices_.empty())
+        return make_error("engine has no devices");
+    if (!compiled.graph)
+        return make_error("compiled KernelIR graph is null");
+
+    auto graphDefaultDevice = default_runtime_device(compiled);
+    auto defaultDeviceResult = lookup_device(devices_, graphDefaultDevice);
+    if (!defaultDeviceResult)
+        return make_error(defaultDeviceResult.error());
+    auto& defaultDevice = **defaultDeviceResult;
+    const auto& graph = *compiled.graph;
+
+    auto loadedWeights = std::make_unique<DeviceWeightMap>();
+    auto& deviceWeights = loadedWeights->weightsByDevice[graphDefaultDevice];
+
+    for (const auto& opPtr : graph.ops()) {
+        const auto& op = *opPtr;
+        if (op.kind() != OpKind::Input)
+            continue;
+        const auto& input = static_cast<const InputOp&>(op);
+        if (input.source().kind != InputSourceKind::Weight)
+            continue;
+        const auto& name = input.source().name;
+        if (deviceWeights.tensors.find(name) != deviceWeights.tensors.end())
+            continue;
+
+        auto hostIt = weights.find(name);
+        if (hostIt == weights.end())
+            return make_error("missing weight buffer: " + name);
+        if (!hostIt->second)
+            return make_error("null weight buffer: " + name);
+
+        auto output = input.outputs()[0];
+        auto verify = verify_desc_matches_type(
+            hostIt->second->desc(),
+            graph.value(output).type,
+            "value %" + std::to_string(output));
+        if (!verify)
+            return make_error(verify.error());
+
+        auto loaded = defaultDevice.load(*hostIt->second);
+        if (!loaded)
+            return make_error(loaded.error());
+        auto view = defaultDevice.defaultView(hostIt->second->desc());
+        if (!view) {
+            auto dealloc = defaultDevice.dealloc(loaded.take());
+            if (!dealloc)
+                return make_error(dealloc.error());
+            return make_error(view.error());
+        }
+
+        deviceWeights.tensors[name] = DeviceTensorView{
+            loaded.take(),
+            view.take(),
+        };
+    }
+
+    return loadedWeights;
+}
+
+Result<void> Engine::deallocWeights(DeviceWeightMap& weights) {
+    for (auto& [deviceId, deviceWeights] : weights.weightsByDevice) {
+        auto device = lookup_device(devices_, deviceId);
+        if (!device)
+            return make_error(device.error());
+        for (auto& [_, tensor] : deviceWeights.tensors) {
+            if (tensor.buffer == 0)
+                continue;
+            auto dealloc = (*device)->dealloc(tensor.buffer);
+            if (!dealloc)
+                return make_error(dealloc.error());
+            tensor.buffer = 0;
+        }
+        deviceWeights.tensors.clear();
+    }
+    weights.weightsByDevice.clear();
+    return {};
+}
+
 Result<std::vector<TensorBufferPtr>> Engine::run(
         const CompiledKernelGraph& compiled,
         std::span<TensorBufferPtr const> inputs,
         const TensorMap& weights,
+        const EngineRunOptions* options) {
+    std::vector<RunInput> valueInputs;
+    valueInputs.reserve(inputs.size());
+    for (const auto& input : inputs)
+        valueInputs.push_back(input);
+
+    auto outputs = runValues(compiled, valueInputs, weights, options);
+    if (!outputs)
+        return make_error(outputs.error());
+
+    std::vector<TensorBufferPtr> tensorOutputs;
+    tensorOutputs.reserve(outputs->size());
+    for (auto& output : *outputs) {
+        auto* tensor = std::get_if<TensorBufferPtr>(&output);
+        if (!tensor)
+            return make_error("Engine::run cannot return tensor tuple outputs; use runValues");
+        tensorOutputs.push_back(*tensor);
+    }
+    return tensorOutputs;
+}
+
+Result<std::vector<TensorBufferPtr>> Engine::run(
+        const CompiledKernelGraph& compiled,
+        std::span<TensorBufferPtr const> inputs,
+        const DeviceWeightMap& weights,
         const EngineRunOptions* options) {
     std::vector<RunInput> valueInputs;
     valueInputs.reserve(inputs.size());
@@ -1056,6 +1269,24 @@ Result<std::vector<RunOutput>> Engine::runValues(
         std::span<const RunInput> inputs,
         const TensorMap& weights,
         const EngineRunOptions* options) {
+    return runValuesImpl(compiled, inputs, &weights, nullptr, options);
+}
+
+Result<std::vector<RunOutput>> Engine::runValues(
+        const CompiledKernelGraph& compiled,
+        std::span<const RunInput> inputs,
+        const DeviceWeightMap& weights,
+        const EngineRunOptions* options) {
+    return runValuesImpl(compiled, inputs, nullptr, &weights, options);
+}
+
+Result<std::vector<RunOutput>> Engine::runValuesImpl(
+        const CompiledKernelGraph& compiled,
+        std::span<const RunInput> inputs,
+        const TensorMap* hostWeights,
+        const DeviceWeightMap* deviceWeights,
+        const EngineRunOptions* options) {
+    auto runValuesStart = Clock::now();
     if (devices_.empty())
         return make_error("engine has no devices");
     if (!compiled.graph)
@@ -1074,50 +1305,134 @@ Result<std::vector<RunOutput>> Engine::runValues(
         const auto& op = *graph.ops()[opIndex];
 
         if (op.kind() == OpKind::Input) {
-            auto bound = bind_input_op(
-                defaultDevice,
-                graphDefaultDevice,
-                graph,
-                static_cast<const InputOp&>(op),
-                inputs,
-                weights,
-                state);
+            auto opStart = Clock::now();
+            Result<void> bound;
+            if (deviceWeights) {
+                bound = bind_input_op(
+                    defaultDevice,
+                    graphDefaultDevice,
+                    graph,
+                    static_cast<const InputOp&>(op),
+                    inputs,
+                    *deviceWeights,
+                    state);
+            } else if (hostWeights) {
+                bound = bind_input_op(
+                    defaultDevice,
+                    graphDefaultDevice,
+                    graph,
+                    static_cast<const InputOp&>(op),
+                    inputs,
+                    *hostWeights,
+                    state);
+            } else {
+                bound = make_error("Engine::runValues missing weights");
+            }
+            auto opEnd = Clock::now();
+            profile_stage(
+                options,
+                "op.input_bind",
+                opStart,
+                opEnd,
+                opIndex,
+                op.id(),
+                op.kind());
             if (!bound)
                 return make_error(bound.error());
+            auto finishStart = Clock::now();
             auto finish = finish_op_lifetimes(devices_, state, op);
+            auto finishEnd = Clock::now();
+            profile_stage(
+                options,
+                "op.finish_lifetimes",
+                finishStart,
+                finishEnd,
+                opIndex,
+                op.id(),
+                op.kind());
             if (!finish)
                 return make_error(finish.error());
             continue;
         }
 
         if (op.kind() == OpKind::TensorTupleCreate) {
+            auto opStart = Clock::now();
             state.tensorTuples[op.outputs()[0]] =
                 std::vector<ValueId>(op.inputs().begin(), op.inputs().end());
+            auto opEnd = Clock::now();
+            profile_stage(
+                options,
+                "op.tensor_tuple_create",
+                opStart,
+                opEnd,
+                opIndex,
+                op.id(),
+                op.kind());
             continue;
         }
 
         if (op.kind() == OpKind::PagedAppend) {
+            auto opStart = Clock::now();
             auto appended = paged_append_op(
                 devices_,
                 state,
                 static_cast<const PagedAppendOp&>(op));
+            auto opEnd = Clock::now();
+            profile_stage(
+                options,
+                "op.paged_append",
+                opStart,
+                opEnd,
+                opIndex,
+                op.id(),
+                op.kind());
             if (!appended)
                 return make_error(appended.error());
+            auto finishStart = Clock::now();
             auto finish = finish_op_lifetimes(devices_, state, op);
+            auto finishEnd = Clock::now();
+            profile_stage(
+                options,
+                "op.finish_lifetimes",
+                finishStart,
+                finishEnd,
+                opIndex,
+                op.id(),
+                op.kind());
             if (!finish)
                 return make_error(finish.error());
             continue;
         }
 
         if (op.kind() == OpKind::DeviceTransfer) {
+            auto opStart = Clock::now();
             auto transferred = transfer_op(
                 devices_,
                 *copier_,
                 state,
                 static_cast<const DeviceTransferOp&>(op));
+            auto opEnd = Clock::now();
+            profile_stage(
+                options,
+                "op.device_transfer",
+                opStart,
+                opEnd,
+                opIndex,
+                op.id(),
+                op.kind());
             if (!transferred)
                 return make_error(transferred.error());
+            auto finishStart = Clock::now();
             auto finish = finish_op_lifetimes(devices_, state, op);
+            auto finishEnd = Clock::now();
+            profile_stage(
+                options,
+                "op.finish_lifetimes",
+                finishStart,
+                finishEnd,
+                opIndex,
+                op.id(),
+                op.kind());
             if (!finish)
                 return make_error(finish.error());
             continue;
@@ -1133,16 +1448,36 @@ Result<std::vector<RunOutput>> Engine::runValues(
             return make_error(deviceGraph.error());
 
         if (op.kind() == OpKind::LayoutTransform) {
+            auto aliasStart = Clock::now();
             auto handled = try_alias_layout_op(
                 graph,
                 device,
                 opDevice,
                 static_cast<const ir::kernel_ir::LayoutTransformOp&>(op),
                 state);
+            auto aliasEnd = Clock::now();
+            profile_stage(
+                options,
+                "op.layout_alias_check",
+                aliasStart,
+                aliasEnd,
+                opIndex,
+                op.id(),
+                op.kind());
             if (!handled)
                 return make_error(handled.error());
             if (*handled) {
+                auto finishStart = Clock::now();
                 auto finish = finish_op_lifetimes(devices_, state, op);
+                auto finishEnd = Clock::now();
+                profile_stage(
+                    options,
+                    "op.finish_lifetimes",
+                    finishStart,
+                    finishEnd,
+                    opIndex,
+                    op.id(),
+                    op.kind());
                 if (!finish)
                     return make_error(finish.error());
                 continue;
@@ -1161,24 +1496,60 @@ Result<std::vector<RunOutput>> Engine::runValues(
         if (!runResult)
             return make_error(runResult.error());
 
+        auto finishStart = Clock::now();
         auto finish = finish_op_lifetimes(devices_, state, op);
+        auto finishEnd = Clock::now();
+        profile_stage(
+            options,
+            "op.finish_lifetimes",
+            finishStart,
+            finishEnd,
+            opIndex,
+            op.id(),
+            op.kind());
         if (!finish)
             return make_error(finish.error());
     }
 
     std::vector<ValueId> uniqueOutputs;
+    auto readOutputsStart = Clock::now();
     auto outputs = read_graph_outputs(devices_, graph, state, uniqueOutputs);
+    auto readOutputsEnd = Clock::now();
+    profile_stage(
+        options,
+        "run_values.read_outputs",
+        readOutputsStart,
+        readOutputsEnd);
     if (!outputs)
         return make_error(outputs.error());
 
+    auto deallocOutputsStart = Clock::now();
     auto deallocOutputs = dealloc_values(devices_, state, uniqueOutputs);
+    auto deallocOutputsEnd = Clock::now();
+    profile_stage(
+        options,
+        "run_values.dealloc_outputs",
+        deallocOutputsStart,
+        deallocOutputsEnd);
     if (!deallocOutputs)
         return make_error(deallocOutputs.error());
 
+    auto deallocRemainingStart = Clock::now();
     auto deallocRemaining = dealloc_remaining_buffers(devices_, state);
+    auto deallocRemainingEnd = Clock::now();
+    profile_stage(
+        options,
+        "run_values.dealloc_remaining",
+        deallocRemainingStart,
+        deallocRemainingEnd);
     if (!deallocRemaining)
         return make_error(deallocRemaining.error());
 
+    profile_stage(
+        options,
+        "run_values.total",
+        runValuesStart,
+        Clock::now());
     return outputs.take();
 }
 

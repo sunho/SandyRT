@@ -383,8 +383,10 @@ def main() -> int:
     parser.add_argument("--force-convert", action="store_true")
     parser.add_argument("--prepare-only", action="store_true")
     parser.add_argument("--keep-input", action="store_true")
+    parser.add_argument("--profile", action="store_true",
+                        help="Print per-kernel engine timing from the runner.")
     parser.add_argument("--instrument", action="store_true",
-                        help="Print per-kernel CPU engine timing from cpu_runner.")
+                        help=argparse.SUPPRESS)
     args = parser.parse_args()
 
     artifacts = args.artifacts
@@ -431,7 +433,7 @@ def main() -> int:
             "--eval-token",
             "--architecture", "tinyllama",
         ]
-        if args.instrument:
+        if args.profile or args.instrument:
             cmd.append("--profile")
         cmd.extend([
             str(args.eval_model),
@@ -480,8 +482,8 @@ def main() -> int:
         return 1
 
     cmd = [str(args.runner)]
-    if args.instrument:
-        cmd.append("--instrument")
+    if args.profile or args.instrument:
+        cmd.append("--profile")
     cmd.extend([str(args.model), str(sandy_weights), str(input_path)])
     print("[run]", " ".join(cmd))
     result = subprocess.run(cmd, text=True, capture_output=True)

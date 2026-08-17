@@ -453,6 +453,12 @@ int main(int argc, char* argv[]) {
             return 0;
         }
 
+        auto deviceWeights = engine.loadWeights(**planResult, weightMap);
+        if (!deviceWeights) {
+            fprintf(stderr, "device weight load error: %s\n", deviceWeights.error().c_str());
+            return 1;
+        }
+
         auto caches = create_eval_token_caches(*runtimeDevice, architecture);
         if (!caches) {
             fprintf(stderr, "cache creation error: %s\n", caches.error().c_str());
@@ -461,14 +467,25 @@ int main(int argc, char* argv[]) {
 
         sandy::engine::EngineRunOptions runOptions;
         std::unordered_map<int, ProfileStat> profileStats;
+        std::unordered_map<std::string, ProfileStat> profileStageStats;
         int64_t profileKernelCount = 0;
+        int64_t profileStageCount = 0;
         double profileTotalMs = 0.0;
+        double profileStageTotalMs = 0.0;
         if (profile) {
             runOptions.profileKernel = [&](const sandy::engine::EngineProfileEvent& event) {
                 profileKernelCount++;
                 profileTotalMs += event.elapsedMs;
                 auto key = static_cast<int>(event.opKind);
                 auto& stat = profileStats[key];
+                stat.count++;
+                stat.totalMs += event.elapsedMs;
+                stat.maxMs = std::max(stat.maxMs, event.elapsedMs);
+            };
+            runOptions.profileStage = [&](const sandy::engine::EngineProfileStageEvent& event) {
+                profileStageCount++;
+                profileStageTotalMs += event.elapsedMs;
+                auto& stat = profileStageStats[event.stage];
                 stat.count++;
                 stat.totalMs += event.elapsedMs;
                 stat.maxMs = std::max(stat.maxMs, event.elapsedMs);
@@ -483,7 +500,7 @@ int main(int argc, char* argv[]) {
             auto result = engine.runValues(
                 **planResult,
                 *inputs,
-                weightMap,
+                **deviceWeights,
                 profile ? &runOptions : nullptr);
             auto end = Clock::now();
             if (profile) {
@@ -583,6 +600,25 @@ int main(int argc, char* argv[]) {
                 printf("  %s count=%lld total_ms=%.3f avg_ms=%.3f max_ms=%.3f\n",
                        sandy::ir::kernel_ir::op_kind_name(
                            static_cast<sandy::ir::kernel_ir::OpKind>(kind)),
+                       static_cast<long long>(stat.count),
+                       stat.totalMs,
+                       avgMs,
+                       stat.maxMs);
+            }
+            printf("[profile] engine stages=%lld summed_time_ms=%.3f\n",
+                   static_cast<long long>(profileStageCount),
+                   profileStageTotalMs);
+            printf("[profile] by engine stage:\n");
+            std::vector<std::pair<std::string, ProfileStat>> stageStats(
+                profileStageStats.begin(),
+                profileStageStats.end());
+            std::sort(stageStats.begin(), stageStats.end(), [](const auto& a, const auto& b) {
+                return a.second.totalMs > b.second.totalMs;
+            });
+            for (const auto& [stage, stat] : stageStats) {
+                double avgMs = stat.count == 0 ? 0.0 : stat.totalMs / static_cast<double>(stat.count);
+                printf("  %s count=%lld total_ms=%.3f avg_ms=%.3f max_ms=%.3f\n",
+                       stage.c_str(),
                        static_cast<long long>(stat.count),
                        stat.totalMs,
                        avgMs,

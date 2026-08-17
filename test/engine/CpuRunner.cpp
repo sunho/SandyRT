@@ -354,12 +354,14 @@ int main(int argc, char* argv[]) {
 #endif
     bool instrument = false;
     int arg = 1;
-    if (argc >= 2 && std::strcmp(argv[1], "--instrument") == 0) {
+    if (argc >= 2 &&
+        (std::strcmp(argv[1], "--instrument") == 0 ||
+         std::strcmp(argv[1], "--profile") == 0)) {
         instrument = true;
         arg = 2;
     }
     if (argc - arg != 3) {
-        fprintf(stderr, "usage: %s [--instrument] <program.sandy.go> <weights.safetensors> <inputs.safetensors>\n", runnerName);
+        fprintf(stderr, "usage: %s [--profile] <program.sandy.go> <weights.safetensors> <inputs.safetensors>\n", runnerName);
         return 1;
     }
 
