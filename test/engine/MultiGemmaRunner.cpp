@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <charconv>
 #include <cstdint>
 #include <cstdio>
@@ -147,6 +148,18 @@ struct EvalTokenCaches {
     std::array<sandy::device::DevicePagedTensorId, kGemma4E2BGlobalCacheCount> globalK{};
     std::array<sandy::device::DevicePagedTensorId, kGemma4E2BGlobalCacheCount> globalV{};
 };
+
+struct ProfileStat {
+    int64_t count = 0;
+    double totalMs = 0.0;
+    double maxMs = 0.0;
+};
+
+using Clock = std::chrono::steady_clock;
+
+double elapsed_ms(Clock::time_point start, Clock::time_point end) {
+    return std::chrono::duration<double, std::milli>(end - start).count();
+}
 
 Result<sandy::device::DevicePagedTensorView> paged_view(
         sandy::device::CpuDevice& device,
@@ -351,7 +364,7 @@ Result<void> append_eval_outputs(
 void usage() {
     fprintf(stderr,
             "usage: multi_gemma4_runner "
-            "[--eval-token] <program.sandy.go> <weights.safetensors> "
+            "[--eval-token] [--profile] <program.sandy.go> <weights.safetensors> "
             "<emit_count> <token_id>...\n");
 }
 
@@ -360,8 +373,18 @@ void usage() {
 int main(int argc, char* argv[]) {
     int arg = 1;
     bool evalTokenMode = false;
-    if (arg < argc && std::string_view(argv[arg]) == "--eval-token") {
-        evalTokenMode = true;
+    bool profile = false;
+    while (arg < argc && std::string_view(argv[arg]).starts_with("--")) {
+        std::string_view option(argv[arg]);
+        if (option == "--eval-token") {
+            evalTokenMode = true;
+        } else if (option == "--profile") {
+            profile = true;
+        } else {
+            fprintf(stderr, "unknown option: %s\n", argv[arg]);
+            usage();
+            return 1;
+        }
         arg++;
     }
 
@@ -435,11 +458,39 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
+        sandy::engine::EngineRunOptions runOptions;
+        std::unordered_map<int, ProfileStat> profileStats;
+        int64_t profileKernelCount = 0;
+        double profileTotalMs = 0.0;
+        if (profile) {
+            runOptions.profileKernel = [&](const sandy::engine::EngineProfileEvent& event) {
+                profileKernelCount++;
+                profileTotalMs += event.elapsedMs;
+                auto key = static_cast<int>(event.opKind);
+                auto& stat = profileStats[key];
+                stat.count++;
+                stat.totalMs += event.elapsedMs;
+                stat.maxMs = std::max(stat.maxMs, event.elapsedMs);
+            };
+        }
+
         auto evalOnce = [&](int64_t token, int64_t position) {
             auto inputs = make_eval_inputs(*cpuDevice, *caches, token, position);
             if (!inputs)
                 return Result<std::vector<sandy::engine::RunOutput>>(make_error(inputs.error()));
-            return engine.runValues(**planResult, *inputs, weightMap);
+            auto start = Clock::now();
+            auto result = engine.runValues(
+                **planResult,
+                *inputs,
+                weightMap,
+                profile ? &runOptions : nullptr);
+            auto end = Clock::now();
+            if (profile) {
+                printf("[profile] eval_token position=%lld wall_ms=%.3f\n",
+                       static_cast<long long>(position),
+                       elapsed_ms(start, end));
+            }
+            return result;
         };
 
         int64_t nextToken = 0;
@@ -515,6 +566,28 @@ int main(int argc, char* argv[]) {
         for (int64_t token : tokens)
             printf(" %lld", static_cast<long long>(token));
         printf("\n");
+        if (profile) {
+            printf("[profile] total kernels=%lld time_ms=%.3f\n",
+                   static_cast<long long>(profileKernelCount),
+                   profileTotalMs);
+            printf("[profile] by op:\n");
+            std::vector<std::pair<int, ProfileStat>> stats(
+                profileStats.begin(),
+                profileStats.end());
+            std::sort(stats.begin(), stats.end(), [](const auto& a, const auto& b) {
+                return a.second.totalMs > b.second.totalMs;
+            });
+            for (const auto& [kind, stat] : stats) {
+                double avgMs = stat.count == 0 ? 0.0 : stat.totalMs / static_cast<double>(stat.count);
+                printf("  %s count=%lld total_ms=%.3f avg_ms=%.3f max_ms=%.3f\n",
+                       sandy::ir::kernel_ir::op_kind_name(
+                           static_cast<sandy::ir::kernel_ir::OpKind>(kind)),
+                       static_cast<long long>(stat.count),
+                       stat.totalMs,
+                       avgMs,
+                       stat.maxMs);
+            }
+        }
         return 0;
     }
 
