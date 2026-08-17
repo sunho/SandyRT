@@ -4,6 +4,7 @@ build-release/
 build-fast/
 build-cublas/
 build-cublas12/
+build-cuda/
 .cuda/
 .cuda12/
 external/googletest/

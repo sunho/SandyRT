@@ -157,6 +157,25 @@ set_target_properties(engine_tests PROPERTIES
 
 gtest_discover_tests(engine_tests)
 
+if(SANDY_ENABLE_CUDA)
+  add_executable(cuda_device_tests
+    engine/CudaDeviceTest.cpp
+  )
+
+  target_link_libraries(cuda_device_tests
+    PRIVATE
+    EngineLib
+    GTest::gtest_main
+  )
+
+  set_target_properties(cuda_device_tests PROPERTIES
+    CXX_STANDARD 20
+    CXX_STANDARD_REQUIRED ON
+  )
+
+  gtest_discover_tests(cuda_device_tests)
+endif()
+
 add_executable(cpu_runner
   engine/CpuRunner.cpp
 )
