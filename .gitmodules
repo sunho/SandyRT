@@ -6,3 +6,6 @@
 	url = git@github.com:sunho/llvm-project.git
 	branch = sandy/stablehlo
 	shallow = true
+[submodule "external/grpc"]
+	path = external/grpc
+	url = https://github.com/grpc/grpc.git
