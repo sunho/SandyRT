@@ -224,3 +224,200 @@ TEST(CudaDeviceTest, RunSuffixBroadcastAddF32) {
         *outputBuffer,
         {101.0f, 202.0f, 303.0f, 110.0f, 220.0f, 330.0f});
 }
+
+TEST(CudaDeviceTest, RunMatMulF32) {
+    if (auto reason = cuda_device_skip_reason(); !reason.empty())
+        GTEST_SKIP() << reason;
+    namespace kir = sandy::ir::kernel_ir;
+
+    kir::Graph graph;
+    auto lhs = graph.addValue(tensor_type({2, 3}));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 0, ""},
+        lhs);
+    auto rhs = graph.addValue(tensor_type({3, 2}));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 1, ""},
+        rhs);
+    auto output = graph.addValue(tensor_type({2, 2}));
+    auto* op = graph.addOp<kir::MatMulKernelOp>(
+        lhs,
+        rhs,
+        output,
+        false,
+        false);
+    graph.setOutputs({output});
+
+    sandy::device::CudaDevice device;
+    auto compiled = device.compile(graph);
+    ASSERT_TRUE(compiled) << compiled.error();
+
+    auto lhsHost = make_f32_buffer(
+        "lhs",
+        sandy::core::Shape({2, 3}),
+        {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f});
+    auto rhsHost = make_f32_buffer(
+        "rhs",
+        sandy::core::Shape({3, 2}),
+        {7.0f, 8.0f, 9.0f, 10.0f, 11.0f, 12.0f});
+    auto lhsBuffer = device.load(*lhsHost);
+    ASSERT_TRUE(lhsBuffer) << lhsBuffer.error();
+    auto rhsBuffer = device.load(*rhsHost);
+    ASSERT_TRUE(rhsBuffer) << rhsBuffer.error();
+    auto outputBuffer = device.alloc(sandy::core::TensorDesc({2, 2}, sandy::core::DType::F32));
+    ASSERT_TRUE(outputBuffer) << outputBuffer.error();
+
+    std::vector<sandy::device::DeviceRunValue> inputs = {
+        tensor_view(device, *lhsBuffer, lhsHost->desc()),
+        tensor_view(device, *rhsBuffer, rhsHost->desc()),
+    };
+    std::vector<sandy::device::DeviceRunValue> outputs = {
+        tensor_view(device, *outputBuffer, sandy::core::TensorDesc({2, 2}, sandy::core::DType::F32)),
+    };
+    auto run = device.run(*compiled, op->id(), inputs, outputs);
+    ASSERT_TRUE(run) << run.error();
+
+    expect_f32_output(device, *outputBuffer, {58.0f, 64.0f, 139.0f, 154.0f});
+}
+
+TEST(CudaDeviceTest, RunMatMulF32TransposedRhs) {
+    if (auto reason = cuda_device_skip_reason(); !reason.empty())
+        GTEST_SKIP() << reason;
+    namespace kir = sandy::ir::kernel_ir;
+
+    kir::Graph graph;
+    auto lhs = graph.addValue(tensor_type({2, 3}));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 0, ""},
+        lhs);
+    auto rhs = graph.addValue(tensor_type({2, 3}));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 1, ""},
+        rhs);
+    auto output = graph.addValue(tensor_type({2, 2}));
+    auto* op = graph.addOp<kir::MatMulKernelOp>(
+        lhs,
+        rhs,
+        output,
+        false,
+        true);
+    graph.setOutputs({output});
+
+    sandy::device::CudaDevice device;
+    auto compiled = device.compile(graph);
+    ASSERT_TRUE(compiled) << compiled.error();
+
+    auto lhsHost = make_f32_buffer(
+        "lhs",
+        sandy::core::Shape({2, 3}),
+        {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f});
+    auto rhsHost = make_f32_buffer(
+        "rhs",
+        sandy::core::Shape({2, 3}),
+        {7.0f, 8.0f, 9.0f, 10.0f, 11.0f, 12.0f});
+    auto lhsBuffer = device.load(*lhsHost);
+    ASSERT_TRUE(lhsBuffer) << lhsBuffer.error();
+    auto rhsBuffer = device.load(*rhsHost);
+    ASSERT_TRUE(rhsBuffer) << rhsBuffer.error();
+    auto outputBuffer = device.alloc(sandy::core::TensorDesc({2, 2}, sandy::core::DType::F32));
+    ASSERT_TRUE(outputBuffer) << outputBuffer.error();
+
+    std::vector<sandy::device::DeviceRunValue> inputs = {
+        tensor_view(device, *lhsBuffer, lhsHost->desc()),
+        tensor_view(device, *rhsBuffer, rhsHost->desc()),
+    };
+    std::vector<sandy::device::DeviceRunValue> outputs = {
+        tensor_view(device, *outputBuffer, sandy::core::TensorDesc({2, 2}, sandy::core::DType::F32)),
+    };
+    auto run = device.run(*compiled, op->id(), inputs, outputs);
+    ASSERT_TRUE(run) << run.error();
+
+    expect_f32_output(device, *outputBuffer, {50.0f, 68.0f, 122.0f, 167.0f});
+}
+
+TEST(CudaDeviceTest, RunMatMulF32GroupedBatchHeads) {
+    if (auto reason = cuda_device_skip_reason(); !reason.empty())
+        GTEST_SKIP() << reason;
+    namespace kir = sandy::ir::kernel_ir;
+
+    kir::Graph graph;
+    auto lhs = graph.addValue(tensor_type({1, 4, 2, 3}));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 0, ""},
+        lhs);
+    auto rhs = graph.addValue(tensor_type({1, 2, 3, 2}));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 1, ""},
+        rhs);
+    auto output = graph.addValue(tensor_type({1, 4, 2, 2}));
+    auto* op = graph.addOp<kir::MatMulKernelOp>(
+        lhs,
+        rhs,
+        output,
+        false,
+        false);
+    graph.setOutputs({output});
+
+    sandy::device::CudaDevice device;
+    auto compiled = device.compile(graph);
+    ASSERT_TRUE(compiled) << compiled.error();
+
+    auto lhsHost = make_f32_buffer(
+        "lhs",
+        sandy::core::Shape({1, 4, 2, 3}),
+        {
+            1.0f, 0.0f, 0.0f,
+            0.0f, 1.0f, 0.0f,
+            0.0f, 0.0f, 1.0f,
+            1.0f, 1.0f, 0.0f,
+            1.0f, 2.0f, 0.0f,
+            0.0f, 1.0f, 1.0f,
+            2.0f, 0.0f, 1.0f,
+            1.0f, 0.0f, 1.0f,
+        });
+    auto rhsHost = make_f32_buffer(
+        "rhs",
+        sandy::core::Shape({1, 2, 3, 2}),
+        {
+            10.0f, 100.0f,
+            20.0f, 200.0f,
+            30.0f, 300.0f,
+            1.0f, 10.0f,
+            2.0f, 20.0f,
+            3.0f, 30.0f,
+        });
+    auto lhsBuffer = device.load(*lhsHost);
+    ASSERT_TRUE(lhsBuffer) << lhsBuffer.error();
+    auto rhsBuffer = device.load(*rhsHost);
+    ASSERT_TRUE(rhsBuffer) << rhsBuffer.error();
+    auto outputBuffer = device.alloc(
+        sandy::core::TensorDesc({1, 4, 2, 2}, sandy::core::DType::F32));
+    ASSERT_TRUE(outputBuffer) << outputBuffer.error();
+
+    std::vector<sandy::device::DeviceRunValue> inputs = {
+        tensor_view(device, *lhsBuffer, lhsHost->desc()),
+        tensor_view(device, *rhsBuffer, rhsHost->desc()),
+    };
+    std::vector<sandy::device::DeviceRunValue> outputs = {
+        tensor_view(
+            device,
+            *outputBuffer,
+            sandy::core::TensorDesc({1, 4, 2, 2}, sandy::core::DType::F32)),
+    };
+    auto run = device.run(*compiled, op->id(), inputs, outputs);
+    ASSERT_TRUE(run) << run.error();
+
+    expect_f32_output(
+        device,
+        *outputBuffer,
+        {
+            10.0f, 100.0f,
+            20.0f, 200.0f,
+            30.0f, 300.0f,
+            30.0f, 300.0f,
+            5.0f, 50.0f,
+            5.0f, 50.0f,
+            5.0f, 50.0f,
+            4.0f, 40.0f,
+        });
+}

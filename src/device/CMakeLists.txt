@@ -32,6 +32,7 @@ if(SANDY_ENABLE_CUDA)
   target_link_libraries(DeviceLib
     PUBLIC
     CUDA::cudart
+    CUDA::cublas
   )
 endif()
 
