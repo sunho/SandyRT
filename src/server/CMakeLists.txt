@@ -14,7 +14,7 @@ target_include_directories(sandy_grpc_worker
 target_link_libraries(sandy_grpc_worker
   PRIVATE
   SandyInferenceProto
-  SandyCompilerLib
+  SandyRTLib
   EngineLib
   WeightLib
   ${SANDY_GRPC_GRPCPP}

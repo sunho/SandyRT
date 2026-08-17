@@ -60,7 +60,7 @@ add_executable(dump_mid_ir
   sandygo/DumpMidIR.cpp
 )
 
-target_link_libraries(dump_mid_ir PRIVATE SandyCompilerLib)
+target_link_libraries(dump_mid_ir PRIVATE SandyRTLib)
 
 set_target_properties(dump_mid_ir PROPERTIES
   CXX_STANDARD 20
@@ -122,7 +122,7 @@ add_executable(materialize_tests
 
 target_link_libraries(materialize_tests
   PRIVATE
-  SandyCompilerLib
+  SandyRTLib
   GTest::gtest_main
 )
 
@@ -144,7 +144,7 @@ add_executable(compiler_tests
 
 target_link_libraries(compiler_tests
   PRIVATE
-  SandyCompilerLib
+  SandyRTLib
   GTest::gtest_main
 )
 
@@ -201,7 +201,7 @@ add_executable(cpu_runner
 
 target_link_libraries(cpu_runner
   PRIVATE
-  SandyCompilerLib
+  SandyRTLib
   EngineLib
   WeightLib
 )
@@ -223,7 +223,7 @@ if(SANDY_ENABLE_CUDA)
 
   target_link_libraries(cuda_runner
     PRIVATE
-    SandyCompilerLib
+    SandyRTLib
     EngineLib
     WeightLib
   )
@@ -241,7 +241,7 @@ add_executable(multi_gemma4_runner
 
 target_link_libraries(multi_gemma4_runner
   PRIVATE
-  SandyCompilerLib
+  SandyRTLib
   EngineLib
   WeightLib
 )
@@ -263,7 +263,7 @@ if(SANDY_ENABLE_CUDA)
 
   target_link_libraries(cuda_multi_gemma4_runner
     PRIVATE
-    SandyCompilerLib
+    SandyRTLib
     EngineLib
     WeightLib
   )

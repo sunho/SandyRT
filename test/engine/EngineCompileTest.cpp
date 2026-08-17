@@ -267,7 +267,7 @@ TEST_F(EngineCompileTest, RunValuesReturnsTensorTupleOutput) {
         std::make_shared<FakeTensorBuffer>(
             sandy::core::TensorDesc(sandy::core::Shape({2}), sandy::core::DType::F32)),
     };
-    auto outputsResult = engine.runValues(**compiled, inputs, {});
+    auto outputsResult = engine.runValues(**compiled, inputs, sandy::device::TensorMap{});
     ASSERT_TRUE(outputsResult) << outputsResult.error();
     ASSERT_EQ(outputsResult->size(), 1u);
     auto* tupleOutput = std::get_if<sandy::engine::RunTensorTuple>(&(*outputsResult)[0]);
@@ -302,7 +302,7 @@ TEST_F(EngineCompileTest, RunValuesKeepsTupleOutputElementsAliveUntilReadAndThen
             sandy::core::TensorDesc(sandy::core::Shape({2}), sandy::core::DType::F32)),
     };
 
-    auto outputsResult = engine.runValues(**compiled, inputs, {});
+    auto outputsResult = engine.runValues(**compiled, inputs, sandy::device::TensorMap{});
     ASSERT_TRUE(outputsResult) << outputsResult.error();
     ASSERT_EQ(outputsResult->size(), 1u);
     auto* tupleOutput = std::get_if<sandy::engine::RunTensorTuple>(&(*outputsResult)[0]);
