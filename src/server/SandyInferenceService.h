@@ -1,6 +1,6 @@
 #pragma once
 
-#include "GemmaModel.h"
+#include "Model.h"
 #include "sandy_inference.grpc.pb.h"
 
 #include <memory>
@@ -9,7 +9,7 @@ namespace sandy::server {
 
 class SandyInferenceService final : public sandy::server::SandyInference::Service {
 public:
-    explicit SandyInferenceService(std::shared_ptr<GemmaModel> model);
+    explicit SandyInferenceService(std::shared_ptr<Model> model);
 
     grpc::Status Health(
         grpc::ServerContext* context,
@@ -27,7 +27,7 @@ public:
         GenerateResponse* response) override;
 
 private:
-    std::shared_ptr<GemmaModel> model_;
+    std::shared_ptr<Model> model_;
 };
 
 } // namespace sandy::server

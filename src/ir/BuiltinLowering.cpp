@@ -130,6 +130,24 @@ BuiltinLowering BuiltinLowering::createDefault() {
         return std::vector<Value*>{builder.createMul(halfX, onePlusTanh)};
     });
 
+    bl.add("silu", [](Builder& builder,
+                       const std::vector<Value*>& operands,
+                       const AttrMap&,
+                       int numResults) -> Result<std::vector<Value*>> {
+        auto resultCount = expect_num_results("silu", numResults, 1);
+        if (!resultCount) return make_error(resultCount.error());
+        if (operands.size() != 1)
+            return make_error("silu expects one operand");
+
+        auto* x = operands[0];
+        auto* half = builder.createConstantF32(0.5f);
+        auto* one = builder.createConstantF32(1.0f);
+        auto* halfX = builder.createMul(half, x);
+        auto* tanh = builder.createTanh(halfX);
+        auto* onePlusTanh = builder.createAdd(one, tanh);
+        return std::vector<Value*>{builder.createMul(halfX, onePlusTanh)};
+    });
+
     bl.add("softcap", [](Builder& builder,
                           const std::vector<Value*>& operands,
                           const AttrMap& attrs,

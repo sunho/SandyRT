@@ -6,7 +6,7 @@
 
 namespace sandy::server {
 
-SandyInferenceService::SandyInferenceService(std::shared_ptr<GemmaModel> model)
+SandyInferenceService::SandyInferenceService(std::shared_ptr<Model> model)
     : model_(std::move(model)) {}
 
 grpc::Status SandyInferenceService::Health(

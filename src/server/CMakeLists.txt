@@ -1,10 +1,10 @@
 add_executable(sandy_grpc_worker
-  GemmaModel.cpp
-  GemmaSession.cpp
   HostTensorBuffer.cpp
+  Model.cpp
   Sampler.cpp
   SandyInferenceService.cpp
   SandyWorkerMain.cpp
+  Session.cpp
 )
 
 target_include_directories(sandy_grpc_worker

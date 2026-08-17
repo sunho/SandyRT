@@ -1,4 +1,4 @@
-#include "GemmaModel.h"
+#include "Model.h"
 #include "SandyInferenceService.h"
 
 #include <grpcpp/grpcpp.h>
@@ -14,15 +14,16 @@ struct Args {
     std::string modelPath;
     std::string weightsPath;
     std::string listen = "127.0.0.1:50051";
-    std::string modelId = "gemma4e2b";
-    int eosTokenId = 1;
+    std::string modelId;
+    std::string architecture = "gemma4e2b";
+    int eosTokenId = -1;
     int maxContextTokens = 0;
 };
 
 void usage(const char* argv0) {
     std::fprintf(stderr,
         "usage: %s --model <eval_token.sandy.go> --weights <weights.safetensors> "
-        "[--listen <addr>] [--model-id <id>] [--eos-token-id <id>] "
+        "[--listen <addr>] [--model-id <id>] [--architecture <name>] [--eos-token-id <id>] "
         "[--max-context-tokens <n>]\n",
         argv0);
 }
@@ -58,6 +59,8 @@ bool parse_args(int argc, char* argv[], Args& args) {
             if (!require_value(args.listen)) return false;
         } else if (arg == "--model-id") {
             if (!require_value(args.modelId)) return false;
+        } else if (arg == "--architecture") {
+            if (!require_value(args.architecture)) return false;
         } else if (arg == "--eos-token-id") {
             std::string value;
             if (!require_value(value) || !parse_int(value, args.eosTokenId)) return false;
@@ -83,24 +86,29 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    sandy::server::GemmaModelConfig config;
+    sandy::server::ModelConfig config;
     config.modelId = args.modelId;
+    config.architecture = args.architecture;
     config.modelPath = args.modelPath;
     config.weightsPath = args.weightsPath;
     config.eosTokenId = args.eosTokenId;
     config.maxContextTokens = args.maxContextTokens;
 
-    auto modelResult = sandy::server::GemmaModel::load(std::move(config));
+    auto modelResult = sandy::server::Model::load(std::move(config));
     if (!modelResult) {
         std::fprintf(stderr, "model load error: %s\n", modelResult.error().c_str());
         return 1;
     }
 
-    auto model = std::shared_ptr<sandy::server::GemmaModel>(modelResult.take().release());
+    auto model = std::shared_ptr<sandy::server::Model>(modelResult.take().release());
     sandy::server::SandyInferenceService service(model);
 
     grpc::ServerBuilder builder;
-    builder.AddListeningPort(args.listen, grpc::InsecureServerCredentials());
+    int selectedPort = 0;
+    builder.AddListeningPort(
+        args.listen,
+        grpc::InsecureServerCredentials(),
+        &selectedPort);
     builder.RegisterService(&service);
 
     auto server = builder.BuildAndStart();
@@ -109,7 +117,10 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    std::fprintf(stderr, "sandy_grpc_worker listening on %s\n", args.listen.c_str());
+    std::fprintf(stderr,
+        "sandy_grpc_worker listening on %s (selected port %d)\n",
+        args.listen.c_str(),
+        selectedPort);
     server->Wait();
     return 0;
 }

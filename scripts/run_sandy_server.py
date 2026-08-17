@@ -28,6 +28,26 @@ def default_worker(root: pathlib.Path) -> pathlib.Path:
     return root / "build-server/src/server/sandy_grpc_worker"
 
 
+def model_defaults(root: pathlib.Path, architecture: str) -> dict[str, object]:
+    if architecture == "tinyllama":
+        return {
+            "model": root / "src/models/tinyllama/eval_token.sandy.go",
+            "weights": root / "experiments/tinyllama/sandy_model.bf16.safetensors",
+            "tokenizer": root / "experiments/tinyllama",
+            "model_id": "tinyllama",
+            "eos_token_id": 2,
+            "max_context_tokens": 2048,
+        }
+    return {
+        "model": root / "src/models/gemma4e2b/eval_token.sandy.go",
+        "weights": root / "experiments/gemma4_e2b/sandy_model.bf16.safetensors",
+        "tokenizer": root / "experiments/gemma4_e2b",
+        "model_id": "gemma4e2b",
+        "eos_token_id": 1,
+        "max_context_tokens": 0,
+    }
+
+
 def with_pythonpath(root: pathlib.Path) -> dict[str, str]:
     env = os.environ.copy()
     package_root = str(root / "python")
@@ -86,30 +106,49 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Run Sandy C++ gRPC worker and OpenAI-compatible HTTP server."
     )
+    parser.add_argument(
+        "--architecture",
+        default="gemma4e2b",
+        choices=["gemma4e2b", "gemma4e4b", "gemma", "tinyllama"],
+    )
     parser.add_argument("--worker", default=default_worker(root), type=pathlib.Path)
     parser.add_argument(
         "--model",
-        default=root / "src/models/gemma4e2b/eval_token.sandy.go",
+        default=None,
         type=pathlib.Path,
     )
     parser.add_argument(
         "--weights",
-        default=root / "experiments/gemma4_e2b/sandy_model.bf16.safetensors",
+        default=None,
         type=pathlib.Path,
     )
     parser.add_argument(
         "--tokenizer",
-        default=root / "experiments/gemma4_e2b",
+        default=None,
         type=pathlib.Path,
     )
-    parser.add_argument("--model-id", default="gemma4e2b")
+    parser.add_argument("--model-id", default=None)
     parser.add_argument("--grpc-listen", default="127.0.0.1:50051")
     parser.add_argument("--http-host", default="127.0.0.1")
     parser.add_argument("--http-port", default=8000, type=int)
-    parser.add_argument("--eos-token-id", default=1, type=int)
-    parser.add_argument("--max-context-tokens", default=0, type=int)
+    parser.add_argument("--eos-token-id", default=None, type=int)
+    parser.add_argument("--max-context-tokens", default=None, type=int)
     parser.add_argument("--python", default=sys.executable)
     args = parser.parse_args()
+
+    defaults = model_defaults(root, args.architecture)
+    if args.model is None:
+        args.model = defaults["model"]
+    if args.weights is None:
+        args.weights = defaults["weights"]
+    if args.tokenizer is None:
+        args.tokenizer = defaults["tokenizer"]
+    if args.model_id is None:
+        args.model_id = defaults["model_id"]
+    if args.eos_token_id is None:
+        args.eos_token_id = defaults["eos_token_id"]
+    if args.max_context_tokens is None:
+        args.max_context_tokens = defaults["max_context_tokens"]
 
     if not args.worker.exists():
         print(f"missing sandy_grpc_worker: {args.worker}", file=sys.stderr)
@@ -134,6 +173,7 @@ def main() -> int:
         "--weights", str(args.weights),
         "--listen", args.grpc_listen,
         "--model-id", args.model_id,
+        "--architecture", args.architecture,
         "--eos-token-id", str(args.eos_token_id),
     ]
     if args.max_context_tokens > 0:
