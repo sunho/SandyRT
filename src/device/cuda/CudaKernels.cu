@@ -12,15 +12,6 @@ Result<void> launch_cuda_layout_transform(
     return unimplemented("layout_transform");
 }
 
-Result<void> launch_cuda_rope(
-        const CudaLaunchContext& context,
-        const CudaRoPEProgram&) {
-    auto valid = validate_context(context, 1, 1, "rope");
-    if (!valid)
-        return make_error(valid.error());
-    return unimplemented("rope");
-}
-
 Result<void> launch_cuda_sliding_query_key_score(
         const CudaLaunchContext& context,
         const CudaSlidingQueryKeyScoreProgram&) {

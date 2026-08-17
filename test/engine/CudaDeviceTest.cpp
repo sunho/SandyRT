@@ -721,6 +721,285 @@ TEST(CudaDeviceTest, RunSoftmaxRejectsNonLastDim) {
     EXPECT_NE(run.error().find("only supports last dimension"), std::string::npos);
 }
 
+TEST(CudaDeviceTest, RunRoPEF32ImplicitPositions) {
+    if (auto reason = cuda_device_skip_reason(); !reason.empty())
+        GTEST_SKIP() << reason;
+    namespace kir = sandy::ir::kernel_ir;
+
+    kir::Graph graph;
+    auto x = graph.addValue(tensor_type({1, 3, 4}));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 0, ""},
+        x);
+    auto output = graph.addValue(tensor_type({1, 3, 4}));
+    auto* op = graph.addOp<kir::RoPEKernelOp>(x, output, 10000.0, -1, false);
+    graph.setOutputs({output});
+
+    sandy::device::CudaDevice device;
+    auto compiled = device.compile(graph);
+    ASSERT_TRUE(compiled) << compiled.error();
+
+    auto xHost = make_f32_buffer(
+        "x",
+        sandy::core::Shape({1, 3, 4}),
+        {
+            1.0f, 2.0f, 3.0f, 4.0f,
+            1.0f, 0.0f, 0.0f, 1.0f,
+            0.0f, 1.0f, 1.0f, 0.0f,
+        });
+    auto xBuffer = device.load(*xHost);
+    ASSERT_TRUE(xBuffer) << xBuffer.error();
+    auto outputBuffer = device.alloc(sandy::core::TensorDesc({1, 3, 4}, sandy::core::DType::F32));
+    ASSERT_TRUE(outputBuffer) << outputBuffer.error();
+
+    std::vector<sandy::device::DeviceRunValue> inputs = {
+        tensor_view(device, *xBuffer, xHost->desc()),
+    };
+    std::vector<sandy::device::DeviceRunValue> outputs = {
+        tensor_view(
+            device,
+            *outputBuffer,
+            sandy::core::TensorDesc({1, 3, 4}, sandy::core::DType::F32)),
+    };
+    auto run = device.run(*compiled, op->id(), inputs, outputs);
+    ASSERT_TRUE(run) << run.error();
+
+    expect_f32_output(
+        device,
+        *outputBuffer,
+        {
+            1.0f, 2.0f, 3.0f, 4.0f,
+            std::cos(1.0f), std::sin(1.0f), -std::sin(0.01f), std::cos(0.01f),
+            -std::sin(2.0f), std::cos(2.0f), std::cos(0.02f), std::sin(0.02f),
+        });
+}
+
+TEST(CudaDeviceTest, RunRoPEF32PartialRotaryDimZerosTail) {
+    if (auto reason = cuda_device_skip_reason(); !reason.empty())
+        GTEST_SKIP() << reason;
+    namespace kir = sandy::ir::kernel_ir;
+
+    kir::Graph graph;
+    auto x = graph.addValue(tensor_type({1, 2, 4}));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 0, ""},
+        x);
+    auto output = graph.addValue(tensor_type({1, 2, 4}));
+    auto* op = graph.addOp<kir::RoPEKernelOp>(x, output, 10000.0, 2, false);
+    graph.setOutputs({output});
+
+    sandy::device::CudaDevice device;
+    auto compiled = device.compile(graph);
+    ASSERT_TRUE(compiled) << compiled.error();
+
+    auto xHost = make_f32_buffer(
+        "x",
+        sandy::core::Shape({1, 2, 4}),
+        {
+            1.0f, 2.0f, 3.0f, 4.0f,
+            1.0f, 0.0f, 5.0f, 6.0f,
+        });
+    auto xBuffer = device.load(*xHost);
+    ASSERT_TRUE(xBuffer) << xBuffer.error();
+    auto outputBuffer = device.alloc(sandy::core::TensorDesc({1, 2, 4}, sandy::core::DType::F32));
+    ASSERT_TRUE(outputBuffer) << outputBuffer.error();
+
+    std::vector<sandy::device::DeviceRunValue> inputs = {
+        tensor_view(device, *xBuffer, xHost->desc()),
+    };
+    std::vector<sandy::device::DeviceRunValue> outputs = {
+        tensor_view(
+            device,
+            *outputBuffer,
+            sandy::core::TensorDesc({1, 2, 4}, sandy::core::DType::F32)),
+    };
+    auto run = device.run(*compiled, op->id(), inputs, outputs);
+    ASSERT_TRUE(run) << run.error();
+
+    expect_f32_output(
+        device,
+        *outputBuffer,
+        {
+            1.0f, 2.0f, 0.0f, 0.0f,
+            std::cos(1.0f), std::sin(1.0f), 0.0f, 0.0f,
+        });
+}
+
+TEST(CudaDeviceTest, RunRoPEF32RuntimePositionIds) {
+    if (auto reason = cuda_device_skip_reason(); !reason.empty())
+        GTEST_SKIP() << reason;
+    namespace kir = sandy::ir::kernel_ir;
+
+    kir::Graph graph;
+    auto x = graph.addValue(tensor_type({1, 1, 4}));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 0, ""},
+        x);
+    auto positionIds = graph.addValue(tensor_type({1}, sandy::core::DType::I64));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 1, ""},
+        positionIds);
+    auto output = graph.addValue(tensor_type({1, 1, 4}));
+    auto* op = graph.addOp<kir::RoPEKernelOp>(
+        std::vector<kir::ValueId>{x, positionIds},
+        output,
+        10000.0,
+        -1,
+        false);
+    graph.setOutputs({output});
+
+    sandy::device::CudaDevice device;
+    auto compiled = device.compile(graph);
+    ASSERT_TRUE(compiled) << compiled.error();
+
+    auto xHost = make_f32_buffer(
+        "x",
+        sandy::core::Shape({1, 1, 4}),
+        {1.0f, 0.0f, 0.0f, 1.0f});
+    auto positionHost = make_i64_buffer("position_ids", sandy::core::Shape({1}), {3});
+    auto xBuffer = device.load(*xHost);
+    ASSERT_TRUE(xBuffer) << xBuffer.error();
+    auto positionBuffer = device.load(*positionHost);
+    ASSERT_TRUE(positionBuffer) << positionBuffer.error();
+    auto outputBuffer = device.alloc(sandy::core::TensorDesc({1, 1, 4}, sandy::core::DType::F32));
+    ASSERT_TRUE(outputBuffer) << outputBuffer.error();
+
+    std::vector<sandy::device::DeviceRunValue> inputs = {
+        tensor_view(device, *xBuffer, xHost->desc()),
+        tensor_view(device, *positionBuffer, positionHost->desc()),
+    };
+    std::vector<sandy::device::DeviceRunValue> outputs = {
+        tensor_view(
+            device,
+            *outputBuffer,
+            sandy::core::TensorDesc({1, 1, 4}, sandy::core::DType::F32)),
+    };
+    auto run = device.run(*compiled, op->id(), inputs, outputs);
+    ASSERT_TRUE(run) << run.error();
+
+    expect_f32_output(
+        device,
+        *outputBuffer,
+        {
+            std::cos(3.0f),
+            std::sin(3.0f),
+            -std::sin(0.03f),
+            std::cos(0.03f),
+        });
+}
+
+TEST(CudaDeviceTest, RunRoPEF32SplitHalf) {
+    if (auto reason = cuda_device_skip_reason(); !reason.empty())
+        GTEST_SKIP() << reason;
+    namespace kir = sandy::ir::kernel_ir;
+
+    kir::Graph graph;
+    auto x = graph.addValue(tensor_type({1, 2, 4}));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 0, ""},
+        x);
+    auto output = graph.addValue(tensor_type({1, 2, 4}));
+    auto* op = graph.addOp<kir::RoPEKernelOp>(x, output, 10000.0, -1, true);
+    graph.setOutputs({output});
+
+    sandy::device::CudaDevice device;
+    auto compiled = device.compile(graph);
+    ASSERT_TRUE(compiled) << compiled.error();
+
+    auto xHost = make_f32_buffer(
+        "x",
+        sandy::core::Shape({1, 2, 4}),
+        {
+            1.0f, 2.0f, 3.0f, 4.0f,
+            1.0f, 2.0f, 3.0f, 4.0f,
+        });
+    auto xBuffer = device.load(*xHost);
+    ASSERT_TRUE(xBuffer) << xBuffer.error();
+    auto outputBuffer = device.alloc(sandy::core::TensorDesc({1, 2, 4}, sandy::core::DType::F32));
+    ASSERT_TRUE(outputBuffer) << outputBuffer.error();
+
+    std::vector<sandy::device::DeviceRunValue> inputs = {
+        tensor_view(device, *xBuffer, xHost->desc()),
+    };
+    std::vector<sandy::device::DeviceRunValue> outputs = {
+        tensor_view(
+            device,
+            *outputBuffer,
+            sandy::core::TensorDesc({1, 2, 4}, sandy::core::DType::F32)),
+    };
+    auto run = device.run(*compiled, op->id(), inputs, outputs);
+    ASSERT_TRUE(run) << run.error();
+
+    float c1 = std::cos(1.0f);
+    float s1 = std::sin(1.0f);
+    float c001 = std::cos(0.01f);
+    float s001 = std::sin(0.01f);
+    expect_f32_output(
+        device,
+        *outputBuffer,
+        {
+            1.0f, 2.0f, 3.0f, 4.0f,
+            1.0f * c1 - 3.0f * s1,
+            2.0f * c001 - 4.0f * s001,
+            1.0f * s1 + 3.0f * c1,
+            2.0f * s001 + 4.0f * c001,
+        });
+}
+
+TEST(CudaDeviceTest, RunRoPERejectsNegativePositionIds) {
+    if (auto reason = cuda_device_skip_reason(); !reason.empty())
+        GTEST_SKIP() << reason;
+    namespace kir = sandy::ir::kernel_ir;
+
+    kir::Graph graph;
+    auto x = graph.addValue(tensor_type({1, 1, 4}));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 0, ""},
+        x);
+    auto positionIds = graph.addValue(tensor_type({1}, sandy::core::DType::I32));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 1, ""},
+        positionIds);
+    auto output = graph.addValue(tensor_type({1, 1, 4}));
+    auto* op = graph.addOp<kir::RoPEKernelOp>(
+        std::vector<kir::ValueId>{x, positionIds},
+        output,
+        10000.0,
+        -1,
+        false);
+    graph.setOutputs({output});
+
+    sandy::device::CudaDevice device;
+    auto compiled = device.compile(graph);
+    ASSERT_TRUE(compiled) << compiled.error();
+
+    auto xHost = make_f32_buffer(
+        "x",
+        sandy::core::Shape({1, 1, 4}),
+        {1.0f, 0.0f, 0.0f, 1.0f});
+    auto positionHost = make_i32_buffer("position_ids", sandy::core::Shape({1}), {-1});
+    auto xBuffer = device.load(*xHost);
+    ASSERT_TRUE(xBuffer) << xBuffer.error();
+    auto positionBuffer = device.load(*positionHost);
+    ASSERT_TRUE(positionBuffer) << positionBuffer.error();
+    auto outputBuffer = device.alloc(sandy::core::TensorDesc({1, 1, 4}, sandy::core::DType::F32));
+    ASSERT_TRUE(outputBuffer) << outputBuffer.error();
+
+    std::vector<sandy::device::DeviceRunValue> inputs = {
+        tensor_view(device, *xBuffer, xHost->desc()),
+        tensor_view(device, *positionBuffer, positionHost->desc()),
+    };
+    std::vector<sandy::device::DeviceRunValue> outputs = {
+        tensor_view(
+            device,
+            *outputBuffer,
+            sandy::core::TensorDesc({1, 1, 4}, sandy::core::DType::F32)),
+    };
+    auto run = device.run(*compiled, op->id(), inputs, outputs);
+    ASSERT_FALSE(run);
+    EXPECT_NE(run.error().find("position_ids must be non-negative"), std::string::npos);
+}
+
 TEST(CudaDeviceTest, RunRMSNormF32WithWeight) {
     if (auto reason = cuda_device_skip_reason(); !reason.empty())
         GTEST_SKIP() << reason;
