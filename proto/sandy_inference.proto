@@ -1,0 +1,40 @@
+syntax = "proto3";
+
+package sandy.server;
+
+service SandyInference {
+  rpc Health(HealthRequest) returns (HealthResponse);
+  rpc ModelInfo(ModelInfoRequest) returns (ModelInfoResponse);
+  rpc Generate(GenerateRequest) returns (GenerateResponse);
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+  bool ok = 1;
+  string message = 2;
+}
+
+message ModelInfoRequest {}
+
+message ModelInfoResponse {
+  string model_id = 1;
+  string backend = 2;
+  int32 max_context_tokens = 3;
+}
+
+message GenerateRequest {
+  string request_id = 1;
+  repeated int64 input_ids = 2;
+  int32 max_tokens = 3;
+  repeated int64 stop_token_ids = 4;
+}
+
+message GenerateResponse {
+  string request_id = 1;
+  repeated int64 output_ids = 2;
+  string finish_reason = 3;
+  int32 prompt_tokens = 4;
+  int32 completion_tokens = 5;
+  string error = 6;
+}

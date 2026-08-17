@@ -2,11 +2,16 @@ build/
 build-opt/
 build-release/
 build-fast/
+build-server/
+build-server-cublas/
 build-cublas/
 build-cublas12/
 build-cuda/
 .cuda/
 .cuda12/
+.venv/
+__pycache__/
+*.py[cod]
 external/googletest/
 experiments/mnist/data/
 experiments/mnist/.venv/

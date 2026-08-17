@@ -5,3 +5,7 @@ PySide6
 numpy
 huggingface_hub
 transformers
+fastapi
+uvicorn
+grpcio
+grpcio-tools
