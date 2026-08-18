@@ -23,14 +23,17 @@ public:
     CudaPagedTensorPool(CudaPagedTensorPool&& other) noexcept;
     CudaPagedTensorPool& operator=(CudaPagedTensorPool&& other) noexcept;
 
-    static Result<CudaPagedTensorPool> create(int cudaDevice, DevicePagedPoolDesc desc);
+    static Result<CudaPagedTensorPool> create(
+        int cudaDevice,
+        DevicePagedPoolDesc desc,
+        cudaStream_t stream);
 
     const DevicePagedPoolDesc& desc() const { return desc_; }
     int64_t page_element_count() const { return pageElementCount_; }
     size_t page_bytes() const { return pageBytes_; }
     size_t page_count() const { return pages_.size(); }
 
-    Result<uint32_t> allocate_page();
+    Result<uint32_t> allocate_page(cudaStream_t stream);
     Result<void> free_page(uint32_t page);
     Result<void*> page_data(uint32_t page) const;
 
@@ -41,7 +44,7 @@ private:
 
     explicit CudaPagedTensorPool(int cudaDevice);
 
-    Result<void> initialize(DevicePagedPoolDesc desc);
+    Result<void> initialize(DevicePagedPoolDesc desc, cudaStream_t stream);
     void release();
 
     int cudaDevice_ = 0;

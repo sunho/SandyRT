@@ -104,7 +104,8 @@ __global__ void gather_kernel(DeviceGatherProgram program, int* errorFlag) {
     int64_t idStorage = cuda_kernel::storage_index(program.ids, idLinear);
     int64_t tokenId = load_index_at_storage(program.ids, idStorage);
     if (tokenId < 0 || tokenId >= program.vocab) {
-        atomicExch(errorFlag, 1);
+        if (errorFlag)
+            atomicExch(errorFlag, 1);
         return;
     }
 
@@ -369,22 +370,9 @@ Result<void> launch_cuda_gather(const CudaLaunchContext& context) {
     if (program.outputNumel == 0)
         return {};
 
+    // Hot decode path: token ids and router expert ids are expected valid by construction.
+    // Skipping the error-flag round trip avoids one cudaStreamSynchronize per gather.
     int* errorFlag = nullptr;
-    auto allocated = cuda_check(cudaMalloc(&errorFlag, sizeof(int)), "cudaMalloc gather error flag");
-    if (!allocated)
-        return make_error(allocated.error());
-    auto freeFlag = [&]() {
-        if (errorFlag)
-            cudaFree(errorFlag);
-    };
-
-    auto cleared = cuda_check(
-        cudaMemsetAsync(errorFlag, 0, sizeof(int), context.stream),
-        "cudaMemsetAsync gather error flag");
-    if (!cleared) {
-        freeFlag();
-        return make_error(cleared.error());
-    }
 
     int blocks = static_cast<int>(
         (program.outputNumel + cuda_kernel::kBlockSize - 1) /
@@ -393,34 +381,8 @@ Result<void> launch_cuda_gather(const CudaLaunchContext& context) {
         program,
         errorFlag);
     auto launched = cuda_check(cudaGetLastError(), "cuda gather launch");
-    if (!launched) {
-        freeFlag();
+    if (!launched)
         return make_error(launched.error());
-    }
-
-    int hostError = 0;
-    auto copied = cuda_check(
-        cudaMemcpyAsync(
-            &hostError,
-            errorFlag,
-            sizeof(int),
-            cudaMemcpyDeviceToHost,
-            context.stream),
-        "cudaMemcpyAsync gather error flag");
-    if (!copied) {
-        freeFlag();
-        return make_error(copied.error());
-    }
-
-    auto synced = cuda_check(cudaStreamSynchronize(context.stream), "cudaStreamSynchronize gather");
-    if (!synced) {
-        freeFlag();
-        return make_error(synced.error());
-    }
-
-    freeFlag();
-    if (hostError != 0)
-        return make_error("embedding id out of range");
     return {};
 }
 
@@ -442,44 +404,69 @@ Result<void> launch_cuda_moe_gather(
     int32_t* offsets = nullptr;
     int* errorFlag = nullptr;
     auto freeTemps = [&]() {
-        if (counts) cudaFree(counts);
-        if (cursors) cudaFree(cursors);
-        if (routeRows) cudaFree(routeRows);
-        if (offsets) cudaFree(offsets);
-        if (errorFlag) cudaFree(errorFlag);
+        if (counts) {
+            (void)cuda_free_stream_ordered(counts, context.stream, "cudaFreeAsync moe_gather counts");
+            counts = nullptr;
+        }
+        if (cursors) {
+            (void)cuda_free_stream_ordered(cursors, context.stream, "cudaFreeAsync moe_gather cursors");
+            cursors = nullptr;
+        }
+        if (routeRows) {
+            (void)cuda_free_stream_ordered(routeRows, context.stream, "cudaFreeAsync moe_gather route rows");
+            routeRows = nullptr;
+        }
+        if (offsets) {
+            (void)cuda_free_stream_ordered(offsets, context.stream, "cudaFreeAsync moe_gather offsets");
+            offsets = nullptr;
+        }
+        if (errorFlag) {
+            (void)cuda_free_stream_ordered(errorFlag, context.stream, "cudaFreeAsync moe_gather error flag");
+            errorFlag = nullptr;
+        }
     };
 
-    auto allocCounts = cuda_check(
-        cudaMalloc(&counts, static_cast<size_t>(launchProgram.batch * launchProgram.numExperts) * sizeof(int32_t)),
-        "cudaMalloc moe_gather counts");
+    auto allocCounts = cuda_malloc_stream_ordered(
+        &counts,
+        static_cast<size_t>(launchProgram.batch * launchProgram.numExperts) * sizeof(int32_t),
+        context.stream,
+        "cudaMallocAsync moe_gather counts");
     if (!allocCounts)
         return make_error(allocCounts.error());
-    auto allocCursors = cuda_check(
-        cudaMalloc(&cursors, static_cast<size_t>(launchProgram.batch * launchProgram.numExperts) * sizeof(int32_t)),
-        "cudaMalloc moe_gather cursors");
+    auto allocCursors = cuda_malloc_stream_ordered(
+        &cursors,
+        static_cast<size_t>(launchProgram.batch * launchProgram.numExperts) * sizeof(int32_t),
+        context.stream,
+        "cudaMallocAsync moe_gather cursors");
     if (!allocCursors) {
         freeTemps();
         return make_error(allocCursors.error());
     }
-    auto allocOffsets = cuda_check(
-        cudaMalloc(&offsets, static_cast<size_t>(launchProgram.batch * (launchProgram.numExperts + 1)) * sizeof(int32_t)),
-        "cudaMalloc moe_gather offsets");
+    auto allocOffsets = cuda_malloc_stream_ordered(
+        &offsets,
+        static_cast<size_t>(launchProgram.batch * (launchProgram.numExperts + 1)) * sizeof(int32_t),
+        context.stream,
+        "cudaMallocAsync moe_gather offsets");
     if (!allocOffsets) {
         freeTemps();
         return make_error(allocOffsets.error());
     }
     if (launchProgram.totalRoutes != 0) {
-        auto allocRouteRows = cuda_check(
-            cudaMalloc(&routeRows, static_cast<size_t>(launchProgram.totalRoutes) * sizeof(int32_t)),
-            "cudaMalloc moe_gather route rows");
+        auto allocRouteRows = cuda_malloc_stream_ordered(
+            &routeRows,
+            static_cast<size_t>(launchProgram.totalRoutes) * sizeof(int32_t),
+            context.stream,
+            "cudaMallocAsync moe_gather route rows");
         if (!allocRouteRows) {
             freeTemps();
             return make_error(allocRouteRows.error());
         }
     }
-    auto allocError = cuda_check(
-        cudaMalloc(&errorFlag, sizeof(int)),
-        "cudaMalloc moe_gather error flag");
+    auto allocError = cuda_malloc_stream_ordered(
+        &errorFlag,
+        sizeof(int),
+        context.stream,
+        "cudaMallocAsync moe_gather error flag");
     if (!allocError) {
         freeTemps();
         return make_error(allocError.error());

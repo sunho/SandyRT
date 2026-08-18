@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import urllib.error
 import urllib.request
@@ -16,20 +17,31 @@ HELP = """commands:
 """
 
 
-def post_json(url: str, payload: dict, timeout: float) -> dict:
+def auth_headers(auth_token: str | None) -> dict[str, str]:
+    if not auth_token:
+        return {}
+    return {"Authorization": f"Bearer {auth_token}"}
+
+
+def post_json(url: str, payload: dict, timeout: float, auth_token: str | None) -> dict:
     data = json.dumps(payload).encode("utf-8")
     request = urllib.request.Request(
         url,
         data=data,
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json", **auth_headers(auth_token)},
         method="POST",
     )
     with urllib.request.urlopen(request, timeout=timeout) as response:
         return json.loads(response.read().decode("utf-8"))
 
 
-def get_json(url: str, timeout: float) -> dict:
-    with urllib.request.urlopen(url, timeout=timeout) as response:
+def get_json(url: str, timeout: float, auth_token: str | None) -> dict:
+    request = urllib.request.Request(
+        url,
+        headers=auth_headers(auth_token),
+        method="GET",
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
         return json.loads(response.read().decode("utf-8"))
 
 
@@ -38,7 +50,8 @@ def chat_once(
         model: str,
         messages: list[dict[str, str]],
         max_tokens: int,
-        timeout: float) -> tuple[str, dict]:
+        timeout: float,
+        auth_token: str | None) -> tuple[str, dict]:
     result = post_json(
         base_url.rstrip("/") + "/v1/chat/completions",
         {
@@ -48,6 +61,7 @@ def chat_once(
             "temperature": 0,
         },
         timeout,
+        auth_token,
     )
     choices = result.get("choices") or []
     if not choices:
@@ -77,6 +91,8 @@ def main() -> int:
     parser.add_argument("--max-tokens", type=int, default=64)
     parser.add_argument("--timeout", type=float, default=180.0)
     parser.add_argument("--system", default=None)
+    parser.add_argument("--auth-token", default=None)
+    parser.add_argument("--auth-token-env", default="SANDY_API_TOKEN")
     parser.add_argument("--no-history", action="store_true")
     parser.add_argument("--show-usage", action="store_true")
     args = parser.parse_args()
@@ -86,10 +102,13 @@ def main() -> int:
         return 1
 
     base_url = args.base_url.rstrip("/")
+    auth_token = args.auth_token
+    if auth_token is None and args.auth_token_env:
+        auth_token = os.environ.get(args.auth_token_env)
     model = args.model
     if model is None:
         try:
-            models = get_json(base_url + "/v1/models", args.timeout)
+            models = get_json(base_url + "/v1/models", args.timeout, auth_token)
         except (urllib.error.URLError, TimeoutError) as exc:
             print(f"failed to fetch model list: {exc}", file=sys.stderr)
             return 1
@@ -114,6 +133,7 @@ def main() -> int:
                 request_messages,
                 args.max_tokens,
                 args.timeout,
+                auth_token,
             )
         except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, RuntimeError) as exc:
             print(f"request failed: {exc}", file=sys.stderr)

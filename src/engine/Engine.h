@@ -36,9 +36,27 @@ struct EngineProfileStageEvent {
     double elapsedMs = 0.0;
 };
 
+struct EngineDeviceRunBoundaryEvent {
+    enum class Boundary {
+        Begin,
+        End,
+    };
+
+    Boundary boundary = Boundary::Begin;
+    size_t opIndex = 0;
+    ir::kernel_ir::OpId op = 0;
+    uint32_t device = 0;
+    DeviceCompiledGraphId deviceGraph = 0;
+    ir::kernel_ir::OpKind opKind = ir::kernel_ir::OpKind::Input;
+    size_t inputCount = 0;
+    size_t outputCount = 0;
+    double elapsedMs = 0.0;
+};
+
 struct EngineRunOptions {
     std::function<void(const EngineProfileEvent&)> profileKernel;
     std::function<void(const EngineProfileStageEvent&)> profileStage;
+    std::function<void(const EngineDeviceRunBoundaryEvent&)> profileDeviceRunBoundary;
 };
 
 struct EngineCompileOptions {

@@ -29,7 +29,10 @@ namespace {
 
 constexpr int kGemma4E2BLocalCacheCount = 12;
 constexpr int kGemma4E2BGlobalCacheCount = 3;
-constexpr int kGemma4E2BKVLayerCount = 15;
+constexpr int kGemma4E4BLocalCacheCount = 20;
+constexpr int kGemma4E4BGlobalCacheCount = 4;
+constexpr int kGemma4A4BLocalCacheCount = 25;
+constexpr int kGemma4A4BGlobalCacheCount = 5;
 constexpr int kTinyLlamaKVLayerCount = 22;
 
 class HostTensorBuffer final : public sandy::core::TensorBuffer {
@@ -106,6 +109,21 @@ std::shared_ptr<HostTensorBuffer> make_i64_buffer(
         sandy::core::TensorDesc(
             std::move(name),
             std::move(shape),
+        sandy::core::DType::I64),
+        std::move(bytes));
+}
+
+std::shared_ptr<HostTensorBuffer> make_i64_vector_buffer(
+        std::string name,
+        sandy::core::Shape shape,
+        std::span<const int64_t> values) {
+    std::vector<uint8_t> bytes(values.size() * sizeof(int64_t));
+    if (!values.empty())
+        std::memcpy(bytes.data(), values.data(), bytes.size());
+    return std::make_shared<HostTensorBuffer>(
+        sandy::core::TensorDesc(
+            std::move(name),
+            std::move(shape),
             sandy::core::DType::I64),
         std::move(bytes));
 }
@@ -162,6 +180,20 @@ using Clock = std::chrono::steady_clock;
 
 double elapsed_ms(Clock::time_point start, Clock::time_point end) {
     return std::chrono::duration<double, std::milli>(end - start).count();
+}
+
+void print_runner_stage(
+        bool profile,
+        std::string_view stage,
+        Clock::time_point start,
+        Clock::time_point end) {
+    if (!profile)
+        return;
+    printf("[profile] runner_stage=%.*s wall_ms=%.3f\n",
+           static_cast<int>(stage.size()),
+           stage.data(),
+           elapsed_ms(start, end));
+    fflush(stdout);
 }
 
 Result<sandy::device::DevicePagedTensorView> paged_view(
@@ -232,7 +264,7 @@ Result<EvalTokenCaches> create_eval_token_caches(
             kTinyLlamaKVLayerCount,
             sandy::core::Shape({1, 4, sandy::core::Shape::kDynamic, 64}),
             2,
-            16);
+            32);
         if (!k)
             return make_error(k.error());
         auto v = add_cache_group(
@@ -241,46 +273,65 @@ Result<EvalTokenCaches> create_eval_token_caches(
             kTinyLlamaKVLayerCount,
             sandy::core::Shape({1, 4, sandy::core::Shape::kDynamic, 64}),
             2,
-            16);
+            32);
         if (!v)
             return make_error(v.error());
         return caches;
     }
 
+    int localCount = kGemma4E2BLocalCacheCount;
+    int globalCount = kGemma4E2BGlobalCacheCount;
+    int localKvHeads = 1;
+    int globalKvHeads = 1;
+    if (architecture == "gemma4e4b") {
+        localCount = kGemma4E4BLocalCacheCount;
+        globalCount = kGemma4E4BGlobalCacheCount;
+        localKvHeads = 2;
+        globalKvHeads = 2;
+    } else if (
+            architecture == "gemma4a4b26b" ||
+            architecture == "gemma4a4b" ||
+            architecture == "gemma4moe") {
+        localCount = kGemma4A4BLocalCacheCount;
+        globalCount = kGemma4A4BGlobalCacheCount;
+        localKvHeads = 8;
+        globalKvHeads = 2;
+    }
+
     auto localK = add_cache_group(
         device,
         caches,
-        kGemma4E2BLocalCacheCount,
-        sandy::core::Shape({1, 1, sandy::core::Shape::kDynamic, 256}),
+        localCount,
+        sandy::core::Shape({1, localKvHeads, sandy::core::Shape::kDynamic, 256}),
         2,
-        16);
+        32);
     if (!localK)
         return make_error(localK.error());
     auto localV = add_cache_group(
         device,
         caches,
-        kGemma4E2BLocalCacheCount,
-        sandy::core::Shape({1, 1, sandy::core::Shape::kDynamic, 256}),
+        localCount,
+        sandy::core::Shape({1, localKvHeads, sandy::core::Shape::kDynamic, 256}),
         2,
-        16);
+        32);
     if (!localV)
         return make_error(localV.error());
     auto globalK = add_cache_group(
         device,
         caches,
-        kGemma4E2BGlobalCacheCount,
-        sandy::core::Shape({1, 1, sandy::core::Shape::kDynamic, 512}),
+        globalCount,
+        sandy::core::Shape({1, globalKvHeads, sandy::core::Shape::kDynamic, 512}),
         2,
-        16);
+        32);
     if (!globalK)
         return make_error(globalK.error());
     auto globalV = add_cache_group(
         device,
         caches,
-        kGemma4E2BGlobalCacheCount,
-        sandy::core::Shape({1, 1, sandy::core::Shape::kDynamic, 512}),
+        globalCount,
+        sandy::core::Shape({1, globalKvHeads, sandy::core::Shape::kDynamic, 512}),
         2,
-        16);
+        32);
     if (!globalV)
         return make_error(globalV.error());
     return caches;
@@ -294,6 +345,30 @@ Result<std::vector<sandy::engine::RunInput>> make_eval_inputs(
     std::vector<sandy::engine::RunInput> inputs;
     inputs.reserve(2 + caches.groups.size());
     inputs.push_back(make_i64_buffer("input_id", sandy::core::Shape({1, 1}), token));
+    inputs.push_back(make_i64_buffer("position_id", sandy::core::Shape({1}), position));
+    for (const auto& group : caches.groups) {
+        auto tuple = make_paged_tuple(device, group.tensors);
+        if (!tuple)
+            return make_error(tuple.error());
+        inputs.push_back(tuple.take());
+    }
+    return inputs;
+}
+
+Result<std::vector<sandy::engine::RunInput>> make_prefill_inputs(
+        sandy::device::Device& device,
+        const EvalTokenCaches& caches,
+        const std::vector<int64_t>& tokens,
+        int64_t position) {
+    if (tokens.empty())
+        return make_error("prefill tokens must not be empty");
+
+    std::vector<sandy::engine::RunInput> inputs;
+    inputs.reserve(2 + caches.groups.size());
+    inputs.push_back(make_i64_vector_buffer(
+        "input_id",
+        sandy::core::Shape({1, static_cast<int64_t>(tokens.size())}),
+        tokens));
     inputs.push_back(make_i64_buffer("position_id", sandy::core::Shape({1}), position));
     for (const auto& group : caches.groups) {
         auto tuple = make_paged_tuple(device, group.tensors);
@@ -340,7 +415,8 @@ Result<sandy::engine::TensorBufferPtr> require_tensor_output(
 void usage() {
     fprintf(stderr,
             "usage: multi_gemma4_runner "
-            "[--eval-token] [--architecture gemma4e2b|tinyllama] [--profile] "
+            "[--eval-token|--prefill] "
+            "[--architecture gemma4e2b|gemma4e4b|gemma4a4b26b|tinyllama] [--profile] "
             "<program.sandy.go> <weights.safetensors> "
             "<emit_count> <token_id>...\n");
 }
@@ -350,6 +426,7 @@ void usage() {
 int main(int argc, char* argv[]) {
     int arg = 1;
     bool evalTokenMode = false;
+    bool prefillMode = false;
     bool profile = false;
     bool dumpKernelIR = false;
     std::string architecture = "gemma4e2b";
@@ -357,6 +434,8 @@ int main(int argc, char* argv[]) {
         std::string_view option(argv[arg]);
         if (option == "--eval-token") {
             evalTokenMode = true;
+        } else if (option == "--prefill") {
+            prefillMode = true;
         } else if (option == "--architecture") {
             if (arg + 1 >= argc) {
                 fprintf(stderr, "--architecture requires a value\n");
@@ -378,6 +457,10 @@ int main(int argc, char* argv[]) {
 
     if (argc - arg < 4) {
         usage();
+        return 1;
+    }
+    if (evalTokenMode && prefillMode) {
+        fprintf(stderr, "--eval-token and --prefill are mutually exclusive\n");
         return 1;
     }
 
@@ -403,19 +486,30 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    auto totalStart = Clock::now();
+
+    auto stageStart = Clock::now();
     sandy::Compiler compiler;
     auto highGraph = compiler.load_sandygo(programPath);
+    print_runner_stage(profile, "load_program", stageStart, Clock::now());
 
+    stageStart = Clock::now();
     auto weights = sandy::weight::EagerSafeTensorWeights::load(weightsPath);
+    print_runner_stage(profile, "load_host_weights", stageStart, Clock::now());
+
+    stageStart = Clock::now();
     sandy::engine::TensorMap weightMap;
     add_tensors_to_map(*weights, weightMap);
+    print_runner_stage(profile, "map_host_weights", stageStart, Clock::now());
 
-    if (evalTokenMode) {
+    if (evalTokenMode || prefillMode) {
         sandy::ir::mid_ir::MaterializeOptions options;
         options.input_tensor_descs["input_id"] =
             sandy::core::TensorDesc(
                 "input_id",
-                sandy::core::Shape({1, 1}),
+                prefillMode
+                    ? sandy::core::Shape({1, sandy::core::Shape::kDynamic})
+                    : sandy::core::Shape({1, 1}),
                 sandy::core::DType::I64);
         options.input_tensor_descs["position_id"] =
             sandy::core::TensorDesc(
@@ -423,12 +517,15 @@ int main(int argc, char* argv[]) {
                 sandy::core::Shape({1}),
                 sandy::core::DType::I64);
 
+        stageStart = Clock::now();
         auto midResult = compiler.materialize_mid_ir(highGraph, *weights, options);
+        print_runner_stage(profile, "materialize_mid_ir", stageStart, Clock::now());
         if (!midResult) {
             fprintf(stderr, "materialize error: %s\n", midResult.error().c_str());
             return 1;
         }
 
+        stageStart = Clock::now();
         std::unique_ptr<sandy::device::Device> device;
 #ifdef SANDY_RUNNER_ENABLE_CUDA
         device = std::make_unique<sandy::device::CudaDevice>();
@@ -439,11 +536,15 @@ int main(int argc, char* argv[]) {
         std::vector<std::unique_ptr<sandy::device::Device>> devices;
         devices.push_back(std::move(device));
         sandy::engine::Engine engine(std::move(devices));
+        print_runner_stage(profile, "create_engine", stageStart, Clock::now());
+
         sandy::engine::EngineCompileOptions compileOptions;
 #ifdef SANDY_RUNNER_ENABLE_CUDA
         compileOptions.fusor.attention = true;
 #endif
+        stageStart = Clock::now();
         auto planResult = engine.compile(**midResult, &compileOptions);
+        print_runner_stage(profile, "compile", stageStart, Clock::now());
         if (!planResult) {
             fprintf(stderr, "plan error: %s\n", planResult.error().c_str());
             return 1;
@@ -453,13 +554,17 @@ int main(int argc, char* argv[]) {
             return 0;
         }
 
+        stageStart = Clock::now();
         auto deviceWeights = engine.loadWeights(**planResult, weightMap);
+        print_runner_stage(profile, "load_device_weights", stageStart, Clock::now());
         if (!deviceWeights) {
             fprintf(stderr, "device weight load error: %s\n", deviceWeights.error().c_str());
             return 1;
         }
 
+        stageStart = Clock::now();
         auto caches = create_eval_token_caches(*runtimeDevice, architecture);
+        print_runner_stage(profile, "create_caches", stageStart, Clock::now());
         if (!caches) {
             fprintf(stderr, "cache creation error: %s\n", caches.error().c_str());
             return 1;
@@ -492,27 +597,125 @@ int main(int argc, char* argv[]) {
             };
         }
 
+        auto runOnce = [&](std::vector<sandy::engine::RunInput>& inputs) {
+            auto start = Clock::now();
+            auto result = engine.runValues(
+                **planResult,
+                inputs,
+                **deviceWeights,
+                profile ? &runOptions : nullptr);
+            auto end = Clock::now();
+            return std::pair<
+                Result<std::vector<sandy::engine::RunOutput>>,
+                double>{std::move(result), elapsed_ms(start, end)};
+        };
+
+        if (prefillMode) {
+            auto inputs = make_prefill_inputs(*runtimeDevice, *caches, tokens, 0);
+            if (!inputs) {
+                fprintf(stderr, "prefill input error: %s\n", inputs.error().c_str());
+                return 1;
+            }
+
+            auto prefillStart = Clock::now();
+            auto [run, wallMs] = runOnce(*inputs);
+            if (!run) {
+                fprintf(stderr, "prefill run error: %s\n", run.error().c_str());
+                return 1;
+            }
+            print_runner_stage(profile, "prefill_eval", prefillStart, Clock::now());
+            if (profile) {
+                double tokensPerSecond = wallMs <= 0.0
+                    ? 0.0
+                    : static_cast<double>(tokens.size()) * 1000.0 / wallMs;
+                printf("[profile] prefill tokens=%zu wall_ms=%.3f toks_per_s=%.3f\n",
+                       tokens.size(),
+                       wallMs,
+                       tokensPerSecond);
+            }
+
+            if (emitCount > 0) {
+                auto logits = require_tensor_output(*run, 0);
+                if (!logits) {
+                    fprintf(stderr, "logits output error: %s\n", logits.error().c_str());
+                    return 1;
+                }
+                auto next = argmax_at(**logits, static_cast<int64_t>(tokens.size()) - 1);
+                if (!next) {
+                    fprintf(stderr, "argmax error at prefill tail: %s\n", next.error().c_str());
+                    return 1;
+                }
+                auto pair = next.take();
+                printf("[prefill_next] token=%lld score=%.6g\n",
+                       static_cast<long long>(pair.first),
+                       pair.second);
+            }
+
+            printf("[all_tokens]");
+            for (int64_t token : tokens)
+                printf(" %lld", static_cast<long long>(token));
+            printf("\n");
+            if (profile) {
+                printf("[profile] total kernels=%lld time_ms=%.3f\n",
+                       static_cast<long long>(profileKernelCount),
+                       profileTotalMs);
+                printf("[profile] by op:\n");
+                std::vector<std::pair<int, ProfileStat>> stats(
+                    profileStats.begin(),
+                    profileStats.end());
+                std::sort(stats.begin(), stats.end(), [](const auto& a, const auto& b) {
+                    return a.second.totalMs > b.second.totalMs;
+                });
+                for (const auto& [kind, stat] : stats) {
+                    double avgMs = stat.count == 0 ? 0.0 : stat.totalMs / static_cast<double>(stat.count);
+                    printf("  %s count=%lld total_ms=%.3f avg_ms=%.3f max_ms=%.3f\n",
+                           sandy::ir::kernel_ir::op_kind_name(
+                               static_cast<sandy::ir::kernel_ir::OpKind>(kind)),
+                           static_cast<long long>(stat.count),
+                           stat.totalMs,
+                           avgMs,
+                           stat.maxMs);
+                }
+                printf("[profile] engine stages=%lld summed_time_ms=%.3f\n",
+                       static_cast<long long>(profileStageCount),
+                       profileStageTotalMs);
+                printf("[profile] by engine stage:\n");
+                std::vector<std::pair<std::string, ProfileStat>> stageStats(
+                    profileStageStats.begin(),
+                    profileStageStats.end());
+                std::sort(stageStats.begin(), stageStats.end(), [](const auto& a, const auto& b) {
+                    return a.second.totalMs > b.second.totalMs;
+                });
+                for (const auto& [stage, stat] : stageStats) {
+                    double avgMs = stat.count == 0 ? 0.0 : stat.totalMs / static_cast<double>(stat.count);
+                    printf("  %s count=%lld total_ms=%.3f avg_ms=%.3f max_ms=%.3f\n",
+                           stage.c_str(),
+                           static_cast<long long>(stat.count),
+                           stat.totalMs,
+                           avgMs,
+                           stat.maxMs);
+                }
+                print_runner_stage(profile, "total_runner", totalStart, Clock::now());
+            }
+            return 0;
+        }
+
         auto evalOnce = [&](int64_t token, int64_t position) {
             auto inputs = make_eval_inputs(*runtimeDevice, *caches, token, position);
             if (!inputs)
                 return Result<std::vector<sandy::engine::RunOutput>>(make_error(inputs.error()));
-            auto start = Clock::now();
-            auto result = engine.runValues(
-                **planResult,
-                *inputs,
-                **deviceWeights,
-                profile ? &runOptions : nullptr);
-            auto end = Clock::now();
+            auto [result, wallMs] = runOnce(*inputs);
             if (profile) {
                 printf("[profile] eval_token position=%lld wall_ms=%.3f\n",
                        static_cast<long long>(position),
-                       elapsed_ms(start, end));
+                       wallMs);
             }
             return result;
         };
 
         int64_t nextToken = 0;
         float nextScore = 0.0f;
+        auto promptStart = Clock::now();
         for (size_t i = 0; i < tokens.size(); i++) {
             auto run = evalOnce(tokens[i], static_cast<int64_t>(i));
             if (!run) {
@@ -535,8 +738,10 @@ int main(int argc, char* argv[]) {
                 nextScore = pair.second;
             }
         }
+        print_runner_stage(profile, "prompt_eval", promptStart, Clock::now());
 
         std::vector<int64_t> generated;
+        auto generateStart = Clock::now();
         for (int64_t step = 0; step < emitCount; step++) {
             auto emitted = nextToken;
             auto score = nextScore;
@@ -576,6 +781,7 @@ int main(int argc, char* argv[]) {
             nextToken = pair.first;
             nextScore = pair.second;
         }
+        print_runner_stage(profile, "generate_eval", generateStart, Clock::now());
 
         printf("[generated]");
         for (int64_t token : generated)
@@ -624,6 +830,7 @@ int main(int argc, char* argv[]) {
                        avgMs,
                        stat.maxMs);
             }
+            print_runner_stage(profile, "total_runner", totalStart, Clock::now());
         }
         return 0;
     }

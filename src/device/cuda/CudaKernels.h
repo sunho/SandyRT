@@ -33,6 +33,14 @@ struct CudaDevicePagedTensorView {
     size_t pageBytes = 0;
 };
 
+struct CudaWorkspace {
+    void* data = nullptr;
+    size_t bytes = 0;
+
+    Result<void*> reserve(int cudaDevice, cudaStream_t stream, size_t requiredBytes);
+    Result<void> release(int cudaDevice, cudaStream_t stream);
+};
+
 struct CudaLaunchContext {
     int cudaDevice = 0;
     cudaStream_t stream = nullptr;
@@ -40,6 +48,8 @@ struct CudaLaunchContext {
     ir::kernel_ir::OpId op = ir::kernel_ir::kInvalidOpId;
     std::span<const CudaDeviceBufferView> inputs;
     std::span<const CudaDeviceBufferView> outputs;
+    const cudaDeviceProp* deviceProps = nullptr;
+    CudaWorkspace* workspace = nullptr;
 };
 
 struct CudaElementwiseProgram {

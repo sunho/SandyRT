@@ -12,19 +12,26 @@ namespace {
 
 struct Args {
     std::string modelPath;
+    std::string prefillModelPath;
     std::string weightsPath;
     std::string listen = "127.0.0.1:50051";
     std::string modelId;
     std::string architecture = "gemma4e2b";
     int eosTokenId = -1;
     int maxContextTokens = 0;
+    int prefillChunkTokens = sandy::server::kDefaultPrefillChunkTokens;
+    bool debug = false;
+    bool profile = false;
+    std::string logDir = "logs/requests";
 };
 
 void usage(const char* argv0) {
     std::fprintf(stderr,
         "usage: %s --model <eval_token.sandy.go> --weights <weights.safetensors> "
-        "[--listen <addr>] [--model-id <id>] [--architecture <name>] [--eos-token-id <id>] "
-        "[--max-context-tokens <n>]\n",
+        "[--prefill-model <prefill.sandy.go>] [--prefill-chunk-tokens <n>] "
+        "[--listen <addr>] [--model-id <id>] [--architecture <name>] "
+        "[--eos-token-id <id>] [--max-context-tokens <n>] "
+        "[--debug] [--profile] [--log-dir <dir>]\n",
         argv0);
 }
 
@@ -53,6 +60,14 @@ bool parse_args(int argc, char* argv[], Args& args) {
 
         if (arg == "--model") {
             if (!require_value(args.modelPath)) return false;
+        } else if (arg == "--prefill-model") {
+            if (!require_value(args.prefillModelPath)) return false;
+        } else if (arg == "--prefill-chunk-tokens" ||
+                   arg == "--prefill-chunk-size") {
+            std::string value;
+            if (!require_value(value) || !parse_int(value, args.prefillChunkTokens)) return false;
+            if (args.prefillChunkTokens < 0)
+                return false;
         } else if (arg == "--weights") {
             if (!require_value(args.weightsPath)) return false;
         } else if (arg == "--listen") {
@@ -67,6 +82,12 @@ bool parse_args(int argc, char* argv[], Args& args) {
         } else if (arg == "--max-context-tokens") {
             std::string value;
             if (!require_value(value) || !parse_int(value, args.maxContextTokens)) return false;
+        } else if (arg == "--debug") {
+            args.debug = true;
+        } else if (arg == "--profile") {
+            args.profile = true;
+        } else if (arg == "--log-dir" || arg == "--request-log-dir") {
+            if (!require_value(args.logDir)) return false;
         } else if (arg == "--help" || arg == "-h") {
             return false;
         } else {
@@ -90,9 +111,14 @@ int main(int argc, char* argv[]) {
     config.modelId = args.modelId;
     config.architecture = args.architecture;
     config.modelPath = args.modelPath;
+    config.prefillModelPath = args.prefillModelPath;
     config.weightsPath = args.weightsPath;
     config.eosTokenId = args.eosTokenId;
     config.maxContextTokens = args.maxContextTokens;
+    config.logging.debug = args.debug || args.profile;
+    config.logging.profile = args.profile;
+    config.logging.requestLogDir = args.logDir;
+    config.session.prefillChunkTokens = args.prefillChunkTokens;
 
     auto modelResult = sandy::server::Model::load(std::move(config));
     if (!modelResult) {
@@ -121,6 +147,11 @@ int main(int argc, char* argv[]) {
         "sandy_grpc_worker listening on %s (selected port %d)\n",
         args.listen.c_str(),
         selectedPort);
+    std::fprintf(stderr,
+        "sandy_grpc_worker logging debug=%d profile=%d log_dir=%s\n",
+        args.debug || args.profile ? 1 : 0,
+        args.profile ? 1 : 0,
+        args.logDir.c_str());
     server->Wait();
     return 0;
 }

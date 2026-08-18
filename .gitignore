@@ -26,3 +26,4 @@ experiments/gemma4_e2b/
 experiments/gemma4_a4b26b/
 *.safetensors
 tokenizer.json
+logs/

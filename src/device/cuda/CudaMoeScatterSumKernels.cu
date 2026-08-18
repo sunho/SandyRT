@@ -253,13 +253,27 @@ Result<void> launch_cuda_moe_scatter_sum(const CudaLaunchContext& context) {
     int* errorFlag = nullptr;
     float* accum = nullptr;
     auto freeTemps = [&]() {
-        if (accum) cudaFree(accum);
-        if (errorFlag) cudaFree(errorFlag);
+        if (accum) {
+            (void)cuda_free_stream_ordered(
+                accum,
+                context.stream,
+                "cudaFreeAsync moe_scatter_sum accum");
+            accum = nullptr;
+        }
+        if (errorFlag) {
+            (void)cuda_free_stream_ordered(
+                errorFlag,
+                context.stream,
+                "cudaFreeAsync moe_scatter_sum error flag");
+            errorFlag = nullptr;
+        }
     };
 
-    auto allocError = cuda_check(
-        cudaMalloc(&errorFlag, sizeof(int)),
-        "cudaMalloc moe_scatter_sum error flag");
+    auto allocError = cuda_malloc_stream_ordered(
+        &errorFlag,
+        sizeof(int),
+        context.stream,
+        "cudaMallocAsync moe_scatter_sum error flag");
     if (!allocError)
         return make_error(allocError.error());
     auto clearError = cuda_check(
@@ -320,9 +334,11 @@ Result<void> launch_cuda_moe_scatter_sum(const CudaLaunchContext& context) {
     }
 
     if (program.outputNumel > 0) {
-        auto allocAccum = cuda_check(
-            cudaMalloc(&accum, static_cast<size_t>(program.outputNumel) * sizeof(float)),
-            "cudaMalloc moe_scatter_sum accum");
+        auto allocAccum = cuda_malloc_stream_ordered(
+            &accum,
+            static_cast<size_t>(program.outputNumel) * sizeof(float),
+            context.stream,
+            "cudaMallocAsync moe_scatter_sum accum");
         if (!allocAccum) {
             freeTemps();
             return make_error(allocAccum.error());

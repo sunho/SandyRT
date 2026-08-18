@@ -462,7 +462,8 @@ int choose_decoder_split_size(
 template <int HeadDim, int SplitSize>
 Result<void> launch_attention_decoder_variant(
         DeviceAttentionProgram program,
-        cudaStream_t stream) {
+        const CudaLaunchContext& context) {
+    cudaStream_t stream = context.stream;
     int numSplits = static_cast<int>(ceil_div_i64(program.tk, SplitSize));
     int64_t stateCount = program.batch * program.qHeads * numSplits;
     size_t partialElements =
@@ -470,11 +471,32 @@ Result<void> launch_attention_decoder_variant(
     size_t partialBytes = partialElements * sizeof(float);
 
     float* partial = nullptr;
-    auto allocated = cuda_check(
-        cudaMalloc(&partial, partialBytes),
-        "cudaMalloc attention decoder partials");
-    if (!allocated)
-        return make_error(allocated.error());
+    bool ownsPartial = false;
+    if (context.workspace) {
+        auto reserved = context.workspace->reserve(context.cudaDevice, stream, partialBytes);
+        if (!reserved)
+            return make_error(reserved.error());
+        partial = static_cast<float*>(reserved.take());
+    } else {
+        auto allocated = cuda_malloc_stream_ordered(
+            &partial,
+            partialBytes,
+            stream,
+            "cudaMallocAsync attention decoder partials");
+        if (!allocated)
+            return make_error(allocated.error());
+        ownsPartial = true;
+    }
+    auto releasePartial = [&]() -> Result<void> {
+        if (!ownsPartial)
+            return {};
+        auto freed = cuda_free_stream_ordered(
+            partial,
+            stream,
+            "cudaFreeAsync attention decoder partials");
+        partial = nullptr;
+        return freed;
+    };
 
     dim3 partialGrid(
         static_cast<unsigned>(numSplits),
@@ -490,8 +512,10 @@ Result<void> launch_attention_decoder_variant(
             numSplits);
     auto partialLaunch = cuda_check(cudaGetLastError(), "cuda attention decoder partial launch");
     if (!partialLaunch) {
-        cudaFree(partial);
-        return make_error(partialLaunch.error());
+        auto released = releasePartial();
+        return make_error(
+            released ? partialLaunch.error()
+                     : partialLaunch.error() + "; " + released.error());
     }
 
     dim3 reduceGrid(
@@ -505,27 +529,26 @@ Result<void> launch_attention_decoder_variant(
             numSplits);
     auto reduceLaunch = cuda_check(cudaGetLastError(), "cuda attention decoder reduce launch");
     if (!reduceLaunch) {
-        cudaFree(partial);
-        return make_error(reduceLaunch.error());
+        auto released = releasePartial();
+        return make_error(
+            released ? reduceLaunch.error()
+                     : reduceLaunch.error() + "; " + released.error());
     }
 
-    auto freed = cuda_check(cudaFree(partial), "cudaFree attention decoder partials");
-    if (!freed)
-        return make_error(freed.error());
-    return {};
+    return releasePartial();
 }
 
 template <int HeadDim>
 Result<void> launch_attention_decoder_best_split(
         DeviceAttentionProgram program,
-        cudaStream_t stream,
+        const CudaLaunchContext& context,
         const cudaDeviceProp& props) {
     int splitSize = choose_decoder_split_size(program, props);
     if (splitSize == 512)
-        return launch_attention_decoder_variant<HeadDim, 512>(program, stream);
+        return launch_attention_decoder_variant<HeadDim, 512>(program, context);
     if (splitSize == 256)
-        return launch_attention_decoder_variant<HeadDim, 256>(program, stream);
-    return launch_attention_decoder_variant<HeadDim, 128>(program, stream);
+        return launch_attention_decoder_variant<HeadDim, 256>(program, context);
+    return launch_attention_decoder_variant<HeadDim, 128>(program, context);
 }
 
 Result<DeviceAttentionProgram> pack_attention_program(
@@ -666,12 +689,9 @@ Result<void> launch_cuda_attention(
         return make_error("cuda attention grid dimension exceeds CUDA limit");
     }
 
-    cudaDeviceProp props{};
-    auto propsResult = cuda_check(
-        cudaGetDeviceProperties(&props, context.cudaDevice),
-        "cudaGetDeviceProperties");
-    if (!propsResult)
-        return make_error(propsResult.error());
+    if (!context.deviceProps)
+        return make_error("cuda attention launch requires cached device properties");
+    const cudaDeviceProp& props = *context.deviceProps;
 
     if (launchProgram.tq == 1) {
         int splitSize = choose_decoder_split_size(launchProgram, props);
@@ -684,22 +704,22 @@ Result<void> launch_cuda_attention(
             case 64:
                 return launch_attention_decoder_best_split<64>(
                     launchProgram,
-                    context.stream,
+                    context,
                     props);
             case 128:
                 return launch_attention_decoder_best_split<128>(
                     launchProgram,
-                    context.stream,
+                    context,
                     props);
             case 256:
                 return launch_attention_decoder_best_split<256>(
                     launchProgram,
-                    context.stream,
+                    context,
                     props);
             case 512:
                 return launch_attention_decoder_best_split<512>(
                     launchProgram,
-                    context.stream,
+                    context,
                     props);
             default:
                 return make_error("cuda attention unsupported head dimension");

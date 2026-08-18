@@ -4,6 +4,7 @@
 #include "MidIRToKernelIR.h"
 #include "ShapeUtil.h"
 
+#include <algorithm>
 #include <chrono>
 #include <memory>
 #include <span>
@@ -52,6 +53,32 @@ void profile_stage(
         op,
         opKind,
         std::chrono::duration<double, std::milli>(end - start).count(),
+    });
+}
+
+void profile_device_run_boundary(
+        const EngineRunOptions* options,
+        EngineDeviceRunBoundaryEvent::Boundary boundary,
+        size_t opIndex,
+        ir::kernel_ir::OpId op,
+        DeviceId device,
+        DeviceCompiledGraphId deviceGraph,
+        OpKind opKind,
+        size_t inputCount,
+        size_t outputCount,
+        double elapsedMs = 0.0) {
+    if (!options || !options->profileDeviceRunBoundary)
+        return;
+    options->profileDeviceRunBoundary({
+        boundary,
+        opIndex,
+        op,
+        device,
+        deviceGraph,
+        opKind,
+        inputCount,
+        outputCount,
+        elapsedMs,
     });
 }
 
@@ -200,6 +227,143 @@ Result<core::TensorDesc> resolve_matmul_desc(
     return desc_with_shape(graph, output, core::Shape(std::move(outDims)));
 }
 
+Result<core::TensorDesc> resolve_reduction_desc(
+        const Graph& graph,
+        const ir::kernel_ir::ReductionKernelOp& op,
+        ValueId output,
+        const std::unordered_map<ValueId, TensorViewDesc>& views) {
+    auto input = lookup_runtime_desc(views, op.inputs()[0]);
+    if (!input)
+        return make_error(input.error());
+
+    int rank = input->shape.rank();
+    std::vector<int> axes;
+    axes.reserve(op.axes().size());
+    for (auto axis : op.axes()) {
+        if (axis < -rank || axis >= rank)
+            return make_error("reduction axis out of range");
+        axis = axis < 0 ? axis + rank : axis;
+        for (auto existing : axes) {
+            if (existing == axis)
+                return make_error("reduction axes must be unique");
+        }
+        axes.push_back(static_cast<int>(axis));
+    }
+
+    auto dims = input->shape.dims();
+    if (op.keepDims()) {
+        for (auto axis : axes)
+            dims[static_cast<size_t>(axis)] = 1;
+    } else {
+        std::sort(axes.begin(), axes.end(), [](int lhs, int rhs) {
+            return lhs > rhs;
+        });
+        for (auto axis : axes)
+            dims.erase(dims.begin() + axis);
+    }
+    return desc_with_shape(graph, output, core::Shape(std::move(dims)));
+}
+
+Result<core::TensorDesc> resolve_topk_desc(
+        const Graph& graph,
+        const ir::kernel_ir::TopKKernelOp& op,
+        ValueId output,
+        const std::unordered_map<ValueId, TensorViewDesc>& views) {
+    auto input = lookup_runtime_desc(views, op.inputs()[0]);
+    if (!input)
+        return make_error(input.error());
+
+    int rank = input->shape.rank();
+    int64_t axis = op.axis();
+    if (axis < -rank || axis >= rank)
+        return make_error("topk axis out of range");
+    axis = axis < 0 ? axis + rank : axis;
+
+    auto dims = input->shape.dims();
+    dims[static_cast<size_t>(axis)] = op.k();
+    return desc_with_shape(graph, output, core::Shape(std::move(dims)));
+}
+
+Result<core::TensorDesc> resolve_moe_gather_desc(
+        const Graph& graph,
+        const ir::kernel_ir::MoeGatherKernelOp& op,
+        ValueId output,
+        const std::unordered_map<ValueId, TensorViewDesc>& views) {
+    auto x = lookup_runtime_desc(views, op.inputs()[0]);
+    if (!x)
+        return make_error(x.error());
+
+    int rank = x->shape.rank();
+    if (rank != 2 && rank != 3)
+        return make_error("moe_gather input rank must be 2 or 3");
+
+    int64_t seq = x->shape.dim(rank == 3 ? 1 : 0);
+    int64_t hidden = x->shape.dim(rank - 1);
+    if (seq < 0 || hidden < 0)
+        return make_error("moe_gather runtime dimensions must be static");
+    int64_t rows = seq * op.topK();
+
+    auto outputs = op.outputs();
+    if (output == outputs[0]) {
+        if (rank == 3) {
+            return desc_with_shape(
+                graph,
+                output,
+                core::Shape({x->shape.dim(0), rows, hidden}));
+        }
+        return desc_with_shape(graph, output, core::Shape({rows, hidden}));
+    }
+    if (output == outputs[1] || output == outputs[2]) {
+        if (rank == 3) {
+            return desc_with_shape(
+                graph,
+                output,
+                core::Shape({x->shape.dim(0), rows}));
+        }
+        return desc_with_shape(graph, output, core::Shape({rows}));
+    }
+    if (output == outputs[3]) {
+        if (rank == 3) {
+            return desc_with_shape(
+                graph,
+                output,
+                core::Shape({x->shape.dim(0), op.numExperts() + 1}));
+        }
+        return desc_with_shape(graph, output, core::Shape({op.numExperts() + 1}));
+    }
+
+    return make_error("moe_gather unknown output");
+}
+
+Result<core::TensorDesc> resolve_moe_matmul_desc(
+        const Graph& graph,
+        const ir::kernel_ir::MoeMatMulKernelOp& op,
+        ValueId output,
+        const std::unordered_map<ValueId, TensorViewDesc>& views) {
+    auto x = lookup_runtime_desc(views, op.inputs()[0]);
+    if (!x)
+        return make_error(x.error());
+    auto weight = lookup_runtime_desc(views, op.inputs()[2]);
+    if (!weight)
+        return make_error(weight.error());
+
+    int rank = x->shape.rank();
+    if (rank != 2 && rank != 3)
+        return make_error("moe_matmul input rank must be 2 or 3");
+    if (weight->shape.rank() != 3)
+        return make_error("moe_matmul weight rank must be 3");
+
+    int64_t rows = x->shape.dim(rank - 2);
+    int64_t outFeatures = weight->shape.dim(op.transposeRhs() ? 1 : 2);
+    if (rank == 3) {
+        return desc_with_shape(
+            graph,
+            output,
+            core::Shape({x->shape.dim(0), rows, outFeatures}));
+    }
+    return desc_with_shape(graph, output, core::Shape({rows, outFeatures}));
+}
+
 Result<core::TensorDesc> resolve_output_desc(
         const Graph& graph,
         const Op& op,
@@ -340,12 +504,36 @@ Result<core::TensorDesc> resolve_output_desc(
             return desc_with_shape(graph, output, core::Shape(std::move(dims)));
         }
         case OpKind::TopKKernel:
+            return resolve_topk_desc(
+                graph,
+                static_cast<const ir::kernel_ir::TopKKernelOp&>(op),
+                output,
+                views);
         case OpKind::MoeGatherKernel:
+            return resolve_moe_gather_desc(
+                graph,
+                static_cast<const ir::kernel_ir::MoeGatherKernelOp&>(op),
+                output,
+                views);
         case OpKind::MoeMatMulKernel:
+            return resolve_moe_matmul_desc(
+                graph,
+                static_cast<const ir::kernel_ir::MoeMatMulKernelOp&>(op),
+                output,
+                views);
         case OpKind::MoeScatterSumKernel:
-            return desc_from_static_type(graph.value(output).type);
+        {
+            auto reference = lookup_runtime_desc(views, op.inputs()[3]);
+            if (!reference)
+                return make_error(reference.error());
+            return desc_with_shape(graph, output, reference->shape);
+        }
         case OpKind::ReductionKernel:
-            return desc_from_static_type(graph.value(output).type);
+            return resolve_reduction_desc(
+                graph,
+                static_cast<const ir::kernel_ir::ReductionKernelOp&>(op),
+                output,
+                views);
     }
     return make_error("unknown KernelIR op kind");
 }
@@ -937,9 +1125,31 @@ Result<void> run_kernel_op(
     if (!outputViews)
         return make_error(outputViews.error());
 
+    profile_device_run_boundary(
+        options,
+        EngineDeviceRunBoundaryEvent::Boundary::Begin,
+        opIndex,
+        op.id(),
+        opDevice,
+        deviceGraph,
+        op.kind(),
+        inputViews->size(),
+        outputViews->size());
     auto start = Clock::now();
     auto runResult = device.run(deviceGraph, op.id(), *inputViews, *outputViews);
     auto end = Clock::now();
+    auto elapsed = std::chrono::duration<double, std::milli>(end - start).count();
+    profile_device_run_boundary(
+        options,
+        EngineDeviceRunBoundaryEvent::Boundary::End,
+        opIndex,
+        op.id(),
+        opDevice,
+        deviceGraph,
+        op.kind(),
+        inputViews->size(),
+        outputViews->size(),
+        elapsed);
     profile_stage(
         options,
         "kernel.device_run",
@@ -949,7 +1159,6 @@ Result<void> run_kernel_op(
         op.id(),
         op.kind());
     if (options && options->profileKernel) {
-        auto elapsed = std::chrono::duration<double, std::milli>(end - start).count();
         options->profileKernel({
             opIndex,
             op.id(),

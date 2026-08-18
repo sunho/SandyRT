@@ -55,25 +55,95 @@ Result<size_t> tensor_byte_size(const core::TensorDesc& desc) {
 
 } // namespace
 
+Result<void*> CudaWorkspace::reserve(
+        int cudaDevice,
+        cudaStream_t stream,
+        size_t requiredBytes) {
+    if (requiredBytes == 0)
+        return nullptr;
+    if (data && bytes >= requiredBytes)
+        return data;
+
+    auto set = cuda_check(cudaSetDevice(cudaDevice), "cudaSetDevice");
+    if (!set)
+        return make_error(set.error());
+
+    if (data) {
+        auto freed = cuda_free_stream_ordered(data, stream, "cudaFreeAsync workspace");
+        if (!freed)
+            return make_error(freed.error());
+        data = nullptr;
+        bytes = 0;
+    }
+
+    void* newData = nullptr;
+    auto allocated = cuda_malloc_stream_ordered(
+        &newData,
+        requiredBytes,
+        stream,
+        "cudaMallocAsync workspace");
+    if (!allocated)
+        return make_error(allocated.error());
+
+    data = newData;
+    bytes = requiredBytes;
+    return data;
+}
+
+Result<void> CudaWorkspace::release(int cudaDevice, cudaStream_t stream) {
+    if (!data)
+        return {};
+
+    auto set = cuda_check(cudaSetDevice(cudaDevice), "cudaSetDevice");
+    if (!set)
+        return make_error(set.error());
+    auto freed = cuda_free_stream_ordered(data, stream, "cudaFreeAsync workspace");
+    if (!freed)
+        return make_error(freed.error());
+    data = nullptr;
+    bytes = 0;
+    return {};
+}
+
 CudaDevice::CudaDevice(int cudaDevice)
     : cudaDevice_(cudaDevice) {}
 
 CudaDevice::~CudaDevice() {
+    cudaSetDevice(cudaDevice_);
+    if (stream_)
+        cudaStreamSynchronize(stream_);
+
     pagedTensors_.clear();
     pagedPools_.clear();
+
+    if (stream_) {
+        (void)workspace_.release(cudaDevice_, stream_);
+        for (auto& item : buffers_) {
+            if (item.second.data) {
+                (void)cuda_free_stream_ordered(
+                    item.second.data,
+                    stream_,
+                    "cudaFreeAsync device buffer");
+                item.second.data = nullptr;
+            }
+        }
+        cudaStreamSynchronize(stream_);
+    } else {
+        (void)workspace_.release(cudaDevice_, nullptr);
+        for (auto& item : buffers_) {
+            if (item.second.data) {
+                cudaFree(item.second.data);
+                item.second.data = nullptr;
+            }
+        }
+    }
+    buffers_.clear();
+
     if (cublasHandle_) {
-        cudaSetDevice(cudaDevice_);
         cublasDestroy(cublasHandle_);
     }
     if (stream_) {
-        cudaSetDevice(cudaDevice_);
         cudaStreamDestroy(stream_);
-    }
-    for (auto& item : buffers_) {
-        if (item.second.data) {
-            cudaSetDevice(cudaDevice_);
-            cudaFree(item.second.data);
-        }
     }
 }
 
@@ -85,9 +155,25 @@ Result<void> CudaDevice::ensure_stream() {
     auto set = set_device();
     if (!set)
         return make_error(set.error());
+    auto pool = ensure_async_memory_pool();
+    if (!pool)
+        return make_error(pool.error());
     if (stream_)
         return {};
     return cuda_check(cudaStreamCreate(&stream_), "cudaStreamCreate");
+}
+
+Result<void> CudaDevice::ensure_async_memory_pool() {
+    if (asyncMemoryPoolConfigured_)
+        return {};
+    auto set = set_device();
+    if (!set)
+        return make_error(set.error());
+    auto configured = cuda_configure_default_memory_pool(cudaDevice_);
+    if (!configured)
+        return make_error(configured.error());
+    asyncMemoryPoolConfigured_ = true;
+    return {};
 }
 
 Result<void> CudaDevice::ensure_cublas_handle() {
@@ -107,6 +193,25 @@ Result<void> CudaDevice::ensure_cublas_handle() {
         return make_error(setStream.error());
     }
     return {};
+}
+
+Result<const cudaDeviceProp*> CudaDevice::ensure_device_properties() {
+    if (deviceProps_)
+        return &*deviceProps_;
+
+    auto set = set_device();
+    if (!set)
+        return make_error(set.error());
+
+    cudaDeviceProp props{};
+    auto queried = cuda_check(
+        cudaGetDeviceProperties(&props, cudaDevice_),
+        "cudaGetDeviceProperties");
+    if (!queried)
+        return make_error(queried.error());
+
+    deviceProps_ = props;
+    return &*deviceProps_;
 }
 
 Result<DeviceCompiledGraphId> CudaDevice::compile(const ir::kernel_ir::Graph& graph) {
@@ -261,7 +366,11 @@ Result<DeviceBufferId> CudaDevice::alloc(core::TensorDesc desc) {
 
     void* data = nullptr;
     if (*bytes != 0) {
-        auto allocated = cuda_check(cudaMalloc(&data, *bytes), "cudaMalloc");
+        auto allocated = cuda_malloc_stream_ordered(
+            &data,
+            *bytes,
+            stream_,
+            "cudaMallocAsync");
         if (!allocated)
             return make_error(allocated.error());
     }
@@ -280,11 +389,14 @@ Result<void> CudaDevice::dealloc(DeviceBufferId buffer) {
     auto it = buffers_.find(buffer);
     if (it == buffers_.end())
         return make_error("cuda device buffer not found");
-    auto set = set_device();
-    if (!set)
-        return make_error(set.error());
+    auto stream = ensure_stream();
+    if (!stream)
+        return make_error(stream.error());
     if (it->second.data) {
-        auto freed = cuda_check(cudaFree(it->second.data), "cudaFree");
+        auto freed = cuda_free_stream_ordered(
+            it->second.data,
+            stream_,
+            "cudaFreeAsync");
         if (!freed)
             return make_error(freed.error());
     }
@@ -308,7 +420,11 @@ Result<DeviceBufferId> CudaDevice::load(core::TensorBuffer& src) {
 
     void* data = nullptr;
     if (*bytes != 0) {
-        auto allocated = cuda_check(cudaMalloc(&data, *bytes), "cudaMalloc");
+        auto allocated = cuda_malloc_stream_ordered(
+            &data,
+            *bytes,
+            stream_,
+            "cudaMallocAsync");
         if (!allocated)
             return make_error(allocated.error());
         auto copied = cuda_check(
@@ -320,12 +436,12 @@ Result<DeviceBufferId> CudaDevice::load(core::TensorBuffer& src) {
                 stream_),
             "cudaMemcpyAsync host to device");
         if (!copied) {
-            cudaFree(data);
+            (void)cuda_free_stream_ordered(data, stream_, "cudaFreeAsync");
             return make_error(copied.error());
         }
         auto synced = cuda_check(cudaStreamSynchronize(stream_), "cudaStreamSynchronize");
         if (!synced) {
-            cudaFree(data);
+            (void)cuda_free_stream_ordered(data, stream_, "cudaFreeAsync");
             return make_error(synced.error());
         }
     }
@@ -378,6 +494,14 @@ Result<void> CudaDevice::run(
         return make_error("cuda device input arity mismatch");
     if (outputs.size() != kernel.outputCount)
         return make_error("cuda device output arity mismatch");
+
+    const cudaDeviceProp* deviceProps = nullptr;
+    if (kernel.kind == ir::kernel_ir::OpKind::AttentionKernel) {
+        auto props = ensure_device_properties();
+        if (!props)
+            return make_error(props.error());
+        deviceProps = *props;
+    }
 
     std::vector<CudaDeviceBufferView> inputViews;
     inputViews.reserve(inputs.size());
@@ -441,6 +565,8 @@ Result<void> CudaDevice::run(
         opId,
         inputViews,
         outputViews,
+        deviceProps,
+        &workspace_,
     };
 
     switch (kernel.kind) {

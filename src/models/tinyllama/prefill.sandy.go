@@ -1,6 +1,6 @@
 import "common.sandy.go"
 
-func main(input_id Tensor[[1, 1], i64], position_id Tensor[[1], i64], k_cache [22]PagedTensor[[1, 4, -1, 64], bf16, page_size=32], v_cache [22]PagedTensor[[1, 4, -1, 64], bf16, page_size=32]) Tensor {
+func main(input_id Tensor[[1, -1], i64], position_id Tensor[[1], i64], k_cache [22]PagedTensor[[1, 4, -1, 64], bf16, page_size=32], v_cache [22]PagedTensor[[1, 4, -1, 64], bf16, page_size=32]) Tensor {
     weight_scope "model" {
         x := __embedding(input_id, @embed_tokens.weight)
 

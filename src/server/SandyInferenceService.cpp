@@ -36,36 +36,91 @@ grpc::Status SandyInferenceService::Generate(
         grpc::ServerContext*,
         const GenerateRequest* request,
         GenerateResponse* response) {
+    auto logger = model_
+        ? RequestLogger::create(model_->config().logging, request->request_id())
+        : nullptr;
+    ServerStageScope totalTimer(
+        logger.get(),
+        "request",
+        "server.grpc.generate.total");
+    if (logger) {
+        logger->logf(
+            "server.grpc.generate.start request_id=%s input_ids=%d max_tokens=%d "
+            "stop_token_ids=%d",
+            request->request_id().c_str(),
+            request->input_ids_size(),
+            request->max_tokens(),
+            request->stop_token_ids_size());
+    }
+
     response->set_request_id(request->request_id());
     response->set_prompt_tokens(request->input_ids_size());
 
     if (!model_) {
         response->set_error("model not loaded");
+        if (logger)
+            logger->log("server.grpc.generate.error message=model_not_loaded");
         return grpc::Status::OK;
     }
 
     std::vector<int64_t> inputIds;
-    inputIds.reserve(static_cast<size_t>(request->input_ids_size()));
-    for (auto token : request->input_ids())
-        inputIds.push_back(token);
+    {
+        ServerStageScope parseTimer(
+            logger.get(),
+            "request",
+            "server.grpc.parse_input_ids");
+        inputIds.reserve(static_cast<size_t>(request->input_ids_size()));
+        for (auto token : request->input_ids())
+            inputIds.push_back(token);
+    }
 
     std::vector<int64_t> stopTokenIds;
-    stopTokenIds.reserve(static_cast<size_t>(request->stop_token_ids_size()));
-    for (auto token : request->stop_token_ids())
-        stopTokenIds.push_back(token);
+    {
+        ServerStageScope parseTimer(
+            logger.get(),
+            "request",
+            "server.grpc.parse_stop_token_ids");
+        stopTokenIds.reserve(static_cast<size_t>(request->stop_token_ids_size()));
+        for (auto token : request->stop_token_ids())
+            stopTokenIds.push_back(token);
+    }
 
-    auto generated = model_->generate(inputIds, request->max_tokens(), stopTokenIds);
+    auto generated = model_->generate(
+        request->request_id(),
+        inputIds,
+        request->max_tokens(),
+        stopTokenIds,
+        logger.get());
     if (!generated) {
         response->set_error(generated.error());
+        if (logger) {
+            logger->logf(
+                "server.grpc.generate.error message=%s",
+                generated.error().c_str());
+        }
         return grpc::Status::OK;
     }
 
     auto result = generated.take();
-    for (auto token : result.outputIds)
-        response->add_output_ids(token);
-    response->set_finish_reason(result.finishReason);
-    response->set_prompt_tokens(result.promptTokens);
-    response->set_completion_tokens(result.completionTokens);
+    {
+        ServerStageScope responseTimer(
+            logger.get(),
+            "request",
+            "server.grpc.write_response");
+        for (auto token : result.outputIds)
+            response->add_output_ids(token);
+        response->set_finish_reason(result.finishReason);
+        response->set_prompt_tokens(result.promptTokens);
+        response->set_completion_tokens(result.completionTokens);
+    }
+    if (logger) {
+        logger->logf(
+            "server.grpc.generate.done finish_reason=%s prompt_tokens=%d "
+            "completion_tokens=%d",
+            result.finishReason.c_str(),
+            result.promptTokens,
+            result.completionTokens);
+    }
     return grpc::Status::OK;
 }
 

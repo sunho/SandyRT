@@ -202,7 +202,7 @@ func gemma_global_layer(x Tensor, per_layer_input Tensor, i int, k Tensor, v Ten
     return x
 }
 
-func gemma_local_eval_kv_attention(x Tensor, position_id Tensor, k_cache Tensor, v_cache Tensor) (Tensor, Tensor, Tensor) {
+func gemma_local_eval_kv_attention(x Tensor, position_id Tensor, k_cache Tensor, v_cache Tensor) Tensor {
     weight_scope "self_attn" {
         q := __matmul(x, __transpose(@q_proj.weight))
         k := __matmul(x, __transpose(@k_proj.weight))
@@ -223,6 +223,9 @@ func gemma_local_eval_kv_attention(x Tensor, position_id Tensor, k_cache Tensor,
         q = __rope(q, position_id, rope_theta=10000.0, split_half=1)
         k = __rope(k, position_id, rope_theta=10000.0, split_half=1)
 
+        __paged_append(k_cache, k)
+        __paged_append(v_cache, v)
+
         ctx := __attention(q, k_cache, v_cache, position_id, window=512, scale=1.0)
 
         ctx = __permute(ctx, dims=[0, 2, 1, 3])
@@ -230,10 +233,10 @@ func gemma_local_eval_kv_attention(x Tensor, position_id Tensor, k_cache Tensor,
 
         out := __matmul(ctx, __transpose(@o_proj.weight))
     }
-    return out, k, v
+    return out
 }
 
-func gemma_global_eval_kv_attention(x Tensor, position_id Tensor, k_cache Tensor, v_cache Tensor) (Tensor, Tensor, Tensor) {
+func gemma_global_eval_kv_attention(x Tensor, position_id Tensor, k_cache Tensor, v_cache Tensor) Tensor {
     weight_scope "self_attn" {
         q := __matmul(x, __transpose(@q_proj.weight))
         k := __matmul(x, __transpose(@k_proj.weight))
@@ -254,6 +257,9 @@ func gemma_global_eval_kv_attention(x Tensor, position_id Tensor, k_cache Tensor
         q = __rope(q, position_id, rope_theta=1000000.0, rotary_dim=128, split_half=1)
         k = __rope(k, position_id, rope_theta=1000000.0, rotary_dim=128, split_half=1)
 
+        __paged_append(k_cache, k)
+        __paged_append(v_cache, v)
+
         ctx := __attention(q, k_cache, v_cache, position_id, window=0, scale=1.0)
 
         ctx = __permute(ctx, dims=[0, 2, 1, 3])
@@ -261,7 +267,7 @@ func gemma_global_eval_kv_attention(x Tensor, position_id Tensor, k_cache Tensor
 
         out := __matmul(ctx, __transpose(@o_proj.weight))
     }
-    return out, k, v
+    return out
 }
 
 func gemma_local_eval_attention(x Tensor, position_id Tensor, k Tensor, v Tensor) Tensor {
@@ -300,10 +306,10 @@ func gemma_global_eval_attention(x Tensor, position_id Tensor, k Tensor, v Tenso
     return out
 }
 
-func gemma_local_eval_kv_layer(x Tensor, per_layer_input Tensor, position_id Tensor, i int, k_cache Tensor, v_cache Tensor) (Tensor, Tensor, Tensor) {
+func gemma_local_eval_kv_layer(x Tensor, per_layer_input Tensor, position_id Tensor, i int, k_cache Tensor, v_cache Tensor) Tensor {
     weight_scope "layers.{i}" {
         h := __rms_norm(x, @input_layernorm.weight)
-        h, k, v := gemma_local_eval_kv_attention(h, position_id, k_cache, v_cache)
+        h = gemma_local_eval_kv_attention(h, position_id, k_cache, v_cache)
         h = __rms_norm(h, @post_attention_layernorm.weight)
         x = __add(x, h)
 
@@ -315,13 +321,13 @@ func gemma_local_eval_kv_layer(x Tensor, per_layer_input Tensor, position_id Ten
         x = gemma_apply_per_layer_input(x, per_layer_input)
         x = __mul(x, @skip_scale)
     }
-    return x, k, v
+    return x
 }
 
-func gemma_global_eval_kv_layer(x Tensor, per_layer_input Tensor, position_id Tensor, i int, k_cache Tensor, v_cache Tensor) (Tensor, Tensor, Tensor) {
+func gemma_global_eval_kv_layer(x Tensor, per_layer_input Tensor, position_id Tensor, i int, k_cache Tensor, v_cache Tensor) Tensor {
     weight_scope "layers.{i}" {
         h := __rms_norm(x, @input_layernorm.weight)
-        h, k, v := gemma_global_eval_kv_attention(h, position_id, k_cache, v_cache)
+        h = gemma_global_eval_kv_attention(h, position_id, k_cache, v_cache)
         h = __rms_norm(h, @post_attention_layernorm.weight)
         x = __add(x, h)
 
@@ -333,7 +339,7 @@ func gemma_global_eval_kv_layer(x Tensor, per_layer_input Tensor, position_id Te
         x = gemma_apply_per_layer_input(x, per_layer_input)
         x = __mul(x, @skip_scale)
     }
-    return x, k, v
+    return x
 }
 
 func gemma_local_eval_layer(x Tensor, per_layer_input Tensor, position_id Tensor, i int, k Tensor, v Tensor) Tensor {

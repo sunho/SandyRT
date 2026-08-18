@@ -120,15 +120,18 @@ CudaPagedTensorPool& CudaPagedTensorPool::operator=(CudaPagedTensorPool&& other)
 
 Result<CudaPagedTensorPool> CudaPagedTensorPool::create(
         int cudaDevice,
-        DevicePagedPoolDesc desc) {
+        DevicePagedPoolDesc desc,
+        cudaStream_t stream) {
     CudaPagedTensorPool pool(cudaDevice);
-    auto initialized = pool.initialize(std::move(desc));
+    auto initialized = pool.initialize(std::move(desc), stream);
     if (!initialized)
         return make_error(initialized.error());
     return std::move(pool);
 }
 
-Result<void> CudaPagedTensorPool::initialize(DevicePagedPoolDesc desc) {
+Result<void> CudaPagedTensorPool::initialize(
+        DevicePagedPoolDesc desc,
+        cudaStream_t stream) {
     auto valid = validate_paged_pool_desc(desc);
     if (!valid)
         return make_error(valid.error());
@@ -161,7 +164,7 @@ Result<void> CudaPagedTensorPool::initialize(DevicePagedPoolDesc desc) {
     pageBytes_ = static_cast<size_t>(pageElementCount) * elementSize;
 
     for (int64_t i = 0; i < desc_.initialPages; i++) {
-        auto page = allocate_page();
+        auto page = allocate_page(stream);
         if (!page)
             return make_error(page.error());
         auto freed = free_page(*page);
@@ -171,7 +174,7 @@ Result<void> CudaPagedTensorPool::initialize(DevicePagedPoolDesc desc) {
     return {};
 }
 
-Result<uint32_t> CudaPagedTensorPool::allocate_page() {
+Result<uint32_t> CudaPagedTensorPool::allocate_page(cudaStream_t stream) {
     auto set = cuda_check(cudaSetDevice(cudaDevice_), "cudaSetDevice");
     if (!set)
         return make_error(set.error());
@@ -188,7 +191,11 @@ Result<uint32_t> CudaPagedTensorPool::allocate_page() {
         return make_error("cuda device paged pool page index overflow");
 
     void* data = nullptr;
-    auto allocated = cuda_check(cudaMalloc(&data, pageBytes_), "cudaMalloc paged pool page");
+    auto allocated = cuda_malloc_stream_ordered(
+        &data,
+        pageBytes_,
+        stream,
+        "cudaMallocAsync paged pool page");
     if (!allocated)
         return make_error(allocated.error());
     pages_.push_back(Page{data});
@@ -278,12 +285,28 @@ Result<void> CudaPagedTensor::sync_page_table(
         void** table = nullptr;
         auto bytes = static_cast<size_t>(pageCount) * sizeof(void*);
         if (bytes > 0) {
-            auto allocated = cuda_check(cudaMalloc(&table, bytes), "cudaMalloc paged tensor table");
+            auto allocated = cuda_malloc_stream_ordered(
+                &table,
+                bytes,
+                stream,
+                "cudaMallocAsync paged tensor table");
             if (!allocated)
                 return make_error(allocated.error());
         }
-        if (pageTable_)
-            cudaFree(pageTable_);
+        if (pageTable_) {
+            auto freed = cuda_free_stream_ordered(
+                pageTable_,
+                stream,
+                "cudaFreeAsync paged tensor table");
+            if (!freed) {
+                if (table)
+                    (void)cuda_free_stream_ordered(
+                        table,
+                        stream,
+                        "cudaFreeAsync paged tensor table");
+                return make_error(freed.error());
+            }
+        }
         pageTable_ = table;
         pageTableCapacity_ = pageCount;
     }
@@ -326,7 +349,7 @@ Result<DevicePagedPoolId> CudaDevice::createPagedPool(DevicePagedPoolDesc desc) 
     if (!stream)
         return make_error(stream.error());
 
-    auto pool = CudaPagedTensorPool::create(cudaDevice_, std::move(desc));
+    auto pool = CudaPagedTensorPool::create(cudaDevice_, std::move(desc), stream_);
     if (!pool)
         return make_error(pool.error());
 
@@ -336,6 +359,10 @@ Result<DevicePagedPoolId> CudaDevice::createPagedPool(DevicePagedPoolDesc desc) 
 }
 
 Result<void> CudaDevice::destroyPagedPool(DevicePagedPoolId poolId) {
+    auto stream = ensure_stream();
+    if (!stream)
+        return make_error(stream.error());
+
     auto poolIt = pagedPools_.find(poolId);
     if (poolIt == pagedPools_.end())
         return make_error("cuda device paged pool not found");
@@ -343,6 +370,11 @@ Result<void> CudaDevice::destroyPagedPool(DevicePagedPoolId poolId) {
         if (item.second.pool() == poolId)
             return make_error("cuda device paged pool still has live tensors");
     }
+    auto synced = cuda_check(
+        cudaStreamSynchronize(stream_),
+        "cudaStreamSynchronize destroy paged pool");
+    if (!synced)
+        return make_error(synced.error());
     pagedPools_.erase(poolIt);
     return {};
 }
@@ -376,12 +408,22 @@ Result<DevicePagedTensorId> CudaDevice::allocPaged(
 }
 
 Result<void> CudaDevice::deallocPaged(DevicePagedTensorId tensorId) {
+    auto stream = ensure_stream();
+    if (!stream)
+        return make_error(stream.error());
+
     auto tensorIt = pagedTensors_.find(tensorId);
     if (tensorIt == pagedTensors_.end())
         return make_error("cuda device paged tensor not found");
     auto poolIt = pagedPools_.find(tensorIt->second.pool());
     if (poolIt == pagedPools_.end())
         return make_error("cuda device paged pool not found");
+
+    auto synced = cuda_check(
+        cudaStreamSynchronize(stream_),
+        "cudaStreamSynchronize dealloc paged tensor");
+    if (!synced)
+        return make_error(synced.error());
 
     for (auto page : tensorIt->second.page_indices()) {
         auto freed = poolIt->second.free_page(page);
@@ -407,7 +449,7 @@ Result<void> CudaDevice::reservePaged(DevicePagedTensorId tensorId, int64_t page
 
     auto& pages = tensorIt->second.page_indices();
     while (static_cast<int64_t>(pages.size()) < pageCount) {
-        auto page = poolIt->second.allocate_page();
+        auto page = poolIt->second.allocate_page(stream_);
         if (!page)
             return make_error(page.error());
         pages.push_back(*page);

@@ -213,6 +213,98 @@ func gemma_global_layer(x Tensor, i int, k Tensor, v Tensor) Tensor {
     return x
 }
 
+func gemma_local_eval_kv_attention(x Tensor, position_id Tensor, k_cache Tensor, v_cache Tensor) Tensor {
+    weight_scope "self_attn" {
+        q := __matmul(x, __transpose(@q_proj.weight))
+        k := __matmul(x, __transpose(@k_proj.weight))
+        v := __matmul(x, __transpose(@v_proj.weight))
+
+        q = __reshape(q, shape=[-1, -1, 16, 256])
+        k = __reshape(k, shape=[-1, -1, 8, 256])
+        v = __reshape(v, shape=[-1, -1, 8, 256])
+
+        q = __permute(q, dims=[0, 2, 1, 3])
+        k = __permute(k, dims=[0, 2, 1, 3])
+        v = __permute(v, dims=[0, 2, 1, 3])
+
+        q = __rms_norm(q, @q_norm.weight)
+        k = __rms_norm(k, @k_norm.weight)
+        v = __rms_norm(v)
+
+        q = __rope(q, position_id, rope_theta=10000.0, split_half=1)
+        k = __rope(k, position_id, rope_theta=10000.0, split_half=1)
+
+        __paged_append(k_cache, k)
+        __paged_append(v_cache, v)
+
+        ctx := __attention(q, k_cache, v_cache, position_id, window=1024, scale=1.0)
+
+        ctx = __permute(ctx, dims=[0, 2, 1, 3])
+        ctx = __reshape(ctx, shape=[-1, -1, 4096])
+
+        out := __matmul(ctx, __transpose(@o_proj.weight))
+    }
+    return out
+}
+
+func gemma_global_eval_kv_attention(x Tensor, position_id Tensor, k_cache Tensor, v_cache Tensor) Tensor {
+    weight_scope "self_attn" {
+        q := __matmul(x, __transpose(@q_proj.weight))
+        k := __matmul(x, __transpose(@k_proj.weight))
+        v := __matmul(x, __transpose(@v_proj.weight))
+
+        q = __reshape(q, shape=[-1, -1, 16, 512])
+        k = __reshape(k, shape=[-1, -1, 2, 512])
+        v = __reshape(v, shape=[-1, -1, 2, 512])
+
+        q = __permute(q, dims=[0, 2, 1, 3])
+        k = __permute(k, dims=[0, 2, 1, 3])
+        v = __permute(v, dims=[0, 2, 1, 3])
+
+        q = __rms_norm(q, @q_norm.weight)
+        k = __rms_norm(k, @k_norm.weight)
+        v = __rms_norm(v)
+
+        q = __rope(q, position_id, rope_theta=1000000.0, rotary_dim=128, split_half=1)
+        k = __rope(k, position_id, rope_theta=1000000.0, rotary_dim=128, split_half=1)
+
+        __paged_append(k_cache, k)
+        __paged_append(v_cache, v)
+
+        ctx := __attention(q, k_cache, v_cache, position_id, window=0, scale=1.0)
+
+        ctx = __permute(ctx, dims=[0, 2, 1, 3])
+        ctx = __reshape(ctx, shape=[-1, -1, 8192])
+
+        out := __matmul(ctx, __transpose(@o_proj.weight))
+    }
+    return out
+}
+
+func gemma_local_eval_kv_layer(x Tensor, position_id Tensor, i int, k_cache Tensor, v_cache Tensor) Tensor {
+    weight_scope "layers.{i}" {
+        h := __rms_norm(x, @input_layernorm.weight)
+        h = gemma_local_eval_kv_attention(h, position_id, k_cache, v_cache)
+        h = __rms_norm(h, @post_attention_layernorm.weight)
+        x = __add(x, h)
+
+        x = gemma_feed_forward(x)
+    }
+    return x
+}
+
+func gemma_global_eval_kv_layer(x Tensor, position_id Tensor, i int, k_cache Tensor, v_cache Tensor) Tensor {
+    weight_scope "layers.{i}" {
+        h := __rms_norm(x, @input_layernorm.weight)
+        h = gemma_global_eval_kv_attention(h, position_id, k_cache, v_cache)
+        h = __rms_norm(h, @post_attention_layernorm.weight)
+        x = __add(x, h)
+
+        x = gemma_feed_forward(x)
+    }
+    return x
+}
+
 func gemma4a4b26b_model(input_ids Tensor) Tensor {
     weight_scope "language_model.model" {
         x := __embedding(input_ids, @embed_tokens.weight)

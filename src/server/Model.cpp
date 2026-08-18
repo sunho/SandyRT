@@ -6,6 +6,7 @@
 #include "CudaDevice.h"
 #endif
 
+#include <chrono>
 #include <memory>
 #include <mutex>
 #include <utility>
@@ -14,6 +15,12 @@
 namespace sandy::server {
 
 namespace {
+
+using Clock = std::chrono::steady_clock;
+
+double elapsed_ms(Clock::time_point start, Clock::time_point end = Clock::now()) {
+    return std::chrono::duration<double, std::milli>(end - start).count();
+}
 
 void add_tensors_to_map(const weight::Weights& tensors, engine::TensorMap& map) {
     for (const auto& desc : tensors.descriptors()) {
@@ -28,19 +35,31 @@ CacheGroupConfig cache_group(int32_t count, std::vector<int64_t> shape) {
     config.count = count;
     config.tensorShape = core::Shape(std::move(shape));
     config.growDim = 2;
-    config.pageSize = 16;
+    config.pageSize = 32;
     return config;
 }
 
-bool is_gemma_architecture(const std::string& architecture) {
-    return architecture == "gemma4e2b" || architecture == "gemma4e4b" ||
-           architecture == "gemma";
+Result<std::unique_ptr<engine::CompiledKernelGraph>> compile_model_graph(
+        Compiler& compiler,
+        engine::Engine& engine,
+        const std::string& path,
+        const weight::Weights& weights,
+        const ir::mid_ir::MaterializeOptions& options,
+        const engine::EngineCompileOptions& compileOptions) {
+    auto highGraph = compiler.load_sandygo(path);
+    auto midResult = compiler.materialize_mid_ir(highGraph, weights, options);
+    if (!midResult)
+        return make_error(midResult.error());
+    auto compiled = engine.compile(**midResult, &compileOptions);
+    if (!compiled)
+        return make_error(compiled.error());
+    return compiled.take();
 }
 
 } // namespace
 
 Result<ModelConfig> applyModelPreset(ModelConfig config) {
-    if (is_gemma_architecture(config.architecture)) {
+    if (config.architecture == "gemma4e2b" || config.architecture == "gemma") {
         if (config.modelId.empty())
             config.modelId = "gemma4e2b";
         if (config.eosTokenId < 0)
@@ -50,6 +69,36 @@ Result<ModelConfig> applyModelPreset(ModelConfig config) {
             config.session.cacheGroups.push_back(cache_group(12, {1, 1, -1, 256}));
             config.session.cacheGroups.push_back(cache_group(3, {1, 1, -1, 512}));
             config.session.cacheGroups.push_back(cache_group(3, {1, 1, -1, 512}));
+        }
+        return config;
+    }
+
+    if (config.architecture == "gemma4e4b") {
+        if (config.modelId.empty())
+            config.modelId = "gemma4e4b";
+        if (config.eosTokenId < 0)
+            config.eosTokenId = 1;
+        if (config.session.cacheGroups.empty()) {
+            config.session.cacheGroups.push_back(cache_group(20, {1, 2, -1, 256}));
+            config.session.cacheGroups.push_back(cache_group(20, {1, 2, -1, 256}));
+            config.session.cacheGroups.push_back(cache_group(4, {1, 2, -1, 512}));
+            config.session.cacheGroups.push_back(cache_group(4, {1, 2, -1, 512}));
+        }
+        return config;
+    }
+
+    if (config.architecture == "gemma4a4b26b" ||
+        config.architecture == "gemma4a4b" ||
+        config.architecture == "gemma4moe") {
+        if (config.modelId.empty())
+            config.modelId = "gemma4a4b26b";
+        if (config.eosTokenId < 0)
+            config.eosTokenId = 1;
+        if (config.session.cacheGroups.empty()) {
+            config.session.cacheGroups.push_back(cache_group(25, {1, 8, -1, 256}));
+            config.session.cacheGroups.push_back(cache_group(25, {1, 8, -1, 256}));
+            config.session.cacheGroups.push_back(cache_group(5, {1, 2, -1, 512}));
+            config.session.cacheGroups.push_back(cache_group(5, {1, 2, -1, 512}));
         }
         return config;
     }
@@ -91,23 +140,10 @@ Result<void> Model::initialize() {
     if (config_.weightsPath.empty())
         return make_error("--weights is required");
 
-    Compiler compiler;
-    auto highGraph = compiler.load_sandygo(config_.modelPath);
-
     weights_ = weight::EagerSafeTensorWeights::load(config_.weightsPath);
     if (!weights_)
         return make_error("failed to load weights: " + config_.weightsPath);
     add_tensors_to_map(*weights_, weightMap_);
-
-    ir::mid_ir::MaterializeOptions options;
-    options.input_tensor_descs["input_id"] =
-        core::TensorDesc("input_id", core::Shape({1, 1}), core::DType::I64);
-    options.input_tensor_descs["position_id"] =
-        core::TensorDesc("position_id", core::Shape({1}), core::DType::I64);
-
-    auto midResult = compiler.materialize_mid_ir(highGraph, *weights_, options);
-    if (!midResult)
-        return make_error(midResult.error());
 
     std::unique_ptr<device::Device> device;
 #ifdef SANDY_SERVER_ENABLE_CUDA
@@ -126,10 +162,46 @@ Result<void> Model::initialize() {
 #ifdef SANDY_SERVER_ENABLE_CUDA
     compileOptions.fusor.attention = true;
 #endif
-    auto compiled = engine_->compile(**midResult, &compileOptions);
+
+    Compiler compiler;
+    ir::mid_ir::MaterializeOptions evalOptions;
+    evalOptions.input_tensor_descs["input_id"] =
+        core::TensorDesc("input_id", core::Shape({1, 1}), core::DType::I64);
+    evalOptions.input_tensor_descs["position_id"] =
+        core::TensorDesc("position_id", core::Shape({1}), core::DType::I64);
+
+    auto compiled = compile_model_graph(
+        compiler,
+        *engine_,
+        config_.modelPath,
+        *weights_,
+        evalOptions,
+        compileOptions);
     if (!compiled)
         return make_error(compiled.error());
     compiled_ = compiled.take();
+
+    if (!config_.prefillModelPath.empty()) {
+        ir::mid_ir::MaterializeOptions prefillOptions;
+        prefillOptions.input_tensor_descs["input_id"] =
+            core::TensorDesc(
+                "input_id",
+                core::Shape({1, core::Shape::kDynamic}),
+                core::DType::I64);
+        prefillOptions.input_tensor_descs["position_id"] =
+            core::TensorDesc("position_id", core::Shape({1}), core::DType::I64);
+
+        auto prefillCompiled = compile_model_graph(
+            compiler,
+            *engine_,
+            config_.prefillModelPath,
+            *weights_,
+            prefillOptions,
+            compileOptions);
+        if (!prefillCompiled)
+            return make_error(prefillCompiled.error());
+        prefillCompiled_ = prefillCompiled.take();
+    }
 
     auto deviceWeights = engine_->loadWeights(*compiled_, weightMap_);
     if (!deviceWeights)
@@ -139,10 +211,35 @@ Result<void> Model::initialize() {
 }
 
 Result<GenerateResult> Model::generate(
+        const std::string& requestId,
         const std::vector<int64_t>& inputIds,
         int32_t maxTokens,
-        const std::vector<int64_t>& stopTokenIds) {
-    std::lock_guard<std::mutex> lock(generateMutex_);
+        const std::vector<int64_t>& stopTokenIds,
+        RequestLogger* logger) {
+    std::unique_ptr<RequestLogger> ownedLogger;
+    if (!logger) {
+        ownedLogger = RequestLogger::create(config_.logging, requestId);
+        logger = ownedLogger.get();
+    }
+    if (logger) {
+        logger->logf(
+            "server.model.generate.start request_id=%s model_id=%s architecture=%s "
+            "backend=%s prompt_tokens=%zu max_tokens=%d stop_tokens=%zu",
+            requestId.c_str(),
+            config_.modelId.c_str(),
+            config_.architecture.c_str(),
+            backend_.c_str(),
+            inputIds.size(),
+            maxTokens,
+            stopTokenIds.size());
+    }
+
+    auto lockStart = Clock::now();
+    std::unique_lock<std::mutex> lock(generateMutex_);
+    if (logger)
+        logger->logServerStage("request", "server.model.generate.queue_wait", elapsed_ms(lockStart));
+    ServerStageScope totalTimer(logger, "request", "server.model.generate.total");
+
     if (!engine_ || !compiled_ || !device_ || !deviceWeights_)
         return make_error("model is not initialized");
 
@@ -158,9 +255,42 @@ Result<GenerateResult> Model::generate(
         if (!found)
             effectiveStopTokens.push_back(config_.eosTokenId);
     }
+    if (logger) {
+        logger->logf(
+            "server.model.generate.effective_stop_tokens count=%zu eos_token_id=%d",
+            effectiveStopTokens.size(),
+            config_.eosTokenId);
+    }
 
-    Session session(*device_, *engine_, *compiled_, *deviceWeights_, config_.session);
-    return session.generate(inputIds, maxTokens, effectiveStopTokens);
+    Session session(
+        *device_,
+        *engine_,
+        *compiled_,
+        prefillCompiled_.get(),
+        *deviceWeights_,
+        config_.session,
+        logger);
+    auto generated = session.generate(inputIds, maxTokens, effectiveStopTokens);
+    if (!generated) {
+        if (logger) {
+            logger->logf(
+                "server.model.generate.error request_id=%s message=%s",
+                requestId.c_str(),
+                generated.error().c_str());
+        }
+        return make_error(generated.error());
+    }
+    auto result = generated.take();
+    if (logger) {
+        logger->logf(
+            "server.model.generate.done request_id=%s finish_reason=%s "
+            "prompt_tokens=%d completion_tokens=%d",
+            requestId.c_str(),
+            result.finishReason.c_str(),
+            result.promptTokens,
+            result.completionTokens);
+    }
+    return result;
 }
 
 } // namespace sandy::server

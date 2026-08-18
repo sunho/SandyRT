@@ -10,6 +10,7 @@ class ServerConfig:
     tokenizer_path: Path
     grpc_target: str
     eos_token_id: int | None = 1
+    auth_token: str | None = None
 
 
 def normalize_grpc_target(value: str) -> str:

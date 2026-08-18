@@ -1092,9 +1092,10 @@ Result<void> sliding_query_key_score_impl(
                 if (positionIds) {
                     if (rank == 4 && positionCount == batch) {
                         queryPosition = read_index(*positionIds, static_cast<size_t>(b)) + qi;
+                    } else if (positionCount == 1) {
+                        queryPosition = read_index(*positionIds, 0) + qi;
                     } else {
-                        auto positionIndex = positionCount == 1 ? 0 : qi;
-                        queryPosition = read_index(*positionIds, static_cast<size_t>(positionIndex));
+                        queryPosition = read_index(*positionIds, static_cast<size_t>(qi));
                     }
                     if (queryPosition < 0)
                         return make_error("sliding_query_key_score position_ids must be non-negative");
@@ -1872,15 +1873,19 @@ Result<void> rope_impl(
     }
 
     for (int64_t vector = 0; vector < vectors; vector++) {
-        int64_t position = vector % seq;
+        int64_t seqPosition = vector % seq;
+        int64_t position = seqPosition;
         if (positionIds) {
             int64_t positionIndex = 0;
-            if (positionCount == seq) {
-                positionIndex = position;
+            if (positionCount == 1) {
+                position = read_index(*positionIds, 0) + seqPosition;
             } else if (positionCount == vectors) {
                 positionIndex = vector;
+                position = read_index(*positionIds, static_cast<size_t>(positionIndex));
+            } else {
+                positionIndex = seqPosition;
+                position = read_index(*positionIds, static_cast<size_t>(positionIndex));
             }
-            position = read_index(*positionIds, static_cast<size_t>(positionIndex));
             if (position < 0)
                 return make_error("rope position_ids must be non-negative");
         }

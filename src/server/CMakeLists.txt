@@ -1,5 +1,6 @@
 add_executable(sandy_grpc_worker
   HostTensorBuffer.cpp
+  Logger.cpp
   Model.cpp
   Sampler.cpp
   SandyInferenceService.cpp

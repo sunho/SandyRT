@@ -47,14 +47,14 @@ Result<void> GemmaSession::initialize() {
         core::Shape({1, 1, core::Shape::kDynamic, 256}),
         core::DType::BF16);
     localPoolDesc.growDim = 2;
-    localPoolDesc.pageSize = 16;
+    localPoolDesc.pageSize = 32;
 
     device::DevicePagedPoolDesc globalPoolDesc;
     globalPoolDesc.templateDesc = core::TensorDesc(
         core::Shape({1, 1, core::Shape::kDynamic, 512}),
         core::DType::BF16);
     globalPoolDesc.growDim = 2;
-    globalPoolDesc.pageSize = 16;
+    globalPoolDesc.pageSize = 32;
 
     auto localPool = device_.createPagedPool(localPoolDesc);
     if (!localPool)

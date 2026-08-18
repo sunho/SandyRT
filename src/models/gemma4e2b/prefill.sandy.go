@@ -1,6 +1,6 @@
 import "common.sandy.go"
 
-func main(input_id Tensor[[1, 1], i64], position_id Tensor[[1], i64], local_k_cache [12]PagedTensor[[1, 1, -1, 256], bf16, page_size=32], local_v_cache [12]PagedTensor[[1, 1, -1, 256], bf16, page_size=32], global_k_cache [3]PagedTensor[[1, 1, -1, 512], bf16, page_size=32], global_v_cache [3]PagedTensor[[1, 1, -1, 512], bf16, page_size=32]) Tensor {
+func main(input_id Tensor[[1, -1], i64], position_id Tensor[[1], i64], local_k_cache [12]PagedTensor[[1, 1, -1, 256], bf16, page_size=32], local_v_cache [12]PagedTensor[[1, 1, -1, 256], bf16, page_size=32], global_k_cache [3]PagedTensor[[1, 1, -1, 512], bf16, page_size=32], global_v_cache [3]PagedTensor[[1, 1, -1, 512], bf16, page_size=32]) Tensor {
     weight_scope "language_model.model" {
         x := __embedding(input_id, @embed_tokens.weight)
         x = __mul(x, 39.25)

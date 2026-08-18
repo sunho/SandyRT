@@ -490,25 +490,55 @@ Result<void> launch_cuda_moe_matmul(
     void** deviceCArray = nullptr;
     size_t pointerBytes = aArray.size() * sizeof(void*);
 
-    auto allocA = cuda_check(cudaMalloc(&deviceAArray, pointerBytes), "cudaMalloc moe_matmul Aarray");
+    auto allocA = cuda_malloc_stream_ordered(
+        &deviceAArray,
+        pointerBytes,
+        context.stream,
+        "cudaMallocAsync moe_matmul Aarray");
     if (!allocA)
         return make_error(allocA.error());
-    auto allocB = cuda_check(cudaMalloc(&deviceBArray, pointerBytes), "cudaMalloc moe_matmul Barray");
+    auto allocB = cuda_malloc_stream_ordered(
+        &deviceBArray,
+        pointerBytes,
+        context.stream,
+        "cudaMallocAsync moe_matmul Barray");
     if (!allocB) {
-        cudaFree(deviceAArray);
+        (void)cuda_free_stream_ordered(
+            deviceAArray,
+            context.stream,
+            "cudaFreeAsync moe_matmul Aarray");
         return make_error(allocB.error());
     }
-    auto allocC = cuda_check(cudaMalloc(&deviceCArray, pointerBytes), "cudaMalloc moe_matmul Carray");
+    auto allocC = cuda_malloc_stream_ordered(
+        &deviceCArray,
+        pointerBytes,
+        context.stream,
+        "cudaMallocAsync moe_matmul Carray");
     if (!allocC) {
-        cudaFree(deviceAArray);
-        cudaFree(deviceBArray);
+        (void)cuda_free_stream_ordered(
+            deviceAArray,
+            context.stream,
+            "cudaFreeAsync moe_matmul Aarray");
+        (void)cuda_free_stream_ordered(
+            deviceBArray,
+            context.stream,
+            "cudaFreeAsync moe_matmul Barray");
         return make_error(allocC.error());
     }
 
     auto cleanup = [&]() -> Result<void> {
-        auto freeA = cuda_check(cudaFree(deviceAArray), "cudaFree moe_matmul Aarray");
-        auto freeB = cuda_check(cudaFree(deviceBArray), "cudaFree moe_matmul Barray");
-        auto freeC = cuda_check(cudaFree(deviceCArray), "cudaFree moe_matmul Carray");
+        auto freeA = cuda_free_stream_ordered(
+            deviceAArray,
+            context.stream,
+            "cudaFreeAsync moe_matmul Aarray");
+        auto freeB = cuda_free_stream_ordered(
+            deviceBArray,
+            context.stream,
+            "cudaFreeAsync moe_matmul Barray");
+        auto freeC = cuda_free_stream_ordered(
+            deviceCArray,
+            context.stream,
+            "cudaFreeAsync moe_matmul Carray");
         if (!freeA) return make_error(freeA.error());
         if (!freeB) return make_error(freeB.error());
         if (!freeC) return make_error(freeC.error());

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import os
+import secrets
 from pathlib import Path
 from typing import Any
 
 import uvicorn
-from fastapi import FastAPI, HTTPException
+import grpc
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 
 from .config import ServerConfig
@@ -39,21 +42,55 @@ class ChatCompletionRequest(BaseModel):
     n: int = 1
 
 
+def normalize_auth_token(value: str | None) -> str | None:
+    if value is None:
+        return None
+    value = value.strip()
+    return value or None
+
+
+def make_auth_dependency(auth_token: str | None):
+    def require_auth(authorization: str | None = Header(default=None)) -> None:
+        if auth_token is None:
+            return
+        scheme, _, token = (authorization or "").partition(" ")
+        authorized = (
+            scheme.lower() == "bearer"
+            and bool(token)
+            and secrets.compare_digest(token, auth_token)
+        )
+        if not authorized:
+            raise HTTPException(
+                status_code=401,
+                detail="invalid authorization token",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
+    return require_auth
+
+
 def create_app(config: ServerConfig) -> FastAPI:
     app = FastAPI(title="Sandy Server")
     tokenizer = load_tokenizer(config.tokenizer_path)
     grpc_client = SandyGrpcClient(config.grpc_target)
+    api = APIRouter(
+        prefix="/v1",
+        dependencies=[Depends(make_auth_dependency(config.auth_token))],
+    )
 
     @app.get("/health")
     def health() -> dict[str, Any]:
-        ok, message = grpc_client.health()
+        try:
+            ok, message = grpc_client.health()
+        except grpc.RpcError as exc:
+            return {"ok": False, "message": exc.details() or str(exc)}
         return {"ok": ok, "message": message}
 
-    @app.get("/v1/models")
+    @api.get("/models")
     def models() -> dict[str, Any]:
         return model_list_response(config.model_id)
 
-    @app.post("/v1/chat/completions")
+    @api.post("/chat/completions")
     def chat_completions(request: ChatCompletionRequest) -> dict[str, Any]:
         if request.stream:
             raise HTTPException(status_code=400, detail="streaming is not supported in MVP")
@@ -79,12 +116,18 @@ def create_app(config: ServerConfig) -> FastAPI:
         if config.eos_token_id is not None:
             stop_token_ids.append(config.eos_token_id)
 
-        response = grpc_client.generate(
-            request_id=completion_id,
-            input_ids=input_ids,
-            max_tokens=request.max_tokens,
-            stop_token_ids=stop_token_ids,
-        )
+        try:
+            response = grpc_client.generate(
+                request_id=completion_id,
+                input_ids=input_ids,
+                max_tokens=request.max_tokens,
+                stop_token_ids=stop_token_ids,
+            )
+        except grpc.RpcError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=exc.details() or "gRPC worker unavailable",
+            ) from exc
         if response.error:
             raise HTTPException(status_code=500, detail=response.error)
 
@@ -100,6 +143,7 @@ def create_app(config: ServerConfig) -> FastAPI:
             completion_tokens=int(response.completion_tokens),
         )
 
+    app.include_router(api)
     return app
 
 
@@ -111,13 +155,27 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", default=8000, type=int)
     parser.add_argument("--eos-token-id", default=1, type=int)
+    parser.add_argument(
+        "--auth-token",
+        default=None,
+        help="Bearer token required for /v1 requests. Defaults to --auth-token-env.",
+    )
+    parser.add_argument(
+        "--auth-token-env",
+        default="SANDY_API_TOKEN",
+        help="Environment variable to read the bearer token from.",
+    )
     args = parser.parse_args()
+    auth_token = normalize_auth_token(args.auth_token)
+    if auth_token is None and args.auth_token_env:
+        auth_token = normalize_auth_token(os.environ.get(args.auth_token_env))
 
     app = create_app(ServerConfig(
         model_id=args.model_id,
         tokenizer_path=args.tokenizer,
         grpc_target=args.grpc,
         eos_token_id=args.eos_token_id,
+        auth_token=auth_token,
     ))
     uvicorn.run(app, host=args.host, port=args.port)
 

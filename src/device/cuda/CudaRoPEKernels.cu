@@ -132,15 +132,25 @@ __device__ bool rope_position(
         int64_t vector,
         int* errorFlag,
         int64_t* positionOut) {
-    int64_t position = vector % program.seq;
+    int64_t seqPosition = vector % program.seq;
+    int64_t position = seqPosition;
     if (!program.hasPositionIds) {
         *positionOut = position;
         return true;
     }
 
     int64_t positionIndex = 0;
+    if (program.positionCount == 1) {
+        position = load_index_at_storage(program.positionIds, 0) + seqPosition;
+        if (position < 0) {
+            atomicExch(errorFlag, 1);
+            return false;
+        }
+        *positionOut = position;
+        return true;
+    }
     if (program.positionCount == program.seq) {
-        positionIndex = position;
+        positionIndex = seqPosition;
     } else if (program.positionCount == program.vectors) {
         positionIndex = vector;
     }
@@ -259,12 +269,21 @@ Result<void> launch_cuda_rope(
         return make_error("cuda rope block count exceeds grid limit");
 
     int* errorFlag = nullptr;
-    auto allocated = cuda_check(cudaMalloc(&errorFlag, sizeof(int)), "cudaMalloc rope error flag");
+    auto allocated = cuda_malloc_stream_ordered(
+        &errorFlag,
+        sizeof(int),
+        context.stream,
+        "cudaMallocAsync rope error flag");
     if (!allocated)
         return make_error(allocated.error());
     auto freeFlag = [&]() {
-        if (errorFlag)
-            cudaFree(errorFlag);
+        if (errorFlag) {
+            (void)cuda_free_stream_ordered(
+                errorFlag,
+                context.stream,
+                "cudaFreeAsync rope error flag");
+            errorFlag = nullptr;
+        }
     };
 
     auto cleared = cuda_check(
