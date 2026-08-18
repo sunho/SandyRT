@@ -53,6 +53,7 @@ private:
         CudaElementwiseProgram,
         CudaLayoutTransformProgram,
         CudaMatMulProgram,
+        CudaMoeGatherProgram,
         CudaMoeMatMulProgram,
         CudaReductionProgram,
         CudaSoftmaxProgram,

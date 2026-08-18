@@ -1593,8 +1593,7 @@ Result<void> moe_gather(
     int64_t batch = xRank == 3 ? x.desc.shape.dim(0) : 1;
     int64_t seq = xRank == 3 ? x.desc.shape.dim(1) : x.desc.shape.dim(0);
     int64_t hidden = x.desc.shape.dim(xRank - 1);
-    int64_t tokens = batch >= 0 && seq >= 0 ? batch * seq : Shape::kDynamic;
-    if (tokens < 0 || hidden <= 0)
+    if (batch <= 0 || seq < 0 || hidden <= 0)
         return make_error("moe_gather x must have static [tokens, hidden] or [batch, tokens, hidden] shape");
     for (int axis = 0; axis < xRank - 1; axis++) {
         if (x.desc.shape.dim(axis) != topk_ids.desc.shape.dim(axis) ||
@@ -1606,47 +1605,63 @@ Result<void> moe_gather(
         topk_weights.desc.shape.dim(xRank - 1) != top_k) {
         return make_error("moe_gather top_k dimension mismatch");
     }
-    int64_t rows = tokens * top_k;
+    int64_t rows = seq * top_k;
+
+    Shape packedShape = xRank == 3 ? Shape({batch, rows, hidden}) : Shape({rows, hidden});
+    Shape metadataShape = xRank == 3 ? Shape({batch, rows}) : Shape({rows});
+    Shape offsetShape = xRank == 3 ? Shape({batch, num_experts + 1}) : Shape({num_experts + 1});
 
     auto packedCheck = require_output(
-        packed_x, Shape({rows, hidden}), x.desc.dtype, "moe_gather packed_x");
+        packed_x, packedShape, x.desc.dtype, "moe_gather packed_x");
     if (!packedCheck) return make_error(packedCheck.error());
     auto weightsCheck = require_output(
-        packed_weights, Shape({rows}), topk_weights.desc.dtype, "moe_gather packed_weights");
+        packed_weights, metadataShape, topk_weights.desc.dtype, "moe_gather packed_weights");
     if (!weightsCheck) return make_error(weightsCheck.error());
-    if (token_ids.desc.shape != Shape({rows}) ||
-        expert_offsets.desc.shape != Shape({num_experts + 1})) {
+    if (token_ids.desc.shape != metadataShape ||
+        expert_offsets.desc.shape != offsetShape) {
         return make_error("moe_gather metadata output shape mismatch");
     }
 
-    int64_t row = 0;
-    for (int64_t expert = 0; expert < num_experts; expert++) {
-        store_index(expert_offsets, static_cast<size_t>(expert), row);
-        for (int64_t token = 0; token < tokens; token++) {
-            for (int64_t slot = 0; slot < top_k; slot++) {
-                auto routeIndex = static_cast<size_t>(token * top_k + slot);
-                int64_t routedExpert = read_index(topk_ids, routeIndex);
-                if (routedExpert < 0 || routedExpert >= num_experts)
-                    return make_error("moe_gather topk expert id out of range");
-                if (routedExpert != expert)
-                    continue;
+    for (int64_t b = 0; b < batch; b++) {
+        int64_t row = 0;
+        int64_t xBatchBase = xRank == 3 ? b * seq * hidden : 0;
+        int64_t routeBatchBase = xRank == 3 ? b * seq * top_k : 0;
+        int64_t packedBatchBase = xRank == 3 ? b * rows * hidden : 0;
+        int64_t metadataBatchBase = xRank == 3 ? b * rows : 0;
+        int64_t offsetBatchBase = xRank == 3 ? b * (num_experts + 1) : 0;
 
-                for (int64_t h = 0; h < hidden; h++) {
-                    packed_x.store_float(
-                        static_cast<size_t>(row * hidden + h),
-                        x.load_float(static_cast<size_t>(token * hidden + h)));
+        for (int64_t expert = 0; expert < num_experts; expert++) {
+            store_index(expert_offsets, static_cast<size_t>(offsetBatchBase + expert), row);
+            for (int64_t token = 0; token < seq; token++) {
+                for (int64_t slot = 0; slot < top_k; slot++) {
+                    auto routeIndex =
+                        static_cast<size_t>(routeBatchBase + token * top_k + slot);
+                    int64_t routedExpert = read_index(topk_ids, routeIndex);
+                    if (routedExpert < 0 || routedExpert >= num_experts)
+                        return make_error("moe_gather topk expert id out of range");
+                    if (routedExpert != expert)
+                        continue;
+
+                    for (int64_t h = 0; h < hidden; h++) {
+                        packed_x.store_float(
+                            static_cast<size_t>(packedBatchBase + row * hidden + h),
+                            x.load_float(static_cast<size_t>(xBatchBase + token * hidden + h)));
+                    }
+                    packed_weights.store_float(
+                        static_cast<size_t>(metadataBatchBase + row),
+                        topk_weights.load_float(routeIndex));
+                    store_index(token_ids, static_cast<size_t>(metadataBatchBase + row), token);
+                    row++;
                 }
-                packed_weights.store_float(
-                    static_cast<size_t>(row),
-                    topk_weights.load_float(routeIndex));
-                store_index(token_ids, static_cast<size_t>(row), token);
-                row++;
             }
         }
+        store_index(
+            expert_offsets,
+            static_cast<size_t>(offsetBatchBase + num_experts),
+            row);
+        if (row != rows)
+            return make_error("moe_gather routed row count mismatch");
     }
-    store_index(expert_offsets, static_cast<size_t>(num_experts), row);
-    if (row != rows)
-        return make_error("moe_gather routed row count mismatch");
     return {};
 }
 
@@ -1738,23 +1753,32 @@ Result<void> moe_scatter_sum(
     if (token_ids.desc.dtype != DType::I32 && token_ids.desc.dtype != DType::I64)
         return make_error("moe_scatter_sum token_ids must be i32 or i64");
     int outRank = out.desc.shape.rank();
-    if (packed_out.desc.shape.rank() != 2 || packed_weights.desc.shape.rank() != 1 ||
-        token_ids.desc.shape.rank() != 1 || (outRank != 2 && outRank != 3)) {
-        return make_error("moe_scatter_sum expects ranks [N,H], [N], [N], [T,H] or [B,T,H]");
+    int packedRank = packed_out.desc.shape.rank();
+    if ((packedRank != 2 && packedRank != 3) ||
+        packed_weights.desc.shape.rank() != packedRank - 1 ||
+        token_ids.desc.shape.rank() != packedRank - 1 ||
+        (outRank != 2 && outRank != 3) ||
+        packedRank != outRank) {
+        return make_error(
+            "moe_scatter_sum expects ranks [N,H], [N], [N], [T,H] or [B,N,H], [B,N], [B,N], [B,T,H]");
     }
     if (packed_out.desc.dtype != packed_weights.desc.dtype ||
         packed_out.desc.dtype != out.desc.dtype) {
         return make_error("moe_scatter_sum dtype mismatch");
     }
 
-    int64_t rows = packed_out.desc.shape.dim(0);
-    int64_t hidden = packed_out.desc.shape.dim(1);
+    int64_t rows = packed_out.desc.shape.dim(packedRank - 2);
+    int64_t hidden = packed_out.desc.shape.dim(packedRank - 1);
     int64_t batch = outRank == 3 ? out.desc.shape.dim(0) : 1;
     int64_t seq = outRank == 3 ? out.desc.shape.dim(1) : out.desc.shape.dim(0);
-    int64_t tokens = batch >= 0 && seq >= 0 ? batch * seq : Shape::kDynamic;
-    if (rows < 0 || hidden <= 0 || tokens < 0)
+    if (rows < 0 || hidden <= 0 || batch <= 0 || seq < 0)
         return make_error("moe_scatter_sum expects static shapes");
-    if (packed_weights.desc.shape.dim(0) != rows || token_ids.desc.shape.dim(0) != rows ||
+    if ((packedRank == 3 &&
+         (packed_out.desc.shape.dim(0) != batch ||
+          packed_weights.desc.shape.dim(0) != batch ||
+          token_ids.desc.shape.dim(0) != batch)) ||
+        packed_weights.desc.shape.dim(packedRank - 2) != rows ||
+        token_ids.desc.shape.dim(packedRank - 2) != rows ||
         out.desc.shape.dim(outRank - 1) != hidden) {
         return make_error("moe_scatter_sum shape mismatch");
     }
@@ -1763,16 +1787,23 @@ Result<void> moe_scatter_sum(
     for (int64_t i = 0; i < outNumel; i++)
         out.store_float(static_cast<size_t>(i), 0.0f);
 
-    for (int64_t row = 0; row < rows; row++) {
-        int64_t token = read_index(token_ids, static_cast<size_t>(row));
-        if (token < 0 || token >= tokens)
-            return make_error("moe_scatter_sum token id out of range");
-        float routeWeight = packed_weights.load_float(static_cast<size_t>(row));
-        for (int64_t h = 0; h < hidden; h++) {
-            auto dst = static_cast<size_t>(token * hidden + h);
-            float acc = out.load_float(dst);
-            acc += routeWeight * packed_out.load_float(static_cast<size_t>(row * hidden + h));
-            out.store_float(dst, acc);
+    for (int64_t b = 0; b < batch; b++) {
+        int64_t packedBatchBase = packedRank == 3 ? b * rows * hidden : 0;
+        int64_t metadataBatchBase = packedRank == 3 ? b * rows : 0;
+        int64_t outBatchBase = outRank == 3 ? b * seq * hidden : 0;
+
+        for (int64_t row = 0; row < rows; row++) {
+            int64_t token = read_index(token_ids, static_cast<size_t>(metadataBatchBase + row));
+            if (token < 0 || token >= seq)
+                return make_error("moe_scatter_sum token id out of range");
+            float routeWeight = packed_weights.load_float(static_cast<size_t>(metadataBatchBase + row));
+            for (int64_t h = 0; h < hidden; h++) {
+                auto dst = static_cast<size_t>(outBatchBase + token * hidden + h);
+                float acc = out.load_float(dst);
+                acc += routeWeight * packed_out.load_float(
+                    static_cast<size_t>(packedBatchBase + row * hidden + h));
+                out.store_float(dst, acc);
+            }
         }
     }
     return {};

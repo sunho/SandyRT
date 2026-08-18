@@ -213,9 +213,14 @@ Result<DeviceCompiledGraphId> CudaDevice::compile(const ir::kernel_ir::Graph& gr
                 };
                 break;
             }
-            case ir::kernel_ir::OpKind::MoeGatherKernel:
-                kernel.program = std::monostate{};
+            case ir::kernel_ir::OpKind::MoeGatherKernel: {
+                const auto& gather = static_cast<const ir::kernel_ir::MoeGatherKernelOp&>(op);
+                kernel.program = CudaMoeGatherProgram{
+                    gather.numExperts(),
+                    gather.topK(),
+                };
                 break;
+            }
             case ir::kernel_ir::OpKind::MoeMatMulKernel: {
                 const auto& matmul = static_cast<const ir::kernel_ir::MoeMatMulKernelOp&>(op);
                 kernel.program = CudaMoeMatMulProgram{
@@ -483,7 +488,9 @@ Result<void> CudaDevice::run(
                 context,
                 std::get<CudaAttentionProgram>(kernel.program));
         case ir::kernel_ir::OpKind::MoeGatherKernel:
-            return make_error("cuda moe_gather kernel is not implemented");
+            return launch_cuda_moe_gather(
+                context,
+                std::get<CudaMoeGatherProgram>(kernel.program));
         case ir::kernel_ir::OpKind::MoeMatMulKernel:
             return launch_cuda_moe_matmul(
                 context,

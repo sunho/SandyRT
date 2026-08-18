@@ -166,6 +166,29 @@ __device__ inline int64_t load_int(
     return load_int_at_storage(tensor, storage_index(tensor, linear));
 }
 
+__device__ inline void store_int_at_storage(
+        const TensorArg& tensor,
+        int64_t index,
+        int64_t value) {
+    switch (tensor.dtype) {
+        case core::DType::I32:
+            static_cast<int32_t*>(tensor.data)[index] = static_cast<int32_t>(value);
+            return;
+        case core::DType::I64:
+            static_cast<int64_t*>(tensor.data)[index] = value;
+            return;
+        default:
+            return;
+    }
+}
+
+__device__ inline void store_int(
+        const TensorArg& tensor,
+        int64_t linear,
+        int64_t value) {
+    store_int_at_storage(tensor, storage_index(tensor, linear), value);
+}
+
 __device__ inline void store_float_at_storage(
         const TensorArg& tensor,
         int64_t index,

@@ -859,13 +859,18 @@ public:
         int64_t topK = attrs.at("top_k").intVal;
         int64_t numExperts = attrs.at("num_experts").intVal;
         int xRank = operands[0]->shape.rank();
-        int64_t tokens = operands[0]->shape.dim(0);
-        if (xRank == 3) {
-            int64_t seq = operands[0]->shape.dim(1);
-            tokens = tokens >= 0 && seq >= 0 ? tokens * seq : core::Shape::kDynamic;
-        }
-        int64_t rows = tokens >= 0 ? tokens * topK : core::Shape::kDynamic;
+        int64_t seq = xRank == 3 ? operands[0]->shape.dim(1) : operands[0]->shape.dim(0);
+        int64_t rows = seq >= 0 ? seq * topK : core::Shape::kDynamic;
         int64_t hidden = operands[0]->shape.dim(xRank - 1);
+        if (xRank == 3) {
+            int64_t batch = operands[0]->shape.dim(0);
+            return {
+                ValueType::tensor(core::Shape({batch, rows, hidden}), operands[0]->dtype),
+                ValueType::tensor(core::Shape({batch, rows}), operands[2]->dtype),
+                ValueType::tensor(core::Shape({batch, rows}), core::DType::I64),
+                ValueType::tensor(core::Shape({batch, numExperts + 1}), core::DType::I64),
+            };
+        }
         return {
             ValueType::tensor(core::Shape({rows, hidden}), operands[0]->dtype),
             ValueType::tensor(core::Shape({rows}), operands[2]->dtype),
@@ -1012,11 +1017,16 @@ public:
             abort();
         }
         int outRank = operands[3]->shape.rank();
-        if (operands[0]->shape.rank() != 2 ||
-            operands[1]->shape.rank() != 1 ||
-            operands[2]->shape.rank() != 1 ||
+        int packedRank = operands[0]->shape.rank();
+        if ((packedRank != 2 && packedRank != 3) ||
+            operands[1]->shape.rank() != packedRank - 1 ||
+            operands[2]->shape.rank() != packedRank - 1 ||
             (outRank != 2 && outRank != 3)) {
-            fprintf(stderr, "moe_scatter_sum expects ranks [N,H], [N], [N], [T,H] or [B,T,H]\n");
+            fprintf(stderr, "moe_scatter_sum expects ranks [N,H], [N], [N], [T,H] or [B,N,H], [B,N], [B,N], [B,T,H]\n");
+            abort();
+        }
+        if (packedRank != outRank) {
+            fprintf(stderr, "moe_scatter_sum packed and output rank mismatch\n");
             abort();
         }
         if (operands[0]->dtype != operands[3]->dtype ||
@@ -1030,15 +1040,27 @@ public:
             fprintf(stderr, "moe_scatter_sum token_ids must be i32 or i64\n");
             abort();
         }
-        int64_t rows = operands[0]->shape.dim(0);
-        int64_t weightRows = operands[1]->shape.dim(0);
-        int64_t tokenRows = operands[2]->shape.dim(0);
+        if (packedRank == 3) {
+            int64_t packedBatch = operands[0]->shape.dim(0);
+            int64_t weightBatch = operands[1]->shape.dim(0);
+            int64_t tokenBatch = operands[2]->shape.dim(0);
+            int64_t outBatch = operands[3]->shape.dim(0);
+            if ((packedBatch >= 0 && outBatch >= 0 && packedBatch != outBatch) ||
+                (packedBatch >= 0 && weightBatch >= 0 && packedBatch != weightBatch) ||
+                (packedBatch >= 0 && tokenBatch >= 0 && packedBatch != tokenBatch)) {
+                fprintf(stderr, "moe_scatter_sum batch dimension mismatch\n");
+                abort();
+            }
+        }
+        int64_t rows = operands[0]->shape.dim(packedRank - 2);
+        int64_t weightRows = operands[1]->shape.dim(packedRank - 2);
+        int64_t tokenRows = operands[2]->shape.dim(packedRank - 2);
         if ((rows >= 0 && weightRows >= 0 && rows != weightRows) ||
             (rows >= 0 && tokenRows >= 0 && rows != tokenRows)) {
             fprintf(stderr, "moe_scatter_sum row dimension mismatch\n");
             abort();
         }
-        int64_t hidden = operands[0]->shape.dim(1);
+        int64_t hidden = operands[0]->shape.dim(packedRank - 1);
         int64_t outHidden = operands[3]->shape.dim(outRank - 1);
         if (hidden >= 0 && outHidden >= 0 && hidden != outHidden) {
             fprintf(stderr, "moe_scatter_sum hidden dimension mismatch\n");
