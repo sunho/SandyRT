@@ -353,15 +353,22 @@ int main(int argc, char* argv[]) {
     runnerName = "cuda_runner";
 #endif
     bool instrument = false;
+    bool dumpKernelIR = false;
     int arg = 1;
-    if (argc >= 2 &&
-        (std::strcmp(argv[1], "--instrument") == 0 ||
-         std::strcmp(argv[1], "--profile") == 0)) {
-        instrument = true;
-        arg = 2;
+    while (arg < argc && std::strncmp(argv[arg], "--", 2) == 0) {
+        if (std::strcmp(argv[arg], "--instrument") == 0 ||
+            std::strcmp(argv[arg], "--profile") == 0) {
+            instrument = true;
+        } else if (std::strcmp(argv[arg], "--dump-kernel-ir") == 0) {
+            dumpKernelIR = true;
+        } else {
+            fprintf(stderr, "unknown option: %s\n", argv[arg]);
+            return 1;
+        }
+        arg++;
     }
     if (argc - arg != 3) {
-        fprintf(stderr, "usage: %s [--profile] <program.sandy.go> <weights.safetensors> <inputs.safetensors>\n", runnerName);
+        fprintf(stderr, "usage: %s [--profile] [--dump-kernel-ir] <program.sandy.go> <weights.safetensors> <inputs.safetensors>\n", runnerName);
         return 1;
     }
 
@@ -463,6 +470,10 @@ int main(int argc, char* argv[]) {
         return 1;
     }
     auto compiledGraph = graphResult.take();
+    if (dumpKernelIR) {
+        compiledGraph->graph->dump();
+        return 0;
+    }
     printStage("compile_kernel_ir_graph");
 
     std::vector<sandy::engine::TensorBufferPtr> inputBuffers;

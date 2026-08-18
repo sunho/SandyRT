@@ -178,9 +178,11 @@ Result<DeviceCompiledGraphId> CudaDevice::compile(const ir::kernel_ir::Graph& gr
                 kernel.program = CudaSoftmaxProgram{softmax.axis()};
                 break;
             }
-            case ir::kernel_ir::OpKind::TopKKernel:
-                kernel.program = std::monostate{};
+            case ir::kernel_ir::OpKind::TopKKernel: {
+                const auto& topk = static_cast<const ir::kernel_ir::TopKKernelOp&>(op);
+                kernel.program = CudaTopKProgram{topk.k(), topk.axis()};
                 break;
+            }
             case ir::kernel_ir::OpKind::NormKernel: {
                 const auto& norm = static_cast<const ir::kernel_ir::NormKernelOp&>(op);
                 kernel.program = CudaNormProgram{norm.norm(), norm.epsilon()};
@@ -470,7 +472,9 @@ Result<void> CudaDevice::run(
                 context,
                 std::get<CudaSoftmaxProgram>(kernel.program));
         case ir::kernel_ir::OpKind::TopKKernel:
-            return make_error("cuda topk kernel is not implemented");
+            return launch_cuda_topk(
+                context,
+                std::get<CudaTopKProgram>(kernel.program));
         case ir::kernel_ir::OpKind::NormKernel:
             return launch_cuda_norm(
                 context,

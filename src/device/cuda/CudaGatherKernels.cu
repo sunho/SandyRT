@@ -19,6 +19,7 @@ struct DeviceGatherProgram {
     int64_t vocab = 0;
     int64_t hidden = 0;
     int64_t outputNumel = 0;
+    int tableRank = 0;
 };
 
 struct DeviceMoeGatherProgram {
@@ -49,18 +50,20 @@ Result<DeviceGatherProgram> pack_gather_program(const CudaLaunchContext& context
         return make_error("cuda gather table unsupported dtype");
     if (outputView.desc.dtype != tableView.desc.dtype)
         return make_error("cuda gather output dtype mismatch");
-    if (tableView.desc.shape.rank() != 2)
-        return make_error("cuda gather table must have rank 2");
+    int tableRank = tableView.desc.shape.rank();
+    if (tableRank != 1 && tableRank != 2)
+        return make_error("cuda gather table must have rank 1 or rank 2");
 
     int64_t vocab = tableView.desc.shape.dim(0);
-    int64_t hidden = tableView.desc.shape.dim(1);
+    int64_t hidden = tableRank == 2 ? tableView.desc.shape.dim(1) : 1;
     if (vocab < 0 || hidden < 0)
         return make_error("cuda gather table must have static shape");
     if (idsView.desc.shape.numel() < 0)
         return make_error("cuda gather ids must have static shape");
 
     auto outDims = idsView.desc.shape.dims();
-    outDims.push_back(hidden);
+    if (tableRank == 2)
+        outDims.push_back(hidden);
     if (outputView.desc.shape != core::Shape(std::move(outDims)))
         return make_error("cuda gather output shape mismatch");
 
@@ -81,6 +84,7 @@ Result<DeviceGatherProgram> pack_gather_program(const CudaLaunchContext& context
     program.vocab = vocab;
     program.hidden = hidden;
     program.outputNumel = program.output.numel;
+    program.tableRank = tableRank;
     return program;
 }
 
@@ -95,8 +99,8 @@ __global__ void gather_kernel(DeviceGatherProgram program, int* errorFlag) {
     if (linear >= program.outputNumel)
         return;
 
-    int64_t hiddenIndex = linear % program.hidden;
-    int64_t idLinear = linear / program.hidden;
+    int64_t hiddenIndex = program.tableRank == 2 ? linear % program.hidden : 0;
+    int64_t idLinear = program.tableRank == 2 ? linear / program.hidden : linear;
     int64_t idStorage = cuda_kernel::storage_index(program.ids, idLinear);
     int64_t tokenId = load_index_at_storage(program.ids, idStorage);
     if (tokenId < 0 || tokenId >= program.vocab) {
@@ -104,10 +108,9 @@ __global__ void gather_kernel(DeviceGatherProgram program, int* errorFlag) {
         return;
     }
 
-    int64_t tableStorage =
-        program.table.storageOffset +
-        tokenId * program.table.strides[0] +
-        hiddenIndex * program.table.strides[1];
+    int64_t tableStorage = program.table.storageOffset + tokenId * program.table.strides[0];
+    if (program.tableRank == 2)
+        tableStorage += hiddenIndex * program.table.strides[1];
     float value = cuda_kernel::load_float_at_storage(program.table, tableStorage);
     cuda_kernel::store_float(program.output, linear, value);
 }

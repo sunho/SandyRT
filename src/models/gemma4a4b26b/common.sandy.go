@@ -216,7 +216,7 @@ func gemma_global_layer(x Tensor, i int, k Tensor, v Tensor) Tensor {
 func gemma4a4b26b_model(input_ids Tensor) Tensor {
     weight_scope "language_model.model" {
         x := __embedding(input_ids, @embed_tokens.weight)
-        x = __mul(x, 53.0659966456864)
+        x = __mul(x, 53.0)
 
         var sliding_k Tensor
         var sliding_v Tensor

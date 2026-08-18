@@ -284,8 +284,11 @@ Result<core::TensorDesc> resolve_output_desc(
             auto table = lookup_runtime_desc(views, op.inputs()[1]);
             if (!table)
                 return make_error(table.error());
+            if (table->shape.rank() != 1 && table->shape.rank() != 2)
+                return make_error("gather table must have rank 1 or rank 2");
             auto dims = ids->shape.dims();
-            dims.push_back(table->shape.dim(1));
+            if (table->shape.rank() == 2)
+                dims.push_back(table->shape.dim(1));
             return desc_with_shape(graph, output, core::Shape(std::move(dims)));
         }
         case OpKind::SoftmaxKernel:

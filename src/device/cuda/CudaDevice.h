@@ -57,6 +57,7 @@ private:
         CudaMoeMatMulProgram,
         CudaReductionProgram,
         CudaSoftmaxProgram,
+        CudaTopKProgram,
         CudaNormProgram,
         CudaRoPEProgram,
         CudaSlidingQueryKeyScoreProgram,

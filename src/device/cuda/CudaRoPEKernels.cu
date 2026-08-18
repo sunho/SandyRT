@@ -193,8 +193,14 @@ __global__ void rope_kernel(DeviceRoPEProgram program, int* errorFlag) {
 
         int64_t firstLinear = vector * program.dim + firstCol;
         int64_t secondLinear = vector * program.dim + secondCol;
-        cuda_kernel::store_float(program.output, firstLinear, 0.0f);
-        cuda_kernel::store_float(program.output, secondLinear, 0.0f);
+        cuda_kernel::store_float(
+            program.output,
+            firstLinear,
+            cuda_kernel::load_float(program.x, firstLinear));
+        cuda_kernel::store_float(
+            program.output,
+            secondLinear,
+            cuda_kernel::load_float(program.x, secondLinear));
         return;
     }
 

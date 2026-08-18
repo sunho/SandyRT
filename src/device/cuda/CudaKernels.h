@@ -79,6 +79,11 @@ struct CudaSoftmaxProgram {
     int64_t axis = -1;
 };
 
+struct CudaTopKProgram {
+    int64_t k = 0;
+    int64_t axis = -1;
+};
+
 struct CudaNormProgram {
     ir::kernel_ir::NormKind norm = ir::kernel_ir::NormKind::RMSNorm;
     double epsilon = 0.0;
@@ -127,6 +132,10 @@ Result<void> launch_cuda_gather(const CudaLaunchContext& context);
 Result<void> launch_cuda_softmax(
     const CudaLaunchContext& context,
     const CudaSoftmaxProgram& program);
+
+Result<void> launch_cuda_topk(
+    const CudaLaunchContext& context,
+    const CudaTopKProgram& program);
 
 Result<void> launch_cuda_norm(
     const CudaLaunchContext& context,

@@ -246,6 +246,40 @@ TEST_F(EngineCompileTest, RunExecutesKernelGraphWithFakeDevice) {
     EXPECT_EQ(fakePtr->deallocs, std::vector<sandy::device::DeviceBufferId>({200, 201, 202}));
 }
 
+TEST_F(EngineCompileTest, RunEmbeddingWithRank1WeightAllocatesScalarLookupShape) {
+    sandy::ir::mid_ir::Graph graph;
+    sandy::ir::mid_ir::Builder builder(graph);
+    auto* ids = builder.createInput(0, sandy::core::Shape({1, 1, 8}), sandy::core::DType::I64);
+    auto* weight = builder.createWeight("scale", sandy::core::Shape({128}), sandy::core::DType::BF16);
+    auto* out = builder.createEmbedding(ids, weight);
+    sandy::ir::mid_ir::Value* outputs[] = {out};
+    builder.setOutputs(outputs);
+
+    FakeDevice* fakePtr = nullptr;
+    auto engine = make_engine(&fakePtr);
+    auto compiledResult = engine.compile(graph);
+    ASSERT_TRUE(compiledResult) << compiledResult.error();
+    auto compiled = compiledResult.take();
+
+    std::vector<sandy::engine::TensorBufferPtr> inputs;
+    inputs.push_back(std::make_shared<FakeTensorBuffer>(
+        sandy::core::TensorDesc("ids", sandy::core::Shape({1, 1, 8}), sandy::core::DType::I64)));
+
+    sandy::engine::TensorMap weights;
+    weights["scale"] = std::make_shared<FakeTensorBuffer>(
+        sandy::core::TensorDesc("scale", sandy::core::Shape({128}), sandy::core::DType::BF16));
+
+    auto outputsResult = engine.run(*compiled, inputs, weights);
+    ASSERT_TRUE(outputsResult) << outputsResult.error();
+    ASSERT_EQ(outputsResult->size(), 1u);
+
+    ASSERT_EQ(fakePtr->allocDescs.size(), 1u);
+    EXPECT_EQ(fakePtr->allocDescs[0].shape, sandy::core::Shape({1, 1, 8}));
+    EXPECT_EQ(fakePtr->allocDescs[0].dtype, sandy::core::DType::BF16);
+    ASSERT_EQ(fakePtr->runs.size(), 1u);
+    EXPECT_EQ(fakePtr->runs[0].outputs, std::vector<sandy::device::DeviceBufferId>({202}));
+}
+
 TEST_F(EngineCompileTest, RunValuesReturnsTensorTupleOutput) {
     sandy::ir::mid_ir::Graph graph;
     sandy::ir::mid_ir::Builder builder(graph);
