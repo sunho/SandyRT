@@ -10,6 +10,23 @@ option(SANDY_USE_BUNDLED_GRPC "Use external/grpc for the server build" OFF)
 
 if(SANDY_ENABLE_CUDA)
   enable_language(CUDA)
+  get_filename_component(SANDY_CUDA_BIN_DIR "${CMAKE_CUDA_COMPILER}" DIRECTORY)
+  get_filename_component(SANDY_CUDA_TOOLKIT_ROOT "${SANDY_CUDA_BIN_DIR}" DIRECTORY)
+  if(EXISTS "${SANDY_CUDA_TOOLKIT_ROOT}/targets/x86_64-linux/lib/libcudart.so")
+    set(CUDAToolkit_ROOT "${SANDY_CUDA_TOOLKIT_ROOT}" CACHE PATH "" FORCE)
+    set(CUDA_CUDART
+        "${SANDY_CUDA_TOOLKIT_ROOT}/targets/x86_64-linux/lib/libcudart.so"
+        CACHE FILEPATH "" FORCE)
+    set(CUDA_cudart_LIBRARY
+        "${SANDY_CUDA_TOOLKIT_ROOT}/targets/x86_64-linux/lib/libcudart.so"
+        CACHE FILEPATH "" FORCE)
+    set(CUDA_cublas_LIBRARY
+        "${SANDY_CUDA_TOOLKIT_ROOT}/targets/x86_64-linux/lib/libcublas.so"
+        CACHE FILEPATH "" FORCE)
+    set(CUDA_cublasLt_LIBRARY
+        "${SANDY_CUDA_TOOLKIT_ROOT}/targets/x86_64-linux/lib/libcublasLt.so"
+        CACHE FILEPATH "" FORCE)
+  endif()
   find_package(CUDAToolkit REQUIRED)
 endif()
 

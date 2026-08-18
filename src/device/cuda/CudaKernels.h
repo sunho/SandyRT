@@ -60,6 +60,10 @@ struct CudaMatMulProgram {
     bool transposeRhs = false;
 };
 
+struct CudaMoeMatMulProgram {
+    bool transposeRhs = false;
+};
+
 struct CudaReductionProgram {
     ir::kernel_ir::ReduceOp reduce = ir::kernel_ir::ReduceOp::Sum;
     std::vector<int64_t> axes;
@@ -102,6 +106,10 @@ Result<void> launch_cuda_layout_transform(
 Result<void> launch_cuda_matmul(
     const CudaLaunchContext& context,
     const CudaMatMulProgram& program);
+
+Result<void> launch_cuda_moe_matmul(
+    const CudaLaunchContext& context,
+    const CudaMoeMatMulProgram& program);
 
 Result<void> launch_cuda_gather(const CudaLaunchContext& context);
 

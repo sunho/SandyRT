@@ -1664,40 +1664,62 @@ Result<void> moe_matmul(
         return make_error("moe_matmul x and weight must have same dtype");
     if (expert_offsets.desc.dtype != DType::I32 && expert_offsets.desc.dtype != DType::I64)
         return make_error("moe_matmul expert_offsets must be i32 or i64");
-    if (x.desc.shape.rank() != 2 || expert_offsets.desc.shape.rank() != 1 ||
+    int xRank = x.desc.shape.rank();
+    if ((xRank != 2 && xRank != 3) || expert_offsets.desc.shape.rank() != xRank - 1 ||
         weight.desc.shape.rank() != 3) {
-        return make_error("moe_matmul expects ranks [N,K], [E+1], [E,M,K]");
+        return make_error(
+            "moe_matmul expects ranks [N,K], [E+1], [E,M,K] or [B,N,K], [B,E+1], [E,M,K]");
     }
 
-    int64_t rows = x.desc.shape.dim(0);
-    int64_t inFeatures = x.desc.shape.dim(1);
+    int64_t batch = xRank == 3 ? x.desc.shape.dim(0) : 1;
+    int64_t rows = x.desc.shape.dim(xRank - 2);
+    int64_t inFeatures = x.desc.shape.dim(xRank - 1);
     int64_t experts = weight.desc.shape.dim(0);
     int64_t outFeatures = transpose_rhs ? weight.desc.shape.dim(1) : weight.desc.shape.dim(2);
     int64_t rhsK = transpose_rhs ? weight.desc.shape.dim(2) : weight.desc.shape.dim(1);
-    if (rows < 0 || inFeatures <= 0 || experts <= 0 || outFeatures <= 0)
+    if (batch <= 0 || rows < 0 || inFeatures <= 0 || experts <= 0 || outFeatures <= 0)
         return make_error("moe_matmul expects static positive dimensions");
     if (rhsK != inFeatures)
         return make_error("moe_matmul contracting dimension mismatch");
+    if (expert_offsets.desc.shape.dim(xRank - 2) != experts + 1)
+        return make_error("moe_matmul expert_offsets shape mismatch");
+    if (xRank == 3 && expert_offsets.desc.shape.dim(0) != batch)
+        return make_error("moe_matmul batch dimension mismatch");
 
-    auto output = require_output(out, Shape({rows, outFeatures}), x.desc.dtype, "moe_matmul");
+    Shape outputShape = xRank == 3
+        ? Shape({batch, rows, outFeatures})
+        : Shape({rows, outFeatures});
+    auto output = require_output(out, outputShape, x.desc.dtype, "moe_matmul");
     if (!output) return make_error(output.error());
 
-    for (int64_t expert = 0; expert < experts; expert++) {
-        int64_t begin = read_index(expert_offsets, static_cast<size_t>(expert));
-        int64_t end = read_index(expert_offsets, static_cast<size_t>(expert + 1));
-        if (begin < 0 || end < begin || end > rows)
-            return make_error("moe_matmul invalid expert offsets");
-        for (int64_t row = begin; row < end; row++) {
-            for (int64_t o = 0; o < outFeatures; o++) {
-                float acc = 0.0f;
-                for (int64_t i = 0; i < inFeatures; i++) {
-                    float xv = x.load_float(static_cast<size_t>(row * inFeatures + i));
-                    size_t wIndex = transpose_rhs
-                        ? static_cast<size_t>((expert * outFeatures + o) * inFeatures + i)
-                        : static_cast<size_t>((expert * inFeatures + i) * outFeatures + o);
-                    acc += xv * weight.load_float(wIndex);
+    for (int64_t b = 0; b < batch; b++) {
+        int64_t offsetBase = xRank == 3 ? b * (experts + 1) : 0;
+        int64_t xBase = b * rows * inFeatures;
+        int64_t outBase = b * rows * outFeatures;
+        for (int64_t expert = 0; expert < experts; expert++) {
+            int64_t begin = read_index(
+                expert_offsets,
+                static_cast<size_t>(offsetBase + expert));
+            int64_t end = read_index(
+                expert_offsets,
+                static_cast<size_t>(offsetBase + expert + 1));
+            if (begin < 0 || end < begin || end > rows)
+                return make_error("moe_matmul invalid expert offsets");
+            for (int64_t row = begin; row < end; row++) {
+                for (int64_t o = 0; o < outFeatures; o++) {
+                    float acc = 0.0f;
+                    for (int64_t i = 0; i < inFeatures; i++) {
+                        float xv = x.load_float(
+                            static_cast<size_t>(xBase + row * inFeatures + i));
+                        size_t wIndex = transpose_rhs
+                            ? static_cast<size_t>((expert * outFeatures + o) * inFeatures + i)
+                            : static_cast<size_t>((expert * inFeatures + i) * outFeatures + o);
+                        acc += xv * weight.load_float(wIndex);
+                    }
+                    out.store_float(
+                        static_cast<size_t>(outBase + row * outFeatures + o),
+                        acc);
                 }
-                out.store_float(static_cast<size_t>(row * outFeatures + o), acc);
             }
         }
     }

@@ -685,7 +685,7 @@ TEST(TensorCalcTest, LinearF32) {
 TEST(TensorCalcTest, LinearF32Rank3FlattensLeadingDims) {
     auto x = f32_bytes({
         1.0f, 2.0f,
-        3.0f, 4.0f,
+        6.0f, 15.0f,
         5.0f, 6.0f,
         7.0f, 8.0f,
     });
@@ -1002,6 +1002,59 @@ TEST(TensorCalcTest, MatMulF32SupportsGroupedBatchHeads) {
     };
     for (size_t i = 0; i < expected.size(); i++)
         EXPECT_FLOAT_EQ(read_f32(out.data, i), expected[i]);
+}
+
+TEST(TensorCalcTest, MoeMatMulF32SupportsBatchedOffsets) {
+    auto xBytes = f32_bytes({
+        1.0f, 0.0f, 2.0f,
+        0.0f, 1.0f, 1.0f,
+        2.0f, 1.0f, 0.0f,
+        1.0f, 1.0f, 1.0f,
+        2.0f, 0.0f, 1.0f,
+        0.0f, 2.0f, 3.0f,
+    });
+    auto offsetBytes = i32_bytes({
+        0, 2, 3,
+        0, 1, 3,
+    });
+    auto weightBytes = f32_bytes({
+        1.0f, 2.0f, 3.0f,
+        4.0f, 5.0f, 6.0f,
+        2.0f, 0.0f, 1.0f,
+        0.0f, 3.0f, 1.0f,
+    });
+    auto x = tensor_ref(
+        xBytes,
+        sandy::core::TensorDesc({2, 3, 3}, sandy::core::DType::F32));
+    ASSERT_TRUE(x) << x.error();
+    auto offsets = tensor_ref(
+        offsetBytes,
+        sandy::core::TensorDesc({2, 3}, sandy::core::DType::I32));
+    ASSERT_TRUE(offsets) << offsets.error();
+    auto weight = tensor_ref(
+        weightBytes,
+        sandy::core::TensorDesc({2, 2, 3}, sandy::core::DType::F32));
+    ASSERT_TRUE(weight) << weight.error();
+    auto outResult = make_output(
+        sandy::core::TensorDesc({2, 3, 2}, sandy::core::DType::F32));
+    ASSERT_TRUE(outResult) << outResult.error();
+    auto out = outResult.take();
+    auto outRef = mutable_tensor_ref(out);
+    ASSERT_TRUE(outRef) << outRef.error();
+
+    auto result = sandy::core::moe_matmul(*x, *offsets, *weight, true, *outRef);
+    ASSERT_TRUE(result) << result.error();
+
+    std::vector<float> expected = {
+        7.0f, 16.0f,
+        5.0f, 11.0f,
+        4.0f, 3.0f,
+        6.0f, 15.0f,
+        5.0f, 1.0f,
+        3.0f, 9.0f,
+    };
+    for (size_t i = 0; i < expected.size(); i++)
+        EXPECT_FLOAT_EQ(read_f32(out.data, i), expected[i]) << "at flat index " << i;
 }
 
 TEST(TensorCalcTest, TransposeF32Requires2D) {

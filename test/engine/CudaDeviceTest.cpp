@@ -815,7 +815,7 @@ TEST(CudaDeviceTest, RunGatherF32WithI32Ids) {
         sandy::core::Shape({4, 2}),
         {
             1.0f, 2.0f,
-            3.0f, 4.0f,
+            6.0f, 15.0f,
             5.0f, 6.0f,
             7.0f, 8.0f,
         });
@@ -1222,6 +1222,193 @@ TEST(CudaDeviceTest, RunMatMulF32GroupedBatchHeads) {
             5.0f, 50.0f,
             5.0f, 50.0f,
             4.0f, 40.0f,
+        });
+}
+
+TEST(CudaDeviceTest, RunMoeMatMulF32GroupedExperts) {
+    if (auto reason = cuda_device_skip_reason(); !reason.empty())
+        GTEST_SKIP() << reason;
+    namespace kir = sandy::ir::kernel_ir;
+
+    kir::Graph graph;
+    auto x = graph.addValue(tensor_type({5, 3}));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 0, ""},
+        x);
+    auto expertOffsets = graph.addValue(tensor_type({4}, sandy::core::DType::I32));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 1, ""},
+        expertOffsets);
+    auto weight = graph.addValue(tensor_type({3, 2, 3}));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 2, ""},
+        weight);
+    auto output = graph.addValue(tensor_type({5, 2}));
+    auto* op = graph.addOp<kir::MoeMatMulKernelOp>(
+        x,
+        expertOffsets,
+        weight,
+        output,
+        true);
+    graph.setOutputs({output});
+
+    sandy::device::CudaDevice device;
+    auto compiled = device.compile(graph);
+    ASSERT_TRUE(compiled) << compiled.error();
+
+    auto xHost = make_f32_buffer(
+        "x",
+        sandy::core::Shape({5, 3}),
+        {
+            1.0f, 0.0f, 2.0f,
+            0.0f, 1.0f, 1.0f,
+            1.0f, 1.0f, 1.0f,
+            2.0f, 0.0f, 1.0f,
+            0.0f, 2.0f, 3.0f,
+        });
+    auto offsetsHost = make_i32_buffer(
+        "expert_offsets",
+        sandy::core::Shape({4}),
+        {0, 2, 2, 5});
+    auto weightHost = make_f32_buffer(
+        "weight",
+        sandy::core::Shape({3, 2, 3}),
+        {
+            1.0f, 2.0f, 3.0f,
+            4.0f, 5.0f, 6.0f,
+            10.0f, 20.0f, 30.0f,
+            40.0f, 50.0f, 60.0f,
+            2.0f, 0.0f, 1.0f,
+            0.0f, 3.0f, 1.0f,
+        });
+    auto xBuffer = device.load(*xHost);
+    ASSERT_TRUE(xBuffer) << xBuffer.error();
+    auto offsetsBuffer = device.load(*offsetsHost);
+    ASSERT_TRUE(offsetsBuffer) << offsetsBuffer.error();
+    auto weightBuffer = device.load(*weightHost);
+    ASSERT_TRUE(weightBuffer) << weightBuffer.error();
+    auto outputBuffer = device.alloc(
+        sandy::core::TensorDesc({5, 2}, sandy::core::DType::F32));
+    ASSERT_TRUE(outputBuffer) << outputBuffer.error();
+
+    std::vector<sandy::device::DeviceRunValue> inputs = {
+        tensor_view(device, *xBuffer, xHost->desc()),
+        tensor_view(device, *offsetsBuffer, offsetsHost->desc()),
+        tensor_view(device, *weightBuffer, weightHost->desc()),
+    };
+    std::vector<sandy::device::DeviceRunValue> outputs = {
+        tensor_view(
+            device,
+            *outputBuffer,
+            sandy::core::TensorDesc({5, 2}, sandy::core::DType::F32)),
+    };
+    auto run = device.run(*compiled, op->id(), inputs, outputs);
+    ASSERT_TRUE(run) << run.error();
+
+    expect_f32_output(
+        device,
+        *outputBuffer,
+        {
+            7.0f, 16.0f,
+            5.0f, 11.0f,
+            3.0f, 4.0f,
+            5.0f, 1.0f,
+            3.0f, 9.0f,
+        });
+}
+
+TEST(CudaDeviceTest, RunMoeMatMulF32BatchedGroupedExperts) {
+    if (auto reason = cuda_device_skip_reason(); !reason.empty())
+        GTEST_SKIP() << reason;
+    namespace kir = sandy::ir::kernel_ir;
+
+    kir::Graph graph;
+    auto x = graph.addValue(tensor_type({2, 3, 3}));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 0, ""},
+        x);
+    auto expertOffsets = graph.addValue(tensor_type({2, 3}, sandy::core::DType::I32));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 1, ""},
+        expertOffsets);
+    auto weight = graph.addValue(tensor_type({2, 2, 3}));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 2, ""},
+        weight);
+    auto output = graph.addValue(tensor_type({2, 3, 2}));
+    auto* op = graph.addOp<kir::MoeMatMulKernelOp>(
+        x,
+        expertOffsets,
+        weight,
+        output,
+        true);
+    graph.setOutputs({output});
+
+    sandy::device::CudaDevice device;
+    auto compiled = device.compile(graph);
+    ASSERT_TRUE(compiled) << compiled.error();
+
+    auto xHost = make_f32_buffer(
+        "x",
+        sandy::core::Shape({2, 3, 3}),
+        {
+            1.0f, 0.0f, 2.0f,
+            0.0f, 1.0f, 1.0f,
+            2.0f, 1.0f, 0.0f,
+            1.0f, 1.0f, 1.0f,
+            2.0f, 0.0f, 1.0f,
+            0.0f, 2.0f, 3.0f,
+        });
+    auto offsetsHost = make_i32_buffer(
+        "expert_offsets",
+        sandy::core::Shape({2, 3}),
+        {
+            0, 2, 3,
+            0, 1, 3,
+        });
+    auto weightHost = make_f32_buffer(
+        "weight",
+        sandy::core::Shape({2, 2, 3}),
+        {
+            1.0f, 2.0f, 3.0f,
+            4.0f, 5.0f, 6.0f,
+            2.0f, 0.0f, 1.0f,
+            0.0f, 3.0f, 1.0f,
+        });
+    auto xBuffer = device.load(*xHost);
+    ASSERT_TRUE(xBuffer) << xBuffer.error();
+    auto offsetsBuffer = device.load(*offsetsHost);
+    ASSERT_TRUE(offsetsBuffer) << offsetsBuffer.error();
+    auto weightBuffer = device.load(*weightHost);
+    ASSERT_TRUE(weightBuffer) << weightBuffer.error();
+    auto outputBuffer = device.alloc(
+        sandy::core::TensorDesc({2, 3, 2}, sandy::core::DType::F32));
+    ASSERT_TRUE(outputBuffer) << outputBuffer.error();
+
+    std::vector<sandy::device::DeviceRunValue> inputs = {
+        tensor_view(device, *xBuffer, xHost->desc()),
+        tensor_view(device, *offsetsBuffer, offsetsHost->desc()),
+        tensor_view(device, *weightBuffer, weightHost->desc()),
+    };
+    std::vector<sandy::device::DeviceRunValue> outputs = {
+        tensor_view(
+            device,
+            *outputBuffer,
+            sandy::core::TensorDesc({2, 3, 2}, sandy::core::DType::F32)),
+    };
+    auto run = device.run(*compiled, op->id(), inputs, outputs);
+    ASSERT_TRUE(run) << run.error();
+
+    expect_f32_output(
+        device,
+        *outputBuffer,
+        {
+            7.0f, 16.0f,
+            5.0f, 11.0f,
+            4.0f, 3.0f,
+            6.0f, 15.0f,
+            5.0f, 1.0f,
+            3.0f, 9.0f,
         });
 }
 

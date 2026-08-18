@@ -214,7 +214,15 @@ Result<DeviceCompiledGraphId> CudaDevice::compile(const ir::kernel_ir::Graph& gr
                 break;
             }
             case ir::kernel_ir::OpKind::MoeGatherKernel:
-            case ir::kernel_ir::OpKind::MoeMatMulKernel:
+                kernel.program = std::monostate{};
+                break;
+            case ir::kernel_ir::OpKind::MoeMatMulKernel: {
+                const auto& matmul = static_cast<const ir::kernel_ir::MoeMatMulKernelOp&>(op);
+                kernel.program = CudaMoeMatMulProgram{
+                    matmul.transposeRhs(),
+                };
+                break;
+            }
             case ir::kernel_ir::OpKind::MoeScatterSumKernel:
                 kernel.program = std::monostate{};
                 break;
@@ -477,7 +485,9 @@ Result<void> CudaDevice::run(
         case ir::kernel_ir::OpKind::MoeGatherKernel:
             return make_error("cuda moe_gather kernel is not implemented");
         case ir::kernel_ir::OpKind::MoeMatMulKernel:
-            return make_error("cuda moe_matmul kernel is not implemented");
+            return launch_cuda_moe_matmul(
+                context,
+                std::get<CudaMoeMatMulProgram>(kernel.program));
         case ir::kernel_ir::OpKind::MoeScatterSumKernel:
             return make_error("cuda moe_scatter_sum kernel is not implemented");
     }

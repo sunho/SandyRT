@@ -8,6 +8,7 @@ build-server-cuda/
 build-cublas/
 build-cublas12/
 build-cuda/
+build-cuda-*/
 .cuda/
 .cuda12/
 .venv/

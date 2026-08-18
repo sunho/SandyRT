@@ -936,8 +936,12 @@ public:
         const AttrMap& attrs) const override
     {
         bool transposeRhs = attr_bool_or_false(attrs, "transpose_rhs");
-        int64_t rows = operands[0]->shape.dim(0);
+        int xRank = operands[0]->shape.rank();
+        int64_t rows = operands[0]->shape.dim(xRank - 2);
         int64_t outFeatures = operands[2]->shape.dim(transposeRhs ? 1 : 2);
+        if (xRank == 3) {
+            return {{core::Shape({operands[0]->shape.dim(0), rows, outFeatures}), operands[0]->dtype}};
+        }
         return {{core::Shape({rows, outFeatures}), operands[0]->dtype}};
     }
     void verify(
@@ -948,10 +952,11 @@ public:
             fprintf(stderr, "moe_matmul expects x, expert_offsets, weight\n");
             abort();
         }
-        if (operands[0]->shape.rank() != 2 ||
-            operands[1]->shape.rank() != 1 ||
+        int xRank = operands[0]->shape.rank();
+        if ((xRank != 2 && xRank != 3) ||
+            operands[1]->shape.rank() != xRank - 1 ||
             operands[2]->shape.rank() != 3) {
-            fprintf(stderr, "moe_matmul expects ranks [N,K], [E+1], [E,M,K]\n");
+            fprintf(stderr, "moe_matmul expects ranks [N,K], [E+1], [E,M,K] or [B,N,K], [B,E+1], [E,M,K]\n");
             abort();
         }
         if (!is_float_compute_dtype(operands[0]->dtype) ||
@@ -965,10 +970,24 @@ public:
             abort();
         }
         bool transposeRhs = attr_bool_or_false(attrs, "transpose_rhs");
-        int64_t lhsK = operands[0]->shape.dim(1);
+        int64_t lhsK = operands[0]->shape.dim(xRank - 1);
         int64_t rhsK = operands[2]->shape.dim(transposeRhs ? 2 : 1);
         if (lhsK >= 0 && rhsK >= 0 && lhsK != rhsK) {
             fprintf(stderr, "moe_matmul contracting dimension mismatch\n");
+            abort();
+        }
+        if (xRank == 3) {
+            int64_t xBatch = operands[0]->shape.dim(0);
+            int64_t offsetsBatch = operands[1]->shape.dim(0);
+            if (xBatch >= 0 && offsetsBatch >= 0 && xBatch != offsetsBatch) {
+                fprintf(stderr, "moe_matmul batch dimension mismatch\n");
+                abort();
+            }
+        }
+        int64_t experts = operands[2]->shape.dim(0);
+        int64_t offsetExperts = operands[1]->shape.dim(xRank - 2);
+        if (experts >= 0 && offsetExperts >= 0 && offsetExperts != experts + 1) {
+            fprintf(stderr, "moe_matmul expert_offsets dimension mismatch\n");
             abort();
         }
     }
