@@ -76,6 +76,8 @@ Result<void> runMidIROpOnCpu(
             return core::add(inputs[0], inputs[1], outputs[0]);
         case ir::mid_ir::OpKind::Mul:
             return core::mul(inputs[0], inputs[1], outputs[0]);
+        case ir::mid_ir::OpKind::Div:
+            return core::div(inputs[0], inputs[1], outputs[0]);
         case ir::mid_ir::OpKind::Sqrt:
             return core::sqrt(inputs[0], outputs[0]);
         case ir::mid_ir::OpKind::Tanh:
@@ -144,6 +146,12 @@ Result<void> runMidIROpOnCpu(
         }
         case ir::mid_ir::OpKind::Embedding:
             return core::embedding(inputs[0], inputs[1], outputs[0]);
+        case ir::mid_ir::OpKind::TopK:
+        case ir::mid_ir::OpKind::Sum:
+        case ir::mid_ir::OpKind::MoeGather:
+        case ir::mid_ir::OpKind::MoeMatMul:
+        case ir::mid_ir::OpKind::MoeScatterSum:
+            return make_error("debug MidIR CPU interpreter cannot run routing or MoE op");
         case ir::mid_ir::OpKind::RoPE: {
             auto theta = attr_float_or(op.attrs, "rope_theta", 10000.0f);
             if (!theta) return make_error(theta.error());

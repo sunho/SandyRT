@@ -23,6 +23,7 @@ enum class OpKind {
     ReLU,
     Add,
     Mul,
+    Div,
     Sqrt,
     Tanh,
     MatMul,
@@ -33,7 +34,12 @@ enum class OpKind {
     SlidingQueryKeyScore,
     Attention,
     Softmax,
+    TopK,
+    Sum,
     Embedding,
+    MoeGather,
+    MoeMatMul,
+    MoeScatterSum,
     RoPE,
     RMSNorm,
     LayerNorm,
@@ -213,6 +219,7 @@ public:
     Value* createReLU(Value* x);
     Value* createAdd(Value* lhs, Value* rhs);
     Value* createMul(Value* lhs, Value* rhs);
+    Value* createDiv(Value* lhs, Value* rhs);
     Value* createSqrt(Value* x);
     Value* createTanh(Value* x);
     Value* createMatMul(Value* lhs, Value* rhs, bool transpose_lhs = false, bool transpose_rhs = false);
@@ -225,7 +232,12 @@ public:
     Value* createAttention(Value* q, Value* k, Value* v, int64_t window = 0, float scale = -1.0f);
     Value* createAttention(Value* q, Value* k, Value* v, Value* positionOffsets, int64_t window = 0, float scale = -1.0f);
     Value* createSoftmax(Value* x, int64_t dim = -1);
+    std::vector<Value*> createTopK(Value* x, int64_t k, int64_t dim = -1);
+    Value* createSum(Value* x, int64_t dim = -1, bool keepDims = false);
     Value* createEmbedding(Value* ids, Value* weight);
+    std::vector<Value*> createMoeGather(Value* x, Value* topkIds, Value* topkWeights, int64_t numExperts, int64_t topK);
+    Value* createMoeMatMul(Value* x, Value* expertOffsets, Value* weight, bool transposeRhs = false);
+    Value* createMoeScatterSum(Value* packedOut, Value* packedWeights, Value* tokenIds, Value* reference);
     Value* createRoPE(Value* x, float theta = 10000.0f, int64_t rotary_dim = -1, bool split_half = false);
     Value* createRoPE(Value* x, Value* position_ids, float theta = 10000.0f, int64_t rotary_dim = -1, bool split_half = false);
     Value* createRMSNorm(Value* x, float epsilon = 1.0e-6f);

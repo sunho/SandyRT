@@ -84,6 +84,15 @@ BuiltinLowering BuiltinLowering::createDefault() {
         return std::vector<Value*>{builder.createMul(operands[0], operands[1])};
     });
 
+    bl.add("div", [](Builder& builder,
+                      const std::vector<Value*>& operands,
+                      const AttrMap&,
+                      int numResults) -> Result<std::vector<Value*>> {
+        auto resultCount = expect_num_results("div", numResults, 1);
+        if (!resultCount) return make_error(resultCount.error());
+        return std::vector<Value*>{builder.createDiv(operands[0], operands[1])};
+    });
+
     bl.add("sqrt", [](Builder& builder,
                        const std::vector<Value*>& operands,
                        const AttrMap&,
@@ -260,6 +269,42 @@ BuiltinLowering BuiltinLowering::createDefault() {
         return std::vector<Value*>{builder.createSoftmax(operands[0], dim)};
     });
 
+    bl.add("topk", [](Builder& builder,
+                       const std::vector<Value*>& operands,
+                       const AttrMap& attrs,
+                       int numResults) -> Result<std::vector<Value*>> {
+        auto resultCount = expect_num_results("topk", numResults, 2);
+        if (!resultCount) return make_error(resultCount.error());
+        if (operands.size() != 1)
+            return make_error("topk expects one operand");
+        int64_t k = get_int_attr_or(attrs, "k", 0);
+        if (k <= 0)
+            return make_error("topk k attr must be > 0");
+        int64_t dim = get_int_attr_or(attrs, "dim", -1);
+        return builder.createTopK(operands[0], k, dim);
+    });
+
+    bl.add("sum", [](Builder& builder,
+                      const std::vector<Value*>& operands,
+                      const AttrMap& attrs,
+                      int numResults) -> Result<std::vector<Value*>> {
+        auto resultCount = expect_num_results("sum", numResults, 1);
+        if (!resultCount) return make_error(resultCount.error());
+        if (operands.size() != 1)
+            return make_error("sum expects one operand");
+        int64_t dim = get_int_attr_or(attrs, "dim", -1);
+        bool keepDims = false;
+        auto keepDim = attrs.find("keepdim");
+        if (keepDim == attrs.end())
+            keepDim = attrs.find("keepdims");
+        if (keepDim != attrs.end()) {
+            if (keepDim->second.kind != AttrValue::Int)
+                return make_error("sum keepdim attr must be int");
+            keepDims = keepDim->second.intVal != 0;
+        }
+        return std::vector<Value*>{builder.createSum(operands[0], dim, keepDims)};
+    });
+
     bl.add("attention", [](Builder& builder,
                             const std::vector<Value*>& operands,
                             const AttrMap& attrs,
@@ -282,6 +327,50 @@ BuiltinLowering BuiltinLowering::createDefault() {
         auto resultCount = expect_num_results("embedding", numResults, 1);
         if (!resultCount) return make_error(resultCount.error());
         return std::vector<Value*>{builder.createEmbedding(operands[0], operands[1])};
+    });
+
+    bl.add("moe_gather", [](Builder& builder,
+                             const std::vector<Value*>& operands,
+                             const AttrMap& attrs,
+                             int numResults) -> Result<std::vector<Value*>> {
+        auto resultCount = expect_num_results("moe_gather", numResults, 4);
+        if (!resultCount) return make_error(resultCount.error());
+        if (operands.size() != 3)
+            return make_error("moe_gather expects x, topk_ids, topk_weights");
+        int64_t numExperts = get_int_attr_or(attrs, "num_experts", 0);
+        int64_t topK = get_int_attr_or(attrs, "top_k", 0);
+        if (numExperts <= 0 || topK <= 0)
+            return make_error("moe_gather num_experts and top_k attrs must be > 0");
+        return builder.createMoeGather(operands[0], operands[1], operands[2], numExperts, topK);
+    });
+
+    bl.add("moe_matmul", [](Builder& builder,
+                             const std::vector<Value*>& operands,
+                             const AttrMap& attrs,
+                             int numResults) -> Result<std::vector<Value*>> {
+        auto resultCount = expect_num_results("moe_matmul", numResults, 1);
+        if (!resultCount) return make_error(resultCount.error());
+        if (operands.size() != 3)
+            return make_error("moe_matmul expects x, expert_offsets, weight");
+        bool transposeRhs = false;
+        auto transposeIt = attrs.find("transpose_rhs");
+        if (transposeIt != attrs.end()) {
+            if (transposeIt->second.kind != AttrValue::Int)
+                return make_error("moe_matmul transpose_rhs attr must be int");
+            transposeRhs = transposeIt->second.intVal != 0;
+        }
+        return std::vector<Value*>{builder.createMoeMatMul(operands[0], operands[1], operands[2], transposeRhs)};
+    });
+
+    bl.add("moe_scatter_sum", [](Builder& builder,
+                                  const std::vector<Value*>& operands,
+                                  const AttrMap&,
+                                  int numResults) -> Result<std::vector<Value*>> {
+        auto resultCount = expect_num_results("moe_scatter_sum", numResults, 1);
+        if (!resultCount) return make_error(resultCount.error());
+        if (operands.size() != 4)
+            return make_error("moe_scatter_sum expects packed_out, packed_weights, token_ids, reference");
+        return std::vector<Value*>{builder.createMoeScatterSum(operands[0], operands[1], operands[2], operands[3])};
     });
 
     bl.add("rope", [](Builder& builder,

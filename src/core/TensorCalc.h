@@ -64,6 +64,7 @@ Result<void> linear(
 Result<void> relu(TensorRef x, MutableTensorRef out);
 Result<void> add(TensorRef lhs, TensorRef rhs, MutableTensorRef out);
 Result<void> mul(TensorRef lhs, TensorRef rhs, MutableTensorRef out);
+Result<void> div(TensorRef lhs, TensorRef rhs, MutableTensorRef out);
 Result<void> sqrt(TensorRef x, MutableTensorRef out);
 Result<void> tanh(TensorRef x, MutableTensorRef out);
 Result<void> matmul(TensorRef lhs, TensorRef rhs, MutableTensorRef out);
@@ -105,7 +106,35 @@ Result<void> attention(
     float scale,
     MutableTensorRef out);
 Result<void> softmax(TensorRef x, int64_t dim, MutableTensorRef out);
+Result<void> sum(TensorRef x, int64_t dim, bool keep_dims, MutableTensorRef out);
+Result<void> topk(
+    TensorRef x,
+    int64_t k,
+    int64_t dim,
+    MutableTensorRef values,
+    MutableTensorRef indices);
 Result<void> embedding(TensorRef ids, TensorRef weight, MutableTensorRef out);
+Result<void> moe_gather(
+    TensorRef x,
+    TensorRef topk_ids,
+    TensorRef topk_weights,
+    int64_t num_experts,
+    int64_t top_k,
+    MutableTensorRef packed_x,
+    MutableTensorRef packed_weights,
+    MutableTensorRef token_ids,
+    MutableTensorRef expert_offsets);
+Result<void> moe_matmul(
+    TensorRef x,
+    TensorRef expert_offsets,
+    TensorRef weight,
+    bool transpose_rhs,
+    MutableTensorRef out);
+Result<void> moe_scatter_sum(
+    TensorRef packed_out,
+    TensorRef packed_weights,
+    TensorRef token_ids,
+    MutableTensorRef out);
 Result<void> rope(TensorRef x, float theta, MutableTensorRef out);
 Result<void> rope(TensorRef x, float theta, int64_t rotary_dim, MutableTensorRef out);
 Result<void> rope(TensorRef x, float theta, int64_t rotary_dim, bool split_half, MutableTensorRef out);

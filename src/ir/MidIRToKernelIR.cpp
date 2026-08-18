@@ -139,6 +139,7 @@ ScalarOp binary_scalar_op(mid_ir::OpKind kind) {
     switch (kind) {
         case mid_ir::OpKind::Add: return ScalarOp::Add;
         case mid_ir::OpKind::Mul: return ScalarOp::Mul;
+        case mid_ir::OpKind::Div: return ScalarOp::Div;
         default: return ScalarOp::Constant;
     }
 }
@@ -525,6 +526,85 @@ Result<void> lower_softmax(
     return {};
 }
 
+Result<void> lower_topk(
+    Graph& graph,
+    const mid_ir::Op& op,
+    ValueMap& valueMap)
+{
+    if (op.operands.size() != 1 || op.results.size() != 2)
+        return make_error("topk lowering expects one operand and two results");
+    auto input = mapped_value(valueMap, op.operands[0]);
+    if (!input)
+        return make_error(input.error());
+
+    auto values = graph.addValue(value_type_from_mid(*op.results[0]));
+    auto indices = graph.addValue(value_type_from_mid(*op.results[1]));
+    valueMap[op.results[0]] = values;
+    valueMap[op.results[1]] = indices;
+
+    graph.addOp<CustomKernelOp>(
+        "topk",
+        std::vector<ValueId>{input.take()},
+        std::vector<ValueId>{values, indices},
+        op.attrs);
+    return {};
+}
+
+Result<void> lower_sum(
+    Graph& graph,
+    const mid_ir::Op& op,
+    ValueMap& valueMap)
+{
+    if (op.operands.size() != 1)
+        return make_error("sum lowering expects one operand");
+    auto input = mapped_value(valueMap, op.operands[0]);
+    if (!input)
+        return make_error(input.error());
+    auto output = add_single_result_value(graph, op, valueMap);
+    if (!output)
+        return make_error(output.error());
+    auto axis = attr_int_or(op.attrs, "dim", -1);
+    if (!axis)
+        return make_error(axis.error());
+    bool keepDims = false;
+    auto keepDim = op.attrs.find("keepdim");
+    if (keepDim == op.attrs.end())
+        keepDim = op.attrs.find("keepdims");
+    if (keepDim != op.attrs.end()) {
+        if (keepDim->second.kind != mid_ir::AttrValue::Int)
+            return make_error("sum keepdim attr must be int");
+        keepDims = keepDim->second.intVal != 0;
+    }
+
+    graph.addOp<ReductionKernelOp>(
+        ReduceOp::Sum,
+        input.take(),
+        output.take(),
+        std::vector<int64_t>{axis.take()},
+        keepDims);
+    return {};
+}
+
+Result<void> lower_custom_passthrough(
+    Graph& graph,
+    const mid_ir::Op& op,
+    ValueMap& valueMap,
+    const std::string& name)
+{
+    auto inputs = mapped_operands(valueMap, op);
+    if (!inputs)
+        return make_error(inputs.error());
+    std::vector<ValueId> outputs;
+    outputs.reserve(op.results.size());
+    for (auto* result : op.results) {
+        auto id = graph.addValue(value_type_from_mid(*result));
+        valueMap[result] = id;
+        outputs.push_back(id);
+    }
+    graph.addOp<CustomKernelOp>(name, inputs.take(), std::move(outputs), op.attrs);
+    return {};
+}
+
 Result<void> lower_paged_append(
     Graph& graph,
     const mid_ir::Op& op,
@@ -773,6 +853,7 @@ Result<void> lower_op(
             return lower_linear(graph, op, valueMap);
         case mid_ir::OpKind::Add:
         case mid_ir::OpKind::Mul:
+        case mid_ir::OpKind::Div:
             return lower_binary_elementwise(graph, op, valueMap);
         case mid_ir::OpKind::ReLU:
         case mid_ir::OpKind::Sqrt:
@@ -792,8 +873,18 @@ Result<void> lower_op(
             return lower_attention(graph, op, valueMap, options.fusor.attention);
         case mid_ir::OpKind::Softmax:
             return lower_softmax(graph, op, valueMap);
+        case mid_ir::OpKind::TopK:
+            return lower_topk(graph, op, valueMap);
+        case mid_ir::OpKind::Sum:
+            return lower_sum(graph, op, valueMap);
         case mid_ir::OpKind::Embedding:
             return lower_embedding(graph, op, valueMap);
+        case mid_ir::OpKind::MoeGather:
+            return lower_custom_passthrough(graph, op, valueMap, "moe_gather");
+        case mid_ir::OpKind::MoeMatMul:
+            return lower_custom_passthrough(graph, op, valueMap, "moe_matmul");
+        case mid_ir::OpKind::MoeScatterSum:
+            return lower_custom_passthrough(graph, op, valueMap, "moe_scatter_sum");
         case mid_ir::OpKind::RoPE:
             return lower_rope(graph, op, valueMap);
         case mid_ir::OpKind::RMSNorm:

@@ -203,6 +203,15 @@ std::shared_ptr<TestTensorBuffer> make_i32_buffer(
         i32_bytes(values));
 }
 
+std::shared_ptr<TestTensorBuffer> make_i64_buffer(
+        const std::string& name,
+        sandy::core::Shape shape,
+        std::initializer_list<int64_t> values) {
+    return std::make_shared<TestTensorBuffer>(
+        sandy::core::TensorDesc(name, std::move(shape), sandy::core::DType::I64),
+        i64_bytes(values));
+}
+
 Result<TestTensor> linear_calc(
         std::span<const uint8_t> x,
         sandy::core::TensorDesc xDesc,
@@ -461,7 +470,8 @@ Result<TestTensor> embedding_calc(
         std::span<const uint8_t> weight,
         sandy::core::TensorDesc weightDesc) {
     auto outDims = idsDesc.shape.dims();
-    outDims.push_back(weightDesc.shape.dim(1));
+    if (weightDesc.shape.rank() == 2)
+        outDims.push_back(weightDesc.shape.dim(1));
     auto out = make_output(sandy::core::TensorDesc(sandy::core::Shape(outDims), weightDesc.dtype));
     if (!out) return make_error(out.error());
     auto idsRef = tensor_ref(ids, idsDesc);
@@ -1337,6 +1347,23 @@ TEST(TensorCalcTest, EmbeddingF32WithI64IdsKeepsLeadingDims) {
     EXPECT_FLOAT_EQ(read_f32(out.data, 7), 6.0f);
 }
 
+TEST(TensorCalcTest, EmbeddingF32Rank1WeightReturnsScalarLookup) {
+    auto ids = i64_bytes({1, 3, 0, 2});
+    auto weight = f32_bytes({10.0f, 20.0f, 30.0f, 40.0f});
+
+    auto result = embedding_calc(
+        ids, sandy::core::TensorDesc(sandy::core::Shape({2, 2}), sandy::core::DType::I64),
+        weight, sandy::core::TensorDesc(sandy::core::Shape({4}), sandy::core::DType::F32));
+
+    ASSERT_TRUE(result) << result.error();
+    auto out = result.take();
+    EXPECT_EQ(out.desc.shape, sandy::core::Shape({2, 2}));
+    EXPECT_FLOAT_EQ(read_f32(out.data, 0), 20.0f);
+    EXPECT_FLOAT_EQ(read_f32(out.data, 1), 40.0f);
+    EXPECT_FLOAT_EQ(read_f32(out.data, 2), 10.0f);
+    EXPECT_FLOAT_EQ(read_f32(out.data, 3), 30.0f);
+}
+
 TEST(TensorCalcTest, TensorRefAllowsZeroElementStaticShape) {
     std::vector<uint8_t> bytes;
     auto ref = sandy::core::make_tensor_ref(
@@ -1596,6 +1623,143 @@ TEST(CpuInterpretTest, EngineRunReturnsOutput0) {
     EXPECT_EQ(it->second->desc().shape, sandy::core::Shape({1, 2}));
     EXPECT_FLOAT_EQ(read_f32(it->second->data(), 0), 18.0f);
     EXPECT_FLOAT_EQ(read_f32(it->second->data(), 1), 25.0f);
+}
+
+TEST(CpuInterpretTest, MoeGatherMatMulScatterUnbatchedRunsOnCpuDevice) {
+    sandy::ir::mid_ir::register_all_ops();
+
+    sandy::ir::mid_ir::Graph graph;
+    sandy::ir::mid_ir::Builder builder(graph);
+    auto* x = builder.createInput(0, sandy::core::Shape({3, 2}), sandy::core::DType::F32);
+    auto* ids = builder.createInput(1, sandy::core::Shape({3, 2}), sandy::core::DType::I64);
+    auto* weights = builder.createInput(2, sandy::core::Shape({3, 2}), sandy::core::DType::F32);
+    auto gathered = builder.createMoeGather(x, ids, weights, 2, 2);
+    auto* expertWeight = builder.createWeight(
+        "expert.weight",
+        sandy::core::Shape({2, 2, 2}),
+        sandy::core::DType::F32);
+    auto* projected = builder.createMoeMatMul(gathered[0], gathered[3], expertWeight, true);
+    auto* out = builder.createMoeScatterSum(projected, gathered[1], gathered[2], x);
+    sandy::ir::mid_ir::Value* outputs[] = {out};
+    builder.setOutputs(outputs);
+
+    auto engine = make_cpu_engine();
+    auto planResult = engine.compile(graph);
+    ASSERT_TRUE(planResult) << planResult.error();
+    auto plan = planResult.take();
+
+    std::vector<sandy::engine::TensorBufferPtr> inputs;
+    inputs.push_back(make_f32_buffer("x", sandy::core::Shape({3, 2}), {
+        1.0f, 2.0f,
+        3.0f, 4.0f,
+        5.0f, 6.0f,
+    }));
+    inputs.push_back(make_i64_buffer("ids", sandy::core::Shape({3, 2}), {
+        0, 1,
+        1, 0,
+        0, 0,
+    }));
+    inputs.push_back(make_f32_buffer("weights", sandy::core::Shape({3, 2}), {
+        0.25f, 0.75f,
+        0.50f, 0.50f,
+        0.10f, 0.20f,
+    }));
+
+    sandy::engine::TensorMap modelWeights;
+    modelWeights["expert.weight"] = make_f32_buffer(
+        "expert.weight",
+        sandy::core::Shape({2, 2, 2}), {
+            1.0f, 0.0f,
+            0.0f, 1.0f,
+            2.0f, 0.0f,
+            0.0f, 2.0f,
+        });
+
+    auto runResult = engine.run(*plan, inputs, modelWeights);
+    ASSERT_TRUE(runResult) << runResult.error();
+    auto outputsMap = outputs_to_map(runResult.take());
+
+    auto it = outputsMap.find("output0");
+    ASSERT_NE(it, outputsMap.end());
+    ASSERT_NE(it->second, nullptr);
+    EXPECT_EQ(it->second->desc().shape, sandy::core::Shape({3, 2}));
+    EXPECT_FLOAT_EQ(read_f32(it->second->data(), 0), 1.75f);
+    EXPECT_FLOAT_EQ(read_f32(it->second->data(), 1), 3.50f);
+    EXPECT_FLOAT_EQ(read_f32(it->second->data(), 2), 4.50f);
+    EXPECT_FLOAT_EQ(read_f32(it->second->data(), 3), 6.00f);
+    EXPECT_FLOAT_EQ(read_f32(it->second->data(), 4), 1.50f);
+    EXPECT_FLOAT_EQ(read_f32(it->second->data(), 5), 1.80f);
+}
+
+TEST(CpuInterpretTest, MoeGatherMatMulScatterBatchedRunsOnCpuDevice) {
+    sandy::ir::mid_ir::register_all_ops();
+
+    sandy::ir::mid_ir::Graph graph;
+    sandy::ir::mid_ir::Builder builder(graph);
+    auto* x = builder.createInput(0, sandy::core::Shape({2, 2, 2}), sandy::core::DType::F32);
+    auto* ids = builder.createInput(1, sandy::core::Shape({2, 2, 2}), sandy::core::DType::I64);
+    auto* weights = builder.createInput(2, sandy::core::Shape({2, 2, 2}), sandy::core::DType::F32);
+    auto gathered = builder.createMoeGather(x, ids, weights, 2, 2);
+    auto* expertWeight = builder.createWeight(
+        "expert.weight",
+        sandy::core::Shape({2, 2, 2}),
+        sandy::core::DType::F32);
+    auto* projected = builder.createMoeMatMul(gathered[0], gathered[3], expertWeight, true);
+    auto* out = builder.createMoeScatterSum(projected, gathered[1], gathered[2], x);
+    sandy::ir::mid_ir::Value* outputs[] = {out};
+    builder.setOutputs(outputs);
+
+    auto engine = make_cpu_engine();
+    auto planResult = engine.compile(graph);
+    ASSERT_TRUE(planResult) << planResult.error();
+    auto plan = planResult.take();
+
+    std::vector<sandy::engine::TensorBufferPtr> inputs;
+    inputs.push_back(make_f32_buffer("x", sandy::core::Shape({2, 2, 2}), {
+        1.0f, 2.0f,
+        3.0f, 4.0f,
+        5.0f, 6.0f,
+        7.0f, 8.0f,
+    }));
+    inputs.push_back(make_i64_buffer("ids", sandy::core::Shape({2, 2, 2}), {
+        0, 1,
+        1, 0,
+        0, 0,
+        1, 1,
+    }));
+    inputs.push_back(make_f32_buffer("weights", sandy::core::Shape({2, 2, 2}), {
+        0.25f, 0.75f,
+        0.50f, 0.50f,
+        0.10f, 0.20f,
+        0.25f, 0.25f,
+    }));
+
+    sandy::engine::TensorMap modelWeights;
+    modelWeights["expert.weight"] = make_f32_buffer(
+        "expert.weight",
+        sandy::core::Shape({2, 2, 2}), {
+            1.0f, 0.0f,
+            0.0f, 1.0f,
+            2.0f, 0.0f,
+            0.0f, 2.0f,
+        });
+
+    auto runResult = engine.run(*plan, inputs, modelWeights);
+    ASSERT_TRUE(runResult) << runResult.error();
+    auto outputsMap = outputs_to_map(runResult.take());
+
+    auto it = outputsMap.find("output0");
+    ASSERT_NE(it, outputsMap.end());
+    ASSERT_NE(it->second, nullptr);
+    EXPECT_EQ(it->second->desc().shape, sandy::core::Shape({2, 2, 2}));
+    EXPECT_FLOAT_EQ(read_f32(it->second->data(), 0), 1.75f);
+    EXPECT_FLOAT_EQ(read_f32(it->second->data(), 1), 3.50f);
+    EXPECT_FLOAT_EQ(read_f32(it->second->data(), 2), 4.50f);
+    EXPECT_FLOAT_EQ(read_f32(it->second->data(), 3), 6.00f);
+    EXPECT_FLOAT_EQ(read_f32(it->second->data(), 4), 1.50f);
+    EXPECT_FLOAT_EQ(read_f32(it->second->data(), 5), 1.80f);
+    EXPECT_FLOAT_EQ(read_f32(it->second->data(), 6), 7.00f);
+    EXPECT_FLOAT_EQ(read_f32(it->second->data(), 7), 8.00f);
 }
 
 TEST(CpuInterpretTest, LinearRank3) {

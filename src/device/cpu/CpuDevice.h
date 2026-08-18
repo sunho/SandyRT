@@ -69,6 +69,8 @@ private:
         bool transposeLhs = false;
         bool transposeRhs = false;
         int64_t axis = -1;
+        ir::kernel_ir::ReduceOp reduce = ir::kernel_ir::ReduceOp::Sum;
+        bool keepDims = false;
         int64_t window = 0;
         double scale = -1.0;
         double theta = 10000.0;
@@ -77,6 +79,7 @@ private:
         ir::kernel_ir::NormKind norm = ir::kernel_ir::NormKind::RMSNorm;
         double epsilon = 0.0;
         std::string customName;
+        ir::mid_ir::AttrMap customAttrs;
     };
 
     struct CpuDeviceGraph {

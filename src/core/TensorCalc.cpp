@@ -164,6 +164,17 @@ int64_t read_index(const TensorRef& ids, size_t index) {
     return value;
 }
 
+void store_index(const MutableTensorRef& ids, size_t index, int64_t value) {
+    size_t storageIndex = ids.storage_index(index);
+    if (ids.desc.dtype == DType::I32) {
+        int32_t narrowed = static_cast<int32_t>(value);
+        std::memcpy(ids.bytes.data() + storageIndex * sizeof(int32_t), &narrowed, sizeof(int32_t));
+        return;
+    }
+
+    std::memcpy(ids.bytes.data() + storageIndex * sizeof(int64_t), &value, sizeof(int64_t));
+}
+
 std::vector<int64_t> strides_for(const Shape& shape) {
     std::vector<int64_t> strides(static_cast<size_t>(shape.rank()), 1);
     int64_t stride = 1;
@@ -774,6 +785,10 @@ Result<void> mul(TensorRef lhs, TensorRef rhs, MutableTensorRef out) {
     return binary_elementwise(lhs, rhs, out, "mul", [](float a, float b) { return a * b; });
 }
 
+Result<void> div(TensorRef lhs, TensorRef rhs, MutableTensorRef out) {
+    return binary_elementwise(lhs, rhs, out, "div", [](float a, float b) { return a / b; });
+}
+
 Result<void> sqrt(TensorRef x, MutableTensorRef out) {
     return unary_elementwise(x, out, "sqrt", [](float v) { return std::sqrt(v); });
 }
@@ -1382,17 +1397,137 @@ Result<void> softmax(TensorRef x, int64_t dim, MutableTensorRef out) {
     return {};
 }
 
+Result<void> sum(TensorRef x, int64_t dim, bool keep_dims, MutableTensorRef out) {
+    auto xFloat = require_float_tensor(x, "sum input");
+    if (!xFloat) return make_error(xFloat.error());
+
+    int rank = x.desc.shape.rank();
+    if (rank < 1)
+        return make_error("sum input must have rank >= 1");
+    if (dim < -rank || dim >= rank)
+        return make_error("sum dim out of range");
+    if (dim < 0)
+        dim += rank;
+
+    auto outDims = x.desc.shape.dims();
+    if (keep_dims) {
+        outDims[static_cast<size_t>(dim)] = 1;
+    } else {
+        outDims.erase(outDims.begin() + dim);
+    }
+    auto output = require_output(out, Shape(outDims), x.desc.dtype, "sum");
+    if (!output) return make_error(output.error());
+
+    int64_t total = x.desc.shape.numel();
+    if (total < 0)
+        return make_error("sum input must have static shape");
+    int64_t axis = x.desc.shape.dim(static_cast<int>(dim));
+    if (axis <= 0)
+        return make_error("sum axis dimension must be static and positive");
+
+    int64_t inner = 1;
+    for (int i = static_cast<int>(dim) + 1; i < rank; i++)
+        inner *= x.desc.shape.dim(i);
+    int64_t outer = total / (axis * inner);
+
+    for (int64_t o = 0; o < outer; o++) {
+        for (int64_t i = 0; i < inner; i++) {
+            float acc = 0.0f;
+            size_t base = static_cast<size_t>(o * axis * inner + i);
+            for (int64_t a = 0; a < axis; a++)
+                acc += x.load_float(base + static_cast<size_t>(a * inner));
+            out.store_float(static_cast<size_t>(o * inner + i), acc);
+        }
+    }
+
+    return {};
+}
+
+Result<void> topk(
+        TensorRef x,
+        int64_t k,
+        int64_t dim,
+        MutableTensorRef values,
+        MutableTensorRef indices) {
+    auto xFloat = require_float_tensor(x, "topk input");
+    if (!xFloat) return make_error(xFloat.error());
+
+    int rank = x.desc.shape.rank();
+    if (rank < 1)
+        return make_error("topk input must have rank >= 1");
+    if (dim < -rank || dim >= rank)
+        return make_error("topk dim out of range");
+    if (dim < 0)
+        dim += rank;
+    if (k <= 0)
+        return make_error("topk k must be > 0");
+
+    int64_t axis = x.desc.shape.dim(static_cast<int>(dim));
+    if (axis <= 0 || k > axis)
+        return make_error("topk invalid k or axis dimension");
+
+    auto outDims = x.desc.shape.dims();
+    outDims[static_cast<size_t>(dim)] = k;
+    auto valueOutput = require_output(values, Shape(outDims), x.desc.dtype, "topk values");
+    if (!valueOutput) return make_error(valueOutput.error());
+    if (indices.desc.shape != Shape(outDims) ||
+        (indices.desc.dtype != DType::I32 && indices.desc.dtype != DType::I64)) {
+        return make_error("topk indices output shape or dtype mismatch");
+    }
+
+    int64_t total = x.desc.shape.numel();
+    if (total < 0)
+        return make_error("topk input must have static shape");
+
+    int64_t inner = 1;
+    for (int i = static_cast<int>(dim) + 1; i < rank; i++)
+        inner *= x.desc.shape.dim(i);
+    int64_t outer = total / (axis * inner);
+
+    for (int64_t o = 0; o < outer; o++) {
+        for (int64_t i = 0; i < inner; i++) {
+            std::vector<std::pair<float, int64_t>> items;
+            items.reserve(static_cast<size_t>(axis));
+            size_t base = static_cast<size_t>(o * axis * inner + i);
+            for (int64_t a = 0; a < axis; a++) {
+                items.emplace_back(
+                    x.load_float(base + static_cast<size_t>(a * inner)),
+                    a);
+            }
+
+            std::partial_sort(
+                items.begin(),
+                items.begin() + k,
+                items.end(),
+                [](const auto& lhs, const auto& rhs) {
+                    if (lhs.first != rhs.first)
+                        return lhs.first > rhs.first;
+                    return lhs.second < rhs.second;
+                });
+
+            for (int64_t r = 0; r < k; r++) {
+                size_t outIndex = static_cast<size_t>(o * k * inner + r * inner + i);
+                values.store_float(outIndex, items[static_cast<size_t>(r)].first);
+                store_index(indices, outIndex, items[static_cast<size_t>(r)].second);
+            }
+        }
+    }
+
+    return {};
+}
+
 Result<void> embedding(TensorRef ids, TensorRef weight, MutableTensorRef out) {
     if (ids.desc.dtype != DType::I32 && ids.desc.dtype != DType::I64)
         return make_error("embedding ids must be i32 or i64");
     auto weightFloat = require_float_tensor(weight, "embedding weight");
     if (!weightFloat) return make_error(weightFloat.error());
 
-    if (weight.desc.shape.rank() != 2)
-        return make_error("embedding weight must have rank 2");
+    int weightRank = weight.desc.shape.rank();
+    if (weightRank != 1 && weightRank != 2)
+        return make_error("embedding weight must have rank 1 or rank 2");
 
     int64_t vocab = weight.desc.shape.dim(0);
-    int64_t hidden = weight.desc.shape.dim(1);
+    int64_t hidden = weightRank == 2 ? weight.desc.shape.dim(1) : 1;
     if (vocab < 0 || hidden < 0)
         return make_error("embedding weight must have static shape");
 
@@ -1401,7 +1536,8 @@ Result<void> embedding(TensorRef ids, TensorRef weight, MutableTensorRef out) {
         return make_error("embedding ids must have static shape");
 
     auto outDims = ids.desc.shape.dims();
-    outDims.push_back(hidden);
+    if (weightRank == 2)
+        outDims.push_back(hidden);
     auto output = require_output(out, Shape(outDims), weight.desc.dtype, "embedding");
     if (!output) return make_error(output.error());
 
@@ -1411,11 +1547,212 @@ Result<void> embedding(TensorRef ids, TensorRef weight, MutableTensorRef out) {
             return make_error("embedding id out of range");
 
         for (int64_t h = 0; h < hidden; h++) {
-            float value = weight.load_float(static_cast<size_t>(tokenId * hidden + h));
-            out.store_float(static_cast<size_t>(i * hidden + h), value);
+            size_t weightIndex = weightRank == 2
+                ? static_cast<size_t>(tokenId * hidden + h)
+                : static_cast<size_t>(tokenId);
+            size_t outIndex = weightRank == 2
+                ? static_cast<size_t>(i * hidden + h)
+                : static_cast<size_t>(i);
+            float value = weight.load_float(weightIndex);
+            out.store_float(outIndex, value);
         }
     }
 
+    return {};
+}
+
+Result<void> moe_gather(
+        TensorRef x,
+        TensorRef topk_ids,
+        TensorRef topk_weights,
+        int64_t num_experts,
+        int64_t top_k,
+        MutableTensorRef packed_x,
+        MutableTensorRef packed_weights,
+        MutableTensorRef token_ids,
+        MutableTensorRef expert_offsets) {
+    auto xFloat = require_float_tensor(x, "moe_gather x");
+    if (!xFloat) return make_error(xFloat.error());
+    auto weightsFloat = require_float_tensor(topk_weights, "moe_gather topk_weights");
+    if (!weightsFloat) return make_error(weightsFloat.error());
+    if (topk_ids.desc.dtype != DType::I32 && topk_ids.desc.dtype != DType::I64)
+        return make_error("moe_gather topk_ids must be i32 or i64");
+    if (token_ids.desc.dtype != DType::I32 && token_ids.desc.dtype != DType::I64)
+        return make_error("moe_gather token_ids must be i32 or i64");
+    if (expert_offsets.desc.dtype != DType::I32 && expert_offsets.desc.dtype != DType::I64)
+        return make_error("moe_gather expert_offsets must be i32 or i64");
+    int xRank = x.desc.shape.rank();
+    if ((xRank != 2 && xRank != 3) ||
+        topk_ids.desc.shape.rank() != xRank ||
+        topk_weights.desc.shape.rank() != xRank) {
+        return make_error("moe_gather inputs must have rank 2 or rank 3");
+    }
+    if (num_experts <= 0 || top_k <= 0)
+        return make_error("moe_gather num_experts and top_k must be positive");
+
+    int64_t batch = xRank == 3 ? x.desc.shape.dim(0) : 1;
+    int64_t seq = xRank == 3 ? x.desc.shape.dim(1) : x.desc.shape.dim(0);
+    int64_t hidden = x.desc.shape.dim(xRank - 1);
+    int64_t tokens = batch >= 0 && seq >= 0 ? batch * seq : Shape::kDynamic;
+    if (tokens < 0 || hidden <= 0)
+        return make_error("moe_gather x must have static [tokens, hidden] or [batch, tokens, hidden] shape");
+    for (int axis = 0; axis < xRank - 1; axis++) {
+        if (x.desc.shape.dim(axis) != topk_ids.desc.shape.dim(axis) ||
+            x.desc.shape.dim(axis) != topk_weights.desc.shape.dim(axis)) {
+            return make_error("moe_gather leading dimension mismatch");
+        }
+    }
+    if (topk_ids.desc.shape.dim(xRank - 1) != top_k ||
+        topk_weights.desc.shape.dim(xRank - 1) != top_k) {
+        return make_error("moe_gather top_k dimension mismatch");
+    }
+    int64_t rows = tokens * top_k;
+
+    auto packedCheck = require_output(
+        packed_x, Shape({rows, hidden}), x.desc.dtype, "moe_gather packed_x");
+    if (!packedCheck) return make_error(packedCheck.error());
+    auto weightsCheck = require_output(
+        packed_weights, Shape({rows}), topk_weights.desc.dtype, "moe_gather packed_weights");
+    if (!weightsCheck) return make_error(weightsCheck.error());
+    if (token_ids.desc.shape != Shape({rows}) ||
+        expert_offsets.desc.shape != Shape({num_experts + 1})) {
+        return make_error("moe_gather metadata output shape mismatch");
+    }
+
+    int64_t row = 0;
+    for (int64_t expert = 0; expert < num_experts; expert++) {
+        store_index(expert_offsets, static_cast<size_t>(expert), row);
+        for (int64_t token = 0; token < tokens; token++) {
+            for (int64_t slot = 0; slot < top_k; slot++) {
+                auto routeIndex = static_cast<size_t>(token * top_k + slot);
+                int64_t routedExpert = read_index(topk_ids, routeIndex);
+                if (routedExpert < 0 || routedExpert >= num_experts)
+                    return make_error("moe_gather topk expert id out of range");
+                if (routedExpert != expert)
+                    continue;
+
+                for (int64_t h = 0; h < hidden; h++) {
+                    packed_x.store_float(
+                        static_cast<size_t>(row * hidden + h),
+                        x.load_float(static_cast<size_t>(token * hidden + h)));
+                }
+                packed_weights.store_float(
+                    static_cast<size_t>(row),
+                    topk_weights.load_float(routeIndex));
+                store_index(token_ids, static_cast<size_t>(row), token);
+                row++;
+            }
+        }
+    }
+    store_index(expert_offsets, static_cast<size_t>(num_experts), row);
+    if (row != rows)
+        return make_error("moe_gather routed row count mismatch");
+    return {};
+}
+
+Result<void> moe_matmul(
+        TensorRef x,
+        TensorRef expert_offsets,
+        TensorRef weight,
+        bool transpose_rhs,
+        MutableTensorRef out) {
+    auto xFloat = require_float_tensor(x, "moe_matmul x");
+    if (!xFloat) return make_error(xFloat.error());
+    auto weightFloat = require_float_tensor(weight, "moe_matmul weight");
+    if (!weightFloat) return make_error(weightFloat.error());
+    if (x.desc.dtype != weight.desc.dtype)
+        return make_error("moe_matmul x and weight must have same dtype");
+    if (expert_offsets.desc.dtype != DType::I32 && expert_offsets.desc.dtype != DType::I64)
+        return make_error("moe_matmul expert_offsets must be i32 or i64");
+    if (x.desc.shape.rank() != 2 || expert_offsets.desc.shape.rank() != 1 ||
+        weight.desc.shape.rank() != 3) {
+        return make_error("moe_matmul expects ranks [N,K], [E+1], [E,M,K]");
+    }
+
+    int64_t rows = x.desc.shape.dim(0);
+    int64_t inFeatures = x.desc.shape.dim(1);
+    int64_t experts = weight.desc.shape.dim(0);
+    int64_t outFeatures = transpose_rhs ? weight.desc.shape.dim(1) : weight.desc.shape.dim(2);
+    int64_t rhsK = transpose_rhs ? weight.desc.shape.dim(2) : weight.desc.shape.dim(1);
+    if (rows < 0 || inFeatures <= 0 || experts <= 0 || outFeatures <= 0)
+        return make_error("moe_matmul expects static positive dimensions");
+    if (rhsK != inFeatures)
+        return make_error("moe_matmul contracting dimension mismatch");
+
+    auto output = require_output(out, Shape({rows, outFeatures}), x.desc.dtype, "moe_matmul");
+    if (!output) return make_error(output.error());
+
+    for (int64_t expert = 0; expert < experts; expert++) {
+        int64_t begin = read_index(expert_offsets, static_cast<size_t>(expert));
+        int64_t end = read_index(expert_offsets, static_cast<size_t>(expert + 1));
+        if (begin < 0 || end < begin || end > rows)
+            return make_error("moe_matmul invalid expert offsets");
+        for (int64_t row = begin; row < end; row++) {
+            for (int64_t o = 0; o < outFeatures; o++) {
+                float acc = 0.0f;
+                for (int64_t i = 0; i < inFeatures; i++) {
+                    float xv = x.load_float(static_cast<size_t>(row * inFeatures + i));
+                    size_t wIndex = transpose_rhs
+                        ? static_cast<size_t>((expert * outFeatures + o) * inFeatures + i)
+                        : static_cast<size_t>((expert * inFeatures + i) * outFeatures + o);
+                    acc += xv * weight.load_float(wIndex);
+                }
+                out.store_float(static_cast<size_t>(row * outFeatures + o), acc);
+            }
+        }
+    }
+    return {};
+}
+
+Result<void> moe_scatter_sum(
+        TensorRef packed_out,
+        TensorRef packed_weights,
+        TensorRef token_ids,
+        MutableTensorRef out) {
+    auto packedFloat = require_float_tensor(packed_out, "moe_scatter_sum packed_out");
+    if (!packedFloat) return make_error(packedFloat.error());
+    auto weightsFloat = require_float_tensor(packed_weights, "moe_scatter_sum packed_weights");
+    if (!weightsFloat) return make_error(weightsFloat.error());
+    if (token_ids.desc.dtype != DType::I32 && token_ids.desc.dtype != DType::I64)
+        return make_error("moe_scatter_sum token_ids must be i32 or i64");
+    int outRank = out.desc.shape.rank();
+    if (packed_out.desc.shape.rank() != 2 || packed_weights.desc.shape.rank() != 1 ||
+        token_ids.desc.shape.rank() != 1 || (outRank != 2 && outRank != 3)) {
+        return make_error("moe_scatter_sum expects ranks [N,H], [N], [N], [T,H] or [B,T,H]");
+    }
+    if (packed_out.desc.dtype != packed_weights.desc.dtype ||
+        packed_out.desc.dtype != out.desc.dtype) {
+        return make_error("moe_scatter_sum dtype mismatch");
+    }
+
+    int64_t rows = packed_out.desc.shape.dim(0);
+    int64_t hidden = packed_out.desc.shape.dim(1);
+    int64_t batch = outRank == 3 ? out.desc.shape.dim(0) : 1;
+    int64_t seq = outRank == 3 ? out.desc.shape.dim(1) : out.desc.shape.dim(0);
+    int64_t tokens = batch >= 0 && seq >= 0 ? batch * seq : Shape::kDynamic;
+    if (rows < 0 || hidden <= 0 || tokens < 0)
+        return make_error("moe_scatter_sum expects static shapes");
+    if (packed_weights.desc.shape.dim(0) != rows || token_ids.desc.shape.dim(0) != rows ||
+        out.desc.shape.dim(outRank - 1) != hidden) {
+        return make_error("moe_scatter_sum shape mismatch");
+    }
+
+    int64_t outNumel = out.desc.shape.numel();
+    for (int64_t i = 0; i < outNumel; i++)
+        out.store_float(static_cast<size_t>(i), 0.0f);
+
+    for (int64_t row = 0; row < rows; row++) {
+        int64_t token = read_index(token_ids, static_cast<size_t>(row));
+        if (token < 0 || token >= tokens)
+            return make_error("moe_scatter_sum token id out of range");
+        float routeWeight = packed_weights.load_float(static_cast<size_t>(row));
+        for (int64_t h = 0; h < hidden; h++) {
+            auto dst = static_cast<size_t>(token * hidden + h);
+            float acc = out.load_float(dst);
+            acc += routeWeight * packed_out.load_float(static_cast<size_t>(row * hidden + h));
+            out.store_float(dst, acc);
+        }
+    }
     return {};
 }
 

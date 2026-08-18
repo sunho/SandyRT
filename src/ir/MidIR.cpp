@@ -22,6 +22,7 @@ const char* op_kind_name(OpKind kind) {
         case OpKind::ReLU:      return "relu";
         case OpKind::Add:       return "add";
         case OpKind::Mul:       return "mul";
+        case OpKind::Div:       return "div";
         case OpKind::Sqrt:      return "sqrt";
         case OpKind::Tanh:      return "tanh";
         case OpKind::MatMul:    return "matmul";
@@ -32,7 +33,12 @@ const char* op_kind_name(OpKind kind) {
         case OpKind::SlidingQueryKeyScore: return "sliding_query_key_score";
         case OpKind::Attention: return "attention";
         case OpKind::Softmax:   return "softmax";
+        case OpKind::TopK:      return "topk";
+        case OpKind::Sum:       return "sum";
         case OpKind::Embedding: return "embedding";
+        case OpKind::MoeGather: return "moe_gather";
+        case OpKind::MoeMatMul: return "moe_matmul";
+        case OpKind::MoeScatterSum: return "moe_scatter_sum";
         case OpKind::RoPE:      return "rope";
         case OpKind::RMSNorm:   return "rms_norm";
         case OpKind::LayerNorm: return "layer_norm";
@@ -724,6 +730,304 @@ public:
     }
 };
 
+class TopKOpDef : public OpDef {
+public:
+    OpKind kind() const override { return OpKind::TopK; }
+    const char* name() const override { return "topk"; }
+    std::vector<ValueType> infer_types(
+        std::span<Value* const> operands,
+        const AttrMap& attrs) const override
+    {
+        auto dims = operands[0]->shape.dims();
+        int rank = operands[0]->shape.rank();
+        int64_t dim = -1;
+        auto dimIt = attrs.find("dim");
+        if (dimIt != attrs.end())
+            dim = dimIt->second.intVal;
+        if (dim < 0)
+            dim += rank;
+        auto k = attrs.at("k").intVal;
+        dims[static_cast<size_t>(dim)] = k;
+        return {
+            ValueType::tensor(core::Shape(dims), operands[0]->dtype),
+            ValueType::tensor(core::Shape(std::move(dims)), core::DType::I64),
+        };
+    }
+    void verify(
+        std::span<Value* const> operands,
+        const AttrMap& attrs) const override
+    {
+        if (operands.size() != 1) {
+            fprintf(stderr, "topk expects 1 operand, got %zu\n", operands.size());
+            abort();
+        }
+        if (!is_float_compute_dtype(operands[0]->dtype)) {
+            fprintf(stderr, "topk input must be a supported floating dtype\n");
+            abort();
+        }
+        int rank = operands[0]->shape.rank();
+        if (rank < 1) {
+            fprintf(stderr, "topk input must have rank >= 1\n");
+            abort();
+        }
+        auto k = attrs.find("k");
+        if (k == attrs.end() || k->second.kind != AttrValue::Int || k->second.intVal <= 0) {
+            fprintf(stderr, "topk k attr must be a positive int\n");
+            abort();
+        }
+        auto dim = attrs.find("dim");
+        if (dim != attrs.end() && dim->second.kind != AttrValue::Int) {
+            fprintf(stderr, "topk dim attr must be int\n");
+            abort();
+        }
+        int64_t dimValue = dim == attrs.end() ? -1 : dim->second.intVal;
+        if (dimValue < -rank || dimValue >= rank) {
+            fprintf(stderr, "topk dim out of range\n");
+            abort();
+        }
+        int64_t axis = dimValue < 0 ? dimValue + rank : dimValue;
+        int64_t axisDim = operands[0]->shape.dim(static_cast<int>(axis));
+        if (axisDim >= 0 && k->second.intVal > axisDim) {
+            fprintf(stderr, "topk k must be <= selected dimension\n");
+            abort();
+        }
+    }
+};
+
+class SumOpDef : public OpDef {
+public:
+    OpKind kind() const override { return OpKind::Sum; }
+    const char* name() const override { return "sum"; }
+    std::vector<ValueType> infer_types(
+        std::span<Value* const> operands,
+        const AttrMap& attrs) const override
+    {
+        auto dims = operands[0]->shape.dims();
+        int rank = operands[0]->shape.rank();
+        int64_t dim = -1;
+        auto dimIt = attrs.find("dim");
+        if (dimIt != attrs.end())
+            dim = dimIt->second.intVal;
+        if (dim < 0)
+            dim += rank;
+        bool keepDims = attr_bool_or_false(attrs, "keepdim") || attr_bool_or_false(attrs, "keepdims");
+        if (keepDims) {
+            dims[static_cast<size_t>(dim)] = 1;
+        } else {
+            dims.erase(dims.begin() + dim);
+        }
+        return {{core::Shape(std::move(dims)), operands[0]->dtype}};
+    }
+    void verify(
+        std::span<Value* const> operands,
+        const AttrMap& attrs) const override
+    {
+        if (operands.size() != 1) {
+            fprintf(stderr, "sum expects 1 operand, got %zu\n", operands.size());
+            abort();
+        }
+        if (!is_float_compute_dtype(operands[0]->dtype)) {
+            fprintf(stderr, "sum input must be a supported floating dtype\n");
+            abort();
+        }
+        int rank = operands[0]->shape.rank();
+        if (rank < 1) {
+            fprintf(stderr, "sum input must have rank >= 1\n");
+            abort();
+        }
+        auto dim = attrs.find("dim");
+        if (dim != attrs.end() && dim->second.kind != AttrValue::Int) {
+            fprintf(stderr, "sum dim attr must be int\n");
+            abort();
+        }
+        int64_t dimValue = dim == attrs.end() ? -1 : dim->second.intVal;
+        if (dimValue < -rank || dimValue >= rank) {
+            fprintf(stderr, "sum dim out of range\n");
+            abort();
+        }
+    }
+};
+
+class MoeGatherOpDef : public OpDef {
+public:
+    OpKind kind() const override { return OpKind::MoeGather; }
+    const char* name() const override { return "moe_gather"; }
+    std::vector<ValueType> infer_types(
+        std::span<Value* const> operands,
+        const AttrMap& attrs) const override
+    {
+        int64_t topK = attrs.at("top_k").intVal;
+        int64_t numExperts = attrs.at("num_experts").intVal;
+        int xRank = operands[0]->shape.rank();
+        int64_t tokens = operands[0]->shape.dim(0);
+        if (xRank == 3) {
+            int64_t seq = operands[0]->shape.dim(1);
+            tokens = tokens >= 0 && seq >= 0 ? tokens * seq : core::Shape::kDynamic;
+        }
+        int64_t rows = tokens >= 0 ? tokens * topK : core::Shape::kDynamic;
+        int64_t hidden = operands[0]->shape.dim(xRank - 1);
+        return {
+            ValueType::tensor(core::Shape({rows, hidden}), operands[0]->dtype),
+            ValueType::tensor(core::Shape({rows}), operands[2]->dtype),
+            ValueType::tensor(core::Shape({rows}), core::DType::I64),
+            ValueType::tensor(core::Shape({numExperts + 1}), core::DType::I64),
+        };
+    }
+    void verify(
+        std::span<Value* const> operands,
+        const AttrMap& attrs) const override
+    {
+        if (operands.size() != 3) {
+            fprintf(stderr, "moe_gather expects x, topk_ids, topk_weights\n");
+            abort();
+        }
+        int xRank = operands[0]->shape.rank();
+        if ((xRank != 2 && xRank != 3) ||
+            operands[1]->shape.rank() != xRank ||
+            operands[2]->shape.rank() != xRank) {
+            fprintf(stderr, "moe_gather inputs must be rank 2 or rank 3\n");
+            abort();
+        }
+        if (operands[1]->dtype != core::DType::I32 &&
+            operands[1]->dtype != core::DType::I64) {
+            fprintf(stderr, "moe_gather topk_ids must be i32 or i64\n");
+            abort();
+        }
+        if (!is_float_compute_dtype(operands[0]->dtype) ||
+            !is_float_compute_dtype(operands[2]->dtype)) {
+            fprintf(stderr, "moe_gather x and topk_weights must be floating tensors\n");
+            abort();
+        }
+        auto numExperts = attrs.find("num_experts");
+        auto topK = attrs.find("top_k");
+        if (numExperts == attrs.end() || numExperts->second.kind != AttrValue::Int ||
+            numExperts->second.intVal <= 0 ||
+            topK == attrs.end() || topK->second.kind != AttrValue::Int ||
+            topK->second.intVal <= 0) {
+            fprintf(stderr, "moe_gather num_experts and top_k attrs must be positive ints\n");
+            abort();
+        }
+        for (int axis = 0; axis < xRank - 1; axis++) {
+            int64_t xDim = operands[0]->shape.dim(axis);
+            int64_t idsDim = operands[1]->shape.dim(axis);
+            int64_t weightsDim = operands[2]->shape.dim(axis);
+            if ((xDim >= 0 && idsDim >= 0 && xDim != idsDim) ||
+                (xDim >= 0 && weightsDim >= 0 && xDim != weightsDim)) {
+                fprintf(stderr, "moe_gather leading dimension mismatch\n");
+                abort();
+            }
+        }
+        int64_t idsK = operands[1]->shape.dim(xRank - 1);
+        int64_t weightsK = operands[2]->shape.dim(xRank - 1);
+        if ((idsK >= 0 && idsK != topK->second.intVal) ||
+            (weightsK >= 0 && weightsK != topK->second.intVal)) {
+            fprintf(stderr, "moe_gather top_k dimension mismatch\n");
+            abort();
+        }
+    }
+};
+
+class MoeMatMulOpDef : public OpDef {
+public:
+    OpKind kind() const override { return OpKind::MoeMatMul; }
+    const char* name() const override { return "moe_matmul"; }
+    std::vector<ValueType> infer_types(
+        std::span<Value* const> operands,
+        const AttrMap& attrs) const override
+    {
+        bool transposeRhs = attr_bool_or_false(attrs, "transpose_rhs");
+        int64_t rows = operands[0]->shape.dim(0);
+        int64_t outFeatures = operands[2]->shape.dim(transposeRhs ? 1 : 2);
+        return {{core::Shape({rows, outFeatures}), operands[0]->dtype}};
+    }
+    void verify(
+        std::span<Value* const> operands,
+        const AttrMap& attrs) const override
+    {
+        if (operands.size() != 3) {
+            fprintf(stderr, "moe_matmul expects x, expert_offsets, weight\n");
+            abort();
+        }
+        if (operands[0]->shape.rank() != 2 ||
+            operands[1]->shape.rank() != 1 ||
+            operands[2]->shape.rank() != 3) {
+            fprintf(stderr, "moe_matmul expects ranks [N,K], [E+1], [E,M,K]\n");
+            abort();
+        }
+        if (!is_float_compute_dtype(operands[0]->dtype) ||
+            operands[0]->dtype != operands[2]->dtype) {
+            fprintf(stderr, "moe_matmul x and weight must have the same floating dtype\n");
+            abort();
+        }
+        if (operands[1]->dtype != core::DType::I32 &&
+            operands[1]->dtype != core::DType::I64) {
+            fprintf(stderr, "moe_matmul expert_offsets must be i32 or i64\n");
+            abort();
+        }
+        bool transposeRhs = attr_bool_or_false(attrs, "transpose_rhs");
+        int64_t lhsK = operands[0]->shape.dim(1);
+        int64_t rhsK = operands[2]->shape.dim(transposeRhs ? 2 : 1);
+        if (lhsK >= 0 && rhsK >= 0 && lhsK != rhsK) {
+            fprintf(stderr, "moe_matmul contracting dimension mismatch\n");
+            abort();
+        }
+    }
+};
+
+class MoeScatterSumOpDef : public OpDef {
+public:
+    OpKind kind() const override { return OpKind::MoeScatterSum; }
+    const char* name() const override { return "moe_scatter_sum"; }
+    std::vector<ValueType> infer_types(
+        std::span<Value* const> operands,
+        const AttrMap&) const override
+    {
+        return {{operands[3]->shape, operands[3]->dtype}};
+    }
+    void verify(
+        std::span<Value* const> operands,
+        const AttrMap&) const override
+    {
+        if (operands.size() != 4) {
+            fprintf(stderr, "moe_scatter_sum expects packed_out, packed_weights, token_ids, reference\n");
+            abort();
+        }
+        int outRank = operands[3]->shape.rank();
+        if (operands[0]->shape.rank() != 2 ||
+            operands[1]->shape.rank() != 1 ||
+            operands[2]->shape.rank() != 1 ||
+            (outRank != 2 && outRank != 3)) {
+            fprintf(stderr, "moe_scatter_sum expects ranks [N,H], [N], [N], [T,H] or [B,T,H]\n");
+            abort();
+        }
+        if (operands[0]->dtype != operands[3]->dtype ||
+            operands[1]->dtype != operands[3]->dtype ||
+            !is_float_compute_dtype(operands[0]->dtype)) {
+            fprintf(stderr, "moe_scatter_sum floating dtype mismatch\n");
+            abort();
+        }
+        if (operands[2]->dtype != core::DType::I32 &&
+            operands[2]->dtype != core::DType::I64) {
+            fprintf(stderr, "moe_scatter_sum token_ids must be i32 or i64\n");
+            abort();
+        }
+        int64_t rows = operands[0]->shape.dim(0);
+        int64_t weightRows = operands[1]->shape.dim(0);
+        int64_t tokenRows = operands[2]->shape.dim(0);
+        if ((rows >= 0 && weightRows >= 0 && rows != weightRows) ||
+            (rows >= 0 && tokenRows >= 0 && rows != tokenRows)) {
+            fprintf(stderr, "moe_scatter_sum row dimension mismatch\n");
+            abort();
+        }
+        int64_t hidden = operands[0]->shape.dim(1);
+        int64_t outHidden = operands[3]->shape.dim(outRank - 1);
+        if (hidden >= 0 && outHidden >= 0 && hidden != outHidden) {
+            fprintf(stderr, "moe_scatter_sum hidden dimension mismatch\n");
+            abort();
+        }
+    }
+};
+
 class PagedAppendOpDef : public OpDef {
 public:
     OpKind kind() const override { return OpKind::PagedAppend; }
@@ -788,7 +1092,8 @@ public:
         const AttrMap&) const override
     {
         auto dims = operands[0]->shape.dims();
-        dims.push_back(operands[1]->shape.dim(1));
+        if (operands[1]->shape.rank() == 2)
+            dims.push_back(operands[1]->shape.dim(1));
         return {{core::Shape(dims), operands[1]->dtype}};
     }
     void verify(
@@ -809,8 +1114,8 @@ public:
             fprintf(stderr, "embedding weight must be a supported floating dtype\n");
             abort();
         }
-        if (operands[1]->shape.rank() != 2) {
-            fprintf(stderr, "embedding weight must have rank 2\n");
+        if (operands[1]->shape.rank() != 1 && operands[1]->shape.rank() != 2) {
+            fprintf(stderr, "embedding weight must have rank 1 or rank 2\n");
             abort();
         }
     }
@@ -995,6 +1300,7 @@ void register_all_ops() {
     static LinearOpDef linear_def;
     static BinaryElementwiseOpDef add_def(OpKind::Add, "add");
     static BinaryElementwiseOpDef mul_def(OpKind::Mul, "mul");
+    static BinaryElementwiseOpDef div_def(OpKind::Div, "div");
     static UnaryElementwiseOpDef sqrt_def(OpKind::Sqrt, "sqrt");
     static UnaryElementwiseOpDef tanh_def(OpKind::Tanh, "tanh");
     static MatMulOpDef matmul_def;
@@ -1005,7 +1311,12 @@ void register_all_ops() {
     static SlidingQueryKeyScoreOpDef sliding_query_key_score_def;
     static AttentionOpDef attention_def;
     static SoftmaxOpDef softmax_def;
+    static TopKOpDef topk_def;
+    static SumOpDef sum_def;
     static EmbeddingOpDef embedding_def;
+    static MoeGatherOpDef moe_gather_def;
+    static MoeMatMulOpDef moe_matmul_def;
+    static MoeScatterSumOpDef moe_scatter_sum_def;
     static RoPEOpDef rope_def;
     static RMSNormOpDef rms_norm_def;
     static LayerNormOpDef layer_norm_def;
@@ -1015,6 +1326,7 @@ void register_all_ops() {
     reg.add(&linear_def);
     reg.add(&add_def);
     reg.add(&mul_def);
+    reg.add(&div_def);
     reg.add(&sqrt_def);
     reg.add(&tanh_def);
     reg.add(&matmul_def);
@@ -1025,7 +1337,12 @@ void register_all_ops() {
     reg.add(&sliding_query_key_score_def);
     reg.add(&attention_def);
     reg.add(&softmax_def);
+    reg.add(&topk_def);
+    reg.add(&sum_def);
     reg.add(&embedding_def);
+    reg.add(&moe_gather_def);
+    reg.add(&moe_matmul_def);
+    reg.add(&moe_scatter_sum_def);
     reg.add(&rope_def);
     reg.add(&rms_norm_def);
     reg.add(&layer_norm_def);
@@ -1391,6 +1708,11 @@ Value* Builder::createMul(Value* lhs, Value* rhs) {
     return createOp(OpKind::Mul, operands)[0];
 }
 
+Value* Builder::createDiv(Value* lhs, Value* rhs) {
+    Value* operands[] = {lhs, rhs};
+    return createOp(OpKind::Div, operands)[0];
+}
+
 Value* Builder::createSqrt(Value* x) {
     Value* operands[] = {x};
     return createOp(OpKind::Sqrt, operands)[0];
@@ -1478,9 +1800,60 @@ Value* Builder::createSoftmax(Value* x, int64_t dim) {
     return createOp(OpKind::Softmax, operands, attrs)[0];
 }
 
+std::vector<Value*> Builder::createTopK(Value* x, int64_t k, int64_t dim) {
+    Value* operands[] = {x};
+    AttrMap attrs;
+    attrs["k"] = AttrValue::make_int(k);
+    attrs["dim"] = AttrValue::make_int(dim);
+    return createOp(OpKind::TopK, operands, attrs, 2);
+}
+
+Value* Builder::createSum(Value* x, int64_t dim, bool keepDims) {
+    Value* operands[] = {x};
+    AttrMap attrs;
+    attrs["dim"] = AttrValue::make_int(dim);
+    if (keepDims)
+        attrs["keepdim"] = AttrValue::make_int(1);
+    return createOp(OpKind::Sum, operands, attrs)[0];
+}
+
 Value* Builder::createEmbedding(Value* ids, Value* weight) {
     Value* operands[] = {ids, weight};
     return createOp(OpKind::Embedding, operands)[0];
+}
+
+std::vector<Value*> Builder::createMoeGather(
+        Value* x,
+        Value* topkIds,
+        Value* topkWeights,
+        int64_t numExperts,
+        int64_t topK) {
+    Value* operands[] = {x, topkIds, topkWeights};
+    AttrMap attrs;
+    attrs["num_experts"] = AttrValue::make_int(numExperts);
+    attrs["top_k"] = AttrValue::make_int(topK);
+    return createOp(OpKind::MoeGather, operands, attrs, 4);
+}
+
+Value* Builder::createMoeMatMul(
+        Value* x,
+        Value* expertOffsets,
+        Value* weight,
+        bool transposeRhs) {
+    Value* operands[] = {x, expertOffsets, weight};
+    AttrMap attrs;
+    if (transposeRhs)
+        attrs["transpose_rhs"] = AttrValue::make_int(1);
+    return createOp(OpKind::MoeMatMul, operands, attrs)[0];
+}
+
+Value* Builder::createMoeScatterSum(
+        Value* packedOut,
+        Value* packedWeights,
+        Value* tokenIds,
+        Value* reference) {
+    Value* operands[] = {packedOut, packedWeights, tokenIds, reference};
+    return createOp(OpKind::MoeScatterSum, operands)[0];
 }
 
 Value* Builder::createRoPE(Value* x, float theta, int64_t rotary_dim, bool split_half) {
