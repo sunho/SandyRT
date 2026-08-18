@@ -91,10 +91,6 @@ struct CudaAttentionProgram {
     double scale = -1.0;
 };
 
-struct CudaCustomProgram {
-    std::string customName;
-};
-
 Result<void> launch_cuda_elementwise(
     const CudaLaunchContext& context,
     const CudaElementwiseProgram& program);
@@ -132,9 +128,5 @@ Result<void> launch_cuda_attention(
 Result<void> launch_cuda_reduction(
     const CudaLaunchContext& context,
     const CudaReductionProgram& program);
-
-Result<void> launch_cuda_custom(
-    const CudaLaunchContext& context,
-    const CudaCustomProgram& program);
 
 } // namespace sandy::device

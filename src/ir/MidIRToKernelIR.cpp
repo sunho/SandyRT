@@ -440,11 +440,12 @@ Result<void> lower_linear(
     if (!output)
         return make_error(output.error());
 
-    graph.addOp<CustomKernelOp>(
-        "linear",
-        inputs.take(),
-        std::vector<ValueId>{output.take()},
-        op.attrs);
+    auto inputValues = inputs.take();
+    graph.addOp<LinearKernelOp>(
+        inputValues[0],
+        inputValues[1],
+        inputValues[2],
+        output.take());
     return {};
 }
 
@@ -542,11 +543,13 @@ Result<void> lower_topk(
     valueMap[op.results[0]] = values;
     valueMap[op.results[1]] = indices;
 
-    graph.addOp<CustomKernelOp>(
-        "topk",
-        std::vector<ValueId>{input.take()},
-        std::vector<ValueId>{values, indices},
-        op.attrs);
+    auto k = attr_int_or(op.attrs, "k", 0);
+    if (!k)
+        return make_error(k.error());
+    auto axis = attr_int_or(op.attrs, "dim", -1);
+    if (!axis)
+        return make_error(axis.error());
+    graph.addOp<TopKKernelOp>(input.take(), values, indices, k.take(), axis.take());
     return {};
 }
 
@@ -585,15 +588,17 @@ Result<void> lower_sum(
     return {};
 }
 
-Result<void> lower_custom_passthrough(
+Result<void> lower_moe_gather(
     Graph& graph,
     const mid_ir::Op& op,
-    ValueMap& valueMap,
-    const std::string& name)
+    ValueMap& valueMap)
 {
     auto inputs = mapped_operands(valueMap, op);
     if (!inputs)
         return make_error(inputs.error());
+    auto inputValues = inputs.take();
+    if (inputValues.size() != 3 || op.results.size() != 4)
+        return make_error("moe_gather lowering expects three operands and four results");
     std::vector<ValueId> outputs;
     outputs.reserve(op.results.size());
     for (auto* result : op.results) {
@@ -601,7 +606,75 @@ Result<void> lower_custom_passthrough(
         valueMap[result] = id;
         outputs.push_back(id);
     }
-    graph.addOp<CustomKernelOp>(name, inputs.take(), std::move(outputs), op.attrs);
+    auto numExperts = attr_int_or(op.attrs, "num_experts", 0);
+    if (!numExperts)
+        return make_error(numExperts.error());
+    auto topK = attr_int_or(op.attrs, "top_k", 0);
+    if (!topK)
+        return make_error(topK.error());
+    graph.addOp<MoeGatherKernelOp>(
+        inputValues[0],
+        inputValues[1],
+        inputValues[2],
+        outputs[0],
+        outputs[1],
+        outputs[2],
+        outputs[3],
+        numExperts.take(),
+        topK.take());
+    return {};
+}
+
+Result<void> lower_moe_matmul(
+    Graph& graph,
+    const mid_ir::Op& op,
+    ValueMap& valueMap)
+{
+    auto inputs = mapped_operands(valueMap, op);
+    if (!inputs)
+        return make_error(inputs.error());
+    auto inputValues = inputs.take();
+    if (inputValues.size() != 3)
+        return make_error("moe_matmul lowering expects three operands");
+    auto output = add_single_result_value(graph, op, valueMap);
+    if (!output)
+        return make_error(output.error());
+    bool transposeRhs = false;
+    auto transpose = op.attrs.find("transpose_rhs");
+    if (transpose != op.attrs.end()) {
+        if (transpose->second.kind != mid_ir::AttrValue::Int)
+            return make_error("moe_matmul transpose_rhs attr must be int");
+        transposeRhs = transpose->second.intVal != 0;
+    }
+    graph.addOp<MoeMatMulKernelOp>(
+        inputValues[0],
+        inputValues[1],
+        inputValues[2],
+        output.take(),
+        transposeRhs);
+    return {};
+}
+
+Result<void> lower_moe_scatter_sum(
+    Graph& graph,
+    const mid_ir::Op& op,
+    ValueMap& valueMap)
+{
+    auto inputs = mapped_operands(valueMap, op);
+    if (!inputs)
+        return make_error(inputs.error());
+    auto inputValues = inputs.take();
+    if (inputValues.size() != 4)
+        return make_error("moe_scatter_sum lowering expects four operands");
+    auto output = add_single_result_value(graph, op, valueMap);
+    if (!output)
+        return make_error(output.error());
+    graph.addOp<MoeScatterSumKernelOp>(
+        inputValues[0],
+        inputValues[1],
+        inputValues[2],
+        inputValues[3],
+        output.take());
     return {};
 }
 
@@ -880,11 +953,11 @@ Result<void> lower_op(
         case mid_ir::OpKind::Embedding:
             return lower_embedding(graph, op, valueMap);
         case mid_ir::OpKind::MoeGather:
-            return lower_custom_passthrough(graph, op, valueMap, "moe_gather");
+            return lower_moe_gather(graph, op, valueMap);
         case mid_ir::OpKind::MoeMatMul:
-            return lower_custom_passthrough(graph, op, valueMap, "moe_matmul");
+            return lower_moe_matmul(graph, op, valueMap);
         case mid_ir::OpKind::MoeScatterSum:
-            return lower_custom_passthrough(graph, op, valueMap, "moe_scatter_sum");
+            return lower_moe_scatter_sum(graph, op, valueMap);
         case mid_ir::OpKind::RoPE:
             return lower_rope(graph, op, valueMap);
         case mid_ir::OpKind::RMSNorm:

@@ -159,6 +159,9 @@ Result<DeviceCompiledGraphId> CudaDevice::compile(const ir::kernel_ir::Graph& gr
                 };
                 break;
             }
+            case ir::kernel_ir::OpKind::LinearKernel:
+                kernel.program = std::monostate{};
+                break;
             case ir::kernel_ir::OpKind::MatMulKernel: {
                 const auto& matmul = static_cast<const ir::kernel_ir::MatMulKernelOp&>(op);
                 kernel.program = CudaMatMulProgram{
@@ -175,6 +178,9 @@ Result<DeviceCompiledGraphId> CudaDevice::compile(const ir::kernel_ir::Graph& gr
                 kernel.program = CudaSoftmaxProgram{softmax.axis()};
                 break;
             }
+            case ir::kernel_ir::OpKind::TopKKernel:
+                kernel.program = std::monostate{};
+                break;
             case ir::kernel_ir::OpKind::NormKernel: {
                 const auto& norm = static_cast<const ir::kernel_ir::NormKernelOp&>(op);
                 kernel.program = CudaNormProgram{norm.norm(), norm.epsilon()};
@@ -207,11 +213,11 @@ Result<DeviceCompiledGraphId> CudaDevice::compile(const ir::kernel_ir::Graph& gr
                 };
                 break;
             }
-            case ir::kernel_ir::OpKind::CustomKernel: {
-                const auto& custom = static_cast<const ir::kernel_ir::CustomKernelOp&>(op);
-                kernel.program = CudaCustomProgram{custom.customName()};
+            case ir::kernel_ir::OpKind::MoeGatherKernel:
+            case ir::kernel_ir::OpKind::MoeMatMulKernel:
+            case ir::kernel_ir::OpKind::MoeScatterSumKernel:
+                kernel.program = std::monostate{};
                 break;
-            }
             case ir::kernel_ir::OpKind::Input:
             case ir::kernel_ir::OpKind::TensorTupleCreate:
             case ir::kernel_ir::OpKind::DeviceTransfer:
@@ -438,6 +444,8 @@ Result<void> CudaDevice::run(
             return launch_cuda_reduction(
                 context,
                 std::get<CudaReductionProgram>(kernel.program));
+        case ir::kernel_ir::OpKind::LinearKernel:
+            return make_error("cuda linear kernel is not implemented");
         case ir::kernel_ir::OpKind::MatMulKernel:
             return launch_cuda_matmul(
                 context,
@@ -448,6 +456,8 @@ Result<void> CudaDevice::run(
             return launch_cuda_softmax(
                 context,
                 std::get<CudaSoftmaxProgram>(kernel.program));
+        case ir::kernel_ir::OpKind::TopKKernel:
+            return make_error("cuda topk kernel is not implemented");
         case ir::kernel_ir::OpKind::NormKernel:
             return launch_cuda_norm(
                 context,
@@ -464,10 +474,12 @@ Result<void> CudaDevice::run(
             return launch_cuda_attention(
                 context,
                 std::get<CudaAttentionProgram>(kernel.program));
-        case ir::kernel_ir::OpKind::CustomKernel:
-            return launch_cuda_custom(
-                context,
-                std::get<CudaCustomProgram>(kernel.program));
+        case ir::kernel_ir::OpKind::MoeGatherKernel:
+            return make_error("cuda moe_gather kernel is not implemented");
+        case ir::kernel_ir::OpKind::MoeMatMulKernel:
+            return make_error("cuda moe_matmul kernel is not implemented");
+        case ir::kernel_ir::OpKind::MoeScatterSumKernel:
+            return make_error("cuda moe_scatter_sum kernel is not implemented");
     }
 
     return make_error("cuda device cannot run unknown op kind");

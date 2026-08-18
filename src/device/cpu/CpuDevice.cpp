@@ -189,18 +189,6 @@ Result<SimpleElementwiseKernel> validate_simple_elementwise_kernel(
     }
 }
 
-Result<int64_t> attr_int_or(
-        const ir::mid_ir::AttrMap& attrs,
-        const std::string& name,
-        int64_t fallback) {
-    auto it = attrs.find(name);
-    if (it == attrs.end())
-        return fallback;
-    if (it->second.kind != ir::mid_ir::AttrValue::Int)
-        return make_error("cpu device custom attr '" + name + "' must be int");
-    return it->second.intVal;
-}
-
 } // namespace
 
 Result<DeviceCompiledGraphId> CpuDevice::compile(const ir::kernel_ir::Graph& graph) {
@@ -237,6 +225,8 @@ Result<DeviceCompiledGraphId> CpuDevice::compile(const ir::kernel_ir::Graph& gra
                 kernel.constant = simple->constant;
                 break;
             }
+            case ir::kernel_ir::OpKind::LinearKernel:
+                break;
             case ir::kernel_ir::OpKind::MatMulKernel: {
                 const auto& matmul = static_cast<const ir::kernel_ir::MatMulKernelOp&>(op);
                 kernel.transposeLhs = matmul.transposeLhs();
@@ -248,6 +238,12 @@ Result<DeviceCompiledGraphId> CpuDevice::compile(const ir::kernel_ir::Graph& gra
             case ir::kernel_ir::OpKind::SoftmaxKernel: {
                 const auto& softmax = static_cast<const ir::kernel_ir::SoftmaxKernelOp&>(op);
                 kernel.axis = softmax.axis();
+                break;
+            }
+            case ir::kernel_ir::OpKind::TopKKernel: {
+                const auto& topk = static_cast<const ir::kernel_ir::TopKKernelOp&>(op);
+                kernel.k = topk.k();
+                kernel.axis = topk.axis();
                 break;
             }
             case ir::kernel_ir::OpKind::NormKernel: {
@@ -286,18 +282,19 @@ Result<DeviceCompiledGraphId> CpuDevice::compile(const ir::kernel_ir::Graph& gra
                 kernel.keepDims = reduction.keepDims();
                 break;
             }
-            case ir::kernel_ir::OpKind::CustomKernel: {
-                const auto& custom = static_cast<const ir::kernel_ir::CustomKernelOp&>(op);
-                kernel.customName = custom.customName();
-                kernel.customAttrs = custom.attrs();
-                if (kernel.customName == "moe_matmul") {
-                    auto transpose = attr_int_or(kernel.customAttrs, "transpose_rhs", 0);
-                    if (!transpose)
-                        return make_error(transpose.error());
-                    kernel.transposeRhs = transpose.take() != 0;
-                }
+            case ir::kernel_ir::OpKind::MoeGatherKernel: {
+                const auto& gather = static_cast<const ir::kernel_ir::MoeGatherKernelOp&>(op);
+                kernel.numExperts = gather.numExperts();
+                kernel.topK = gather.topK();
                 break;
             }
+            case ir::kernel_ir::OpKind::MoeMatMulKernel: {
+                const auto& matmul = static_cast<const ir::kernel_ir::MoeMatMulKernelOp&>(op);
+                kernel.transposeRhs = matmul.transposeRhs();
+                break;
+            }
+            case ir::kernel_ir::OpKind::MoeScatterSumKernel:
+                break;
         }
 
         compiled.kernels[op.id()] = std::move(kernel);
@@ -868,6 +865,17 @@ Result<void> CpuDevice::run(
                     return make_error("cpu device unsupported elementwise scalar op");
             }
         }
+        case ir::kernel_ir::OpKind::LinearKernel: {
+            auto x = inputRef(0);
+            if (!x) return make_error(x.error());
+            auto weight = inputRef(1);
+            if (!weight) return make_error(weight.error());
+            auto bias = inputRef(2);
+            if (!bias) return make_error(bias.error());
+            auto out = outputRef(0);
+            if (!out) return make_error(out.error());
+            return core::linear(*x, *weight, *bias, *out);
+        }
         case ir::kernel_ir::OpKind::MatMulKernel: {
             auto lhs = inputRef(0);
             if (!lhs) return make_error(lhs.error());
@@ -955,6 +963,15 @@ Result<void> CpuDevice::run(
             if (!out) return make_error(out.error());
             return core::softmax(*x, kernel.axis, *out);
         }
+        case ir::kernel_ir::OpKind::TopKKernel: {
+            auto x = inputRef(0);
+            if (!x) return make_error(x.error());
+            auto values = outputRef(0);
+            if (!values) return make_error(values.error());
+            auto indices = outputRef(1);
+            if (!indices) return make_error(indices.error());
+            return core::topk(*x, kernel.k, kernel.axis, *values, *indices);
+        }
         case ir::kernel_ir::OpKind::ReductionKernel: {
             if (kernel.reduce != ir::kernel_ir::ReduceOp::Sum)
                 return make_error("cpu device only supports sum reduction");
@@ -1018,84 +1035,53 @@ Result<void> CpuDevice::run(
             if (!bias) return make_error(bias.error());
             return core::layer_norm(*x, *weight, *bias, static_cast<float>(kernel.epsilon), *out);
         }
-        case ir::kernel_ir::OpKind::CustomKernel: {
-            if (kernel.customName == "topk") {
-                auto k = attr_int_or(kernel.customAttrs, "k", 0);
-                if (!k) return make_error(k.error());
-                auto axis = attr_int_or(kernel.customAttrs, "dim", -1);
-                if (!axis) return make_error(axis.error());
-                int64_t axisValue = axis.take();
-                auto x = inputRef(0);
-                if (!x) return make_error(x.error());
-                auto values = outputRef(0);
-                if (!values) return make_error(values.error());
-                auto indices = outputRef(1);
-                if (!indices) return make_error(indices.error());
-                return core::topk(*x, k.take(), axisValue, *values, *indices);
-            }
-            if (kernel.customName == "moe_gather") {
-                auto numExperts = attr_int_or(kernel.customAttrs, "num_experts", 0);
-                if (!numExperts) return make_error(numExperts.error());
-                auto topK = attr_int_or(kernel.customAttrs, "top_k", 0);
-                if (!topK) return make_error(topK.error());
-                auto x = inputRef(0);
-                if (!x) return make_error(x.error());
-                auto topkIds = inputRef(1);
-                if (!topkIds) return make_error(topkIds.error());
-                auto topkWeights = inputRef(2);
-                if (!topkWeights) return make_error(topkWeights.error());
-                auto packedX = outputRef(0);
-                if (!packedX) return make_error(packedX.error());
-                auto packedWeights = outputRef(1);
-                if (!packedWeights) return make_error(packedWeights.error());
-                auto tokenIds = outputRef(2);
-                if (!tokenIds) return make_error(tokenIds.error());
-                auto expertOffsets = outputRef(3);
-                if (!expertOffsets) return make_error(expertOffsets.error());
-                return core::moe_gather(
-                    *x,
-                    *topkIds,
-                    *topkWeights,
-                    numExperts.take(),
-                    topK.take(),
-                    *packedX,
-                    *packedWeights,
-                    *tokenIds,
-                    *expertOffsets);
-            }
-            if (kernel.customName == "moe_matmul") {
-                auto x = inputRef(0);
-                if (!x) return make_error(x.error());
-                auto expertOffsets = inputRef(1);
-                if (!expertOffsets) return make_error(expertOffsets.error());
-                auto weight = inputRef(2);
-                if (!weight) return make_error(weight.error());
-                auto out = outputRef(0);
-                if (!out) return make_error(out.error());
-                return core::moe_matmul(*x, *expertOffsets, *weight, kernel.transposeRhs, *out);
-            }
-            if (kernel.customName == "moe_scatter_sum") {
-                auto packedOut = inputRef(0);
-                if (!packedOut) return make_error(packedOut.error());
-                auto packedWeights = inputRef(1);
-                if (!packedWeights) return make_error(packedWeights.error());
-                auto tokenIds = inputRef(2);
-                if (!tokenIds) return make_error(tokenIds.error());
-                auto out = outputRef(0);
-                if (!out) return make_error(out.error());
-                return core::moe_scatter_sum(*packedOut, *packedWeights, *tokenIds, *out);
-            }
-            if (kernel.customName != "linear")
-                return make_error("cpu device unsupported custom kernel: " + kernel.customName);
+        case ir::kernel_ir::OpKind::MoeGatherKernel: {
             auto x = inputRef(0);
             if (!x) return make_error(x.error());
-            auto weight = inputRef(1);
+            auto topkIds = inputRef(1);
+            if (!topkIds) return make_error(topkIds.error());
+            auto topkWeights = inputRef(2);
+            if (!topkWeights) return make_error(topkWeights.error());
+            auto packedX = outputRef(0);
+            if (!packedX) return make_error(packedX.error());
+            auto packedWeights = outputRef(1);
+            if (!packedWeights) return make_error(packedWeights.error());
+            auto tokenIds = outputRef(2);
+            if (!tokenIds) return make_error(tokenIds.error());
+            auto expertOffsets = outputRef(3);
+            if (!expertOffsets) return make_error(expertOffsets.error());
+            return core::moe_gather(
+                *x,
+                *topkIds,
+                *topkWeights,
+                kernel.numExperts,
+                kernel.topK,
+                *packedX,
+                *packedWeights,
+                *tokenIds,
+                *expertOffsets);
+        }
+        case ir::kernel_ir::OpKind::MoeMatMulKernel: {
+            auto x = inputRef(0);
+            if (!x) return make_error(x.error());
+            auto expertOffsets = inputRef(1);
+            if (!expertOffsets) return make_error(expertOffsets.error());
+            auto weight = inputRef(2);
             if (!weight) return make_error(weight.error());
-            auto bias = inputRef(2);
-            if (!bias) return make_error(bias.error());
             auto out = outputRef(0);
             if (!out) return make_error(out.error());
-            return core::linear(*x, *weight, *bias, *out);
+            return core::moe_matmul(*x, *expertOffsets, *weight, kernel.transposeRhs, *out);
+        }
+        case ir::kernel_ir::OpKind::MoeScatterSumKernel: {
+            auto packedOut = inputRef(0);
+            if (!packedOut) return make_error(packedOut.error());
+            auto packedWeights = inputRef(1);
+            if (!packedWeights) return make_error(packedWeights.error());
+            auto tokenIds = inputRef(2);
+            if (!tokenIds) return make_error(tokenIds.error());
+            auto out = outputRef(0);
+            if (!out) return make_error(out.error());
+            return core::moe_scatter_sum(*packedOut, *packedWeights, *tokenIds, *out);
         }
     }
 

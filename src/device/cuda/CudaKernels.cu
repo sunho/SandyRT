@@ -21,13 +21,4 @@ Result<void> launch_cuda_reduction(
     return unimplemented("reduction");
 }
 
-Result<void> launch_cuda_custom(
-        const CudaLaunchContext& context,
-        const CudaCustomProgram& program) {
-    auto valid = validate_context(context, 0, 1, "custom");
-    if (!valid)
-        return make_error(valid.error());
-    return unimplemented(program.customName.empty() ? "custom" : program.customName.c_str());
-}
-
 } // namespace sandy::device

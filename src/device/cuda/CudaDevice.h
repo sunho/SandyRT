@@ -58,8 +58,7 @@ private:
         CudaNormProgram,
         CudaRoPEProgram,
         CudaSlidingQueryKeyScoreProgram,
-        CudaAttentionProgram,
-        CudaCustomProgram>;
+        CudaAttentionProgram>;
 
     struct CudaDeviceBuffer {
         core::TensorDesc desc;

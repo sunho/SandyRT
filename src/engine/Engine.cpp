@@ -325,21 +325,22 @@ Result<core::TensorDesc> resolve_output_desc(
             dims.back() = v->shape.dim(v->shape.rank() - 1);
             return desc_with_shape(graph, output, core::Shape(std::move(dims)));
         }
-        case OpKind::CustomKernel: {
-            const auto& custom = static_cast<const ir::kernel_ir::CustomKernelOp&>(op);
-            if (custom.customName() == "linear") {
-                auto x = lookup_runtime_desc(views, op.inputs()[0]);
-                if (!x)
-                    return make_error(x.error());
-                auto weight = lookup_runtime_desc(views, op.inputs()[1]);
-                if (!weight)
-                    return make_error(weight.error());
-                auto dims = x->shape.dims();
-                dims.back() = weight->shape.dim(0);
-                return desc_with_shape(graph, output, core::Shape(std::move(dims)));
-            }
-            return desc_from_static_type(graph.value(output).type);
+        case OpKind::LinearKernel: {
+            auto x = lookup_runtime_desc(views, op.inputs()[0]);
+            if (!x)
+                return make_error(x.error());
+            auto weight = lookup_runtime_desc(views, op.inputs()[1]);
+            if (!weight)
+                return make_error(weight.error());
+            auto dims = x->shape.dims();
+            dims.back() = weight->shape.dim(0);
+            return desc_with_shape(graph, output, core::Shape(std::move(dims)));
         }
+        case OpKind::TopKKernel:
+        case OpKind::MoeGatherKernel:
+        case OpKind::MoeMatMulKernel:
+        case OpKind::MoeScatterSumKernel:
+            return desc_from_static_type(graph.value(output).type);
         case OpKind::ReductionKernel:
             return desc_from_static_type(graph.value(output).type);
     }

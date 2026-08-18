@@ -70,14 +70,18 @@ enum class OpKind {
     LayoutTransform,
     ElementwiseKernel,
     ReductionKernel,
+    LinearKernel,
     MatMulKernel,
     GatherKernel,
     SoftmaxKernel,
+    TopKKernel,
     NormKernel,
     RoPEKernel,
     SlidingQueryKeyScoreKernel,
     AttentionKernel,
-    CustomKernel,
+    MoeGatherKernel,
+    MoeMatMulKernel,
+    MoeScatterSumKernel,
 };
 
 const char* op_kind_name(OpKind kind);
@@ -408,6 +412,27 @@ private:
     bool keepDims_ = false;
 };
 
+class LinearKernelOp final : public Op {
+public:
+    LinearKernelOp(
+        OpId id,
+        ValueId input,
+        ValueId weight,
+        ValueId bias,
+        ValueId output,
+        DeviceId device = 0);
+
+    std::span<const ValueId> inputs() const override { return inputs_; }
+    std::span<const ValueId> outputs() const override { return outputs_; }
+
+    const char* name() const override { return "linear_kernel"; }
+    Result<void> verify(const Graph& graph) const override;
+
+private:
+    std::array<ValueId, 3> inputs_;
+    std::array<ValueId, 1> outputs_;
+};
+
 class MatMulKernelOp final : public Op {
 public:
     MatMulKernelOp(
@@ -475,6 +500,33 @@ public:
 private:
     std::array<ValueId, 1> inputs_;
     std::array<ValueId, 1> outputs_;
+    int64_t axis_ = -1;
+};
+
+class TopKKernelOp final : public Op {
+public:
+    TopKKernelOp(
+        OpId id,
+        ValueId input,
+        ValueId values,
+        ValueId indices,
+        int64_t k,
+        int64_t axis,
+        DeviceId device = 0);
+
+    int64_t k() const { return k_; }
+    int64_t axis() const { return axis_; }
+
+    std::span<const ValueId> inputs() const override { return inputs_; }
+    std::span<const ValueId> outputs() const override { return outputs_; }
+
+    const char* name() const override { return "topk_kernel"; }
+    Result<void> verify(const Graph& graph) const override;
+
+private:
+    std::array<ValueId, 1> inputs_;
+    std::array<ValueId, 2> outputs_;
+    int64_t k_ = 0;
     int64_t axis_ = -1;
 };
 
@@ -620,30 +672,82 @@ private:
     double scale_ = -1.0;
 };
 
-class CustomKernelOp final : public Op {
+class MoeGatherKernelOp final : public Op {
 public:
-    CustomKernelOp(
+    MoeGatherKernelOp(
         OpId id,
-        std::string customName,
-        std::vector<ValueId> inputs,
-        std::vector<ValueId> outputs,
-        mid_ir::AttrMap attrs,
+        ValueId input,
+        ValueId topkIds,
+        ValueId topkWeights,
+        ValueId packedInput,
+        ValueId packedWeights,
+        ValueId tokenIds,
+        ValueId expertOffsets,
+        int64_t numExperts,
+        int64_t topK,
         DeviceId device = 0);
 
-    const std::string& customName() const { return customName_; }
-    const mid_ir::AttrMap& attrs() const { return attrs_; }
+    int64_t numExperts() const { return numExperts_; }
+    int64_t topK() const { return topK_; }
 
-    std::span<const ValueId> inputs() const override;
-    std::span<const ValueId> outputs() const override;
+    std::span<const ValueId> inputs() const override { return inputs_; }
+    std::span<const ValueId> outputs() const override { return outputs_; }
 
-    const char* name() const override { return "custom_kernel"; }
+    const char* name() const override { return "moe_gather_kernel"; }
     Result<void> verify(const Graph& graph) const override;
 
 private:
-    std::string customName_;
-    std::vector<ValueId> inputs_;
-    std::vector<ValueId> outputs_;
-    mid_ir::AttrMap attrs_;
+    std::array<ValueId, 3> inputs_;
+    std::array<ValueId, 4> outputs_;
+    int64_t numExperts_ = 0;
+    int64_t topK_ = 0;
+};
+
+class MoeMatMulKernelOp final : public Op {
+public:
+    MoeMatMulKernelOp(
+        OpId id,
+        ValueId input,
+        ValueId expertOffsets,
+        ValueId weight,
+        ValueId output,
+        bool transposeRhs,
+        DeviceId device = 0);
+
+    bool transposeRhs() const { return transposeRhs_; }
+
+    std::span<const ValueId> inputs() const override { return inputs_; }
+    std::span<const ValueId> outputs() const override { return outputs_; }
+
+    const char* name() const override { return "moe_matmul_kernel"; }
+    Result<void> verify(const Graph& graph) const override;
+
+private:
+    std::array<ValueId, 3> inputs_;
+    std::array<ValueId, 1> outputs_;
+    bool transposeRhs_ = false;
+};
+
+class MoeScatterSumKernelOp final : public Op {
+public:
+    MoeScatterSumKernelOp(
+        OpId id,
+        ValueId packedOutput,
+        ValueId packedWeights,
+        ValueId tokenIds,
+        ValueId reference,
+        ValueId output,
+        DeviceId device = 0);
+
+    std::span<const ValueId> inputs() const override { return inputs_; }
+    std::span<const ValueId> outputs() const override { return outputs_; }
+
+    const char* name() const override { return "moe_scatter_sum_kernel"; }
+    Result<void> verify(const Graph& graph) const override;
+
+private:
+    std::array<ValueId, 4> inputs_;
+    std::array<ValueId, 1> outputs_;
 };
 
 } // namespace sandy::ir::kernel_ir

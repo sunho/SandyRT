@@ -362,6 +362,8 @@ std::string op_attr_string(const Op& op) {
                    " axes=" + int_list_string(reduction.axes()) +
                    " keep_dims=" + std::to_string(reduction.keepDims() ? 1 : 0);
         }
+        case OpKind::LinearKernel:
+            return "";
         case OpKind::MatMulKernel: {
             const auto& matmul = static_cast<const MatMulKernelOp&>(op);
             return " transpose_lhs=" +
@@ -372,6 +374,11 @@ std::string op_attr_string(const Op& op) {
         case OpKind::SoftmaxKernel: {
             const auto& softmax = static_cast<const SoftmaxKernelOp&>(op);
             return " axis=" + std::to_string(softmax.axis());
+        }
+        case OpKind::TopKKernel: {
+            const auto& topk = static_cast<const TopKKernelOp&>(op);
+            return " k=" + std::to_string(topk.k()) +
+                   " axis=" + std::to_string(topk.axis());
         }
         case OpKind::NormKernel: {
             const auto& norm = static_cast<const NormKernelOp&>(op);
@@ -394,10 +401,17 @@ std::string op_attr_string(const Op& op) {
             return " window=" + std::to_string(attention.window()) +
                    " scale=" + std::to_string(attention.scale());
         }
-        case OpKind::CustomKernel: {
-            const auto& custom = static_cast<const CustomKernelOp&>(op);
-            return " name=\"" + custom.customName() + "\"";
+        case OpKind::MoeGatherKernel: {
+            const auto& gather = static_cast<const MoeGatherKernelOp&>(op);
+            return " num_experts=" + std::to_string(gather.numExperts()) +
+                   " top_k=" + std::to_string(gather.topK());
         }
+        case OpKind::MoeMatMulKernel: {
+            const auto& matmul = static_cast<const MoeMatMulKernelOp&>(op);
+            return " transpose_rhs=" + std::to_string(matmul.transposeRhs() ? 1 : 0);
+        }
+        case OpKind::MoeScatterSumKernel:
+            return "";
         default:
             return "";
     }
@@ -414,15 +428,19 @@ const char* op_kind_name(OpKind kind) {
         case OpKind::LayoutTransform: return "layout_transform";
         case OpKind::ElementwiseKernel: return "elementwise_kernel";
         case OpKind::ReductionKernel: return "reduction_kernel";
+        case OpKind::LinearKernel: return "linear_kernel";
         case OpKind::MatMulKernel: return "matmul_kernel";
         case OpKind::GatherKernel: return "gather_kernel";
         case OpKind::SoftmaxKernel: return "softmax_kernel";
+        case OpKind::TopKKernel: return "topk_kernel";
         case OpKind::NormKernel: return "norm_kernel";
         case OpKind::RoPEKernel: return "rope_kernel";
         case OpKind::SlidingQueryKeyScoreKernel:
             return "sliding_query_key_score_kernel";
         case OpKind::AttentionKernel: return "attention_kernel";
-        case OpKind::CustomKernel: return "custom_kernel";
+        case OpKind::MoeGatherKernel: return "moe_gather_kernel";
+        case OpKind::MoeMatMulKernel: return "moe_matmul_kernel";
+        case OpKind::MoeScatterSumKernel: return "moe_scatter_sum_kernel";
     }
     return "?";
 }
@@ -849,6 +867,22 @@ Result<void> ReductionKernelOp::verify(const Graph& graph) const {
     return {};
 }
 
+LinearKernelOp::LinearKernelOp(
+    OpId id,
+    ValueId input,
+    ValueId weight,
+    ValueId bias,
+    ValueId output,
+    DeviceId device)
+    : Op(id, OpKind::LinearKernel, device),
+      inputs_{input, weight, bias},
+      outputs_{output}
+{}
+
+Result<void> LinearKernelOp::verify(const Graph& graph) const {
+    return verify_common_op_shape(graph, *this, 3, 1);
+}
+
 MatMulKernelOp::MatMulKernelOp(
     OpId id,
     ValueId lhs,
@@ -897,6 +931,31 @@ SoftmaxKernelOp::SoftmaxKernelOp(
 
 Result<void> SoftmaxKernelOp::verify(const Graph& graph) const {
     return verify_common_op_shape(graph, *this, 1, 1);
+}
+
+TopKKernelOp::TopKKernelOp(
+    OpId id,
+    ValueId input,
+    ValueId values,
+    ValueId indices,
+    int64_t k,
+    int64_t axis,
+    DeviceId device)
+    : Op(id, OpKind::TopKKernel, device),
+      inputs_{input},
+      outputs_{values, indices},
+      k_(k),
+      axis_(axis)
+{}
+
+Result<void> TopKKernelOp::verify(const Graph& graph) const {
+    if (auto result = verify_common_op_shape(graph, *this, 1, 2); !result) {
+        return result;
+    }
+    if (k_ <= 0) {
+        return make_error(op_ref(id()) + " topk k must be positive");
+    }
+    return {};
 }
 
 NormKernelOp::NormKernelOp(
@@ -1099,39 +1158,68 @@ Result<void> AttentionKernelOp::verify(const Graph& graph) const {
     return {};
 }
 
-CustomKernelOp::CustomKernelOp(
+MoeGatherKernelOp::MoeGatherKernelOp(
     OpId id,
-    std::string customName,
-    std::vector<ValueId> inputs,
-    std::vector<ValueId> outputs,
-    mid_ir::AttrMap attrs,
+    ValueId input,
+    ValueId topkIds,
+    ValueId topkWeights,
+    ValueId packedInput,
+    ValueId packedWeights,
+    ValueId tokenIds,
+    ValueId expertOffsets,
+    int64_t numExperts,
+    int64_t topK,
     DeviceId device)
-    : Op(id, OpKind::CustomKernel, device),
-      customName_(std::move(customName)),
-      inputs_(std::move(inputs)),
-      outputs_(std::move(outputs)),
-      attrs_(std::move(attrs))
+    : Op(id, OpKind::MoeGatherKernel, device),
+      inputs_{input, topkIds, topkWeights},
+      outputs_{packedInput, packedWeights, tokenIds, expertOffsets},
+      numExperts_(numExperts),
+      topK_(topK)
 {}
 
-std::span<const ValueId> CustomKernelOp::inputs() const {
-    return {inputs_.data(), inputs_.size()};
-}
-
-std::span<const ValueId> CustomKernelOp::outputs() const {
-    return {outputs_.data(), outputs_.size()};
-}
-
-Result<void> CustomKernelOp::verify(const Graph& graph) const {
-    if (customName_.empty()) {
-        return make_error(op_ref(id()) + " custom kernel name is empty");
-    }
-    if (outputs_.empty()) {
-        return make_error(op_ref(id()) + " custom kernel has no outputs");
-    }
-    if (auto result = verify_values_exist(graph, inputs(), "input", *this); !result) {
+Result<void> MoeGatherKernelOp::verify(const Graph& graph) const {
+    if (auto result = verify_common_op_shape(graph, *this, 3, 4); !result) {
         return result;
     }
-    return verify_values_exist(graph, outputs(), "output", *this);
+    if (numExperts_ <= 0 || topK_ <= 0) {
+        return make_error(op_ref(id()) + " moe_gather num_experts and top_k must be positive");
+    }
+    return {};
+}
+
+MoeMatMulKernelOp::MoeMatMulKernelOp(
+    OpId id,
+    ValueId input,
+    ValueId expertOffsets,
+    ValueId weight,
+    ValueId output,
+    bool transposeRhs,
+    DeviceId device)
+    : Op(id, OpKind::MoeMatMulKernel, device),
+      inputs_{input, expertOffsets, weight},
+      outputs_{output},
+      transposeRhs_(transposeRhs)
+{}
+
+Result<void> MoeMatMulKernelOp::verify(const Graph& graph) const {
+    return verify_common_op_shape(graph, *this, 3, 1);
+}
+
+MoeScatterSumKernelOp::MoeScatterSumKernelOp(
+    OpId id,
+    ValueId packedOutput,
+    ValueId packedWeights,
+    ValueId tokenIds,
+    ValueId reference,
+    ValueId output,
+    DeviceId device)
+    : Op(id, OpKind::MoeScatterSumKernel, device),
+      inputs_{packedOutput, packedWeights, tokenIds, reference},
+      outputs_{output}
+{}
+
+Result<void> MoeScatterSumKernelOp::verify(const Graph& graph) const {
+    return verify_common_op_shape(graph, *this, 4, 1);
 }
 
 } // namespace sandy::ir::kernel_ir
