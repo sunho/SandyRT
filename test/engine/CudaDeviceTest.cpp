@@ -52,6 +52,31 @@ std::vector<uint8_t> f32_bytes(std::span<const float> values) {
     return bytes;
 }
 
+uint16_t f32_to_bf16_bits(float value) {
+    uint32_t bits = 0;
+    std::memcpy(&bits, &value, sizeof(float));
+    uint32_t lsb = (bits >> 16) & 1u;
+    return static_cast<uint16_t>((bits + 0x7fffu + lsb) >> 16);
+}
+
+float bf16_bits_to_f32(uint16_t bits) {
+    uint32_t fbits = static_cast<uint32_t>(bits) << 16;
+    float value = 0.0f;
+    std::memcpy(&value, &fbits, sizeof(float));
+    return value;
+}
+
+std::vector<uint8_t> bf16_bytes(std::initializer_list<float> values) {
+    std::vector<uint8_t> bytes(values.size() * sizeof(uint16_t));
+    size_t index = 0;
+    for (float value : values) {
+        uint16_t bits = f32_to_bf16_bits(value);
+        std::memcpy(bytes.data() + index * sizeof(uint16_t), &bits, sizeof(uint16_t));
+        index++;
+    }
+    return bytes;
+}
+
 std::vector<uint8_t> i32_bytes(std::initializer_list<int32_t> values) {
     std::vector<uint8_t> bytes(values.size() * sizeof(int32_t));
     size_t index = 0;
@@ -90,6 +115,15 @@ std::shared_ptr<TestTensorBuffer> make_f32_buffer(
         f32_bytes(std::span<const float>(values.data(), values.size())));
 }
 
+std::shared_ptr<TestTensorBuffer> make_bf16_buffer(
+        const std::string& name,
+        sandy::core::Shape shape,
+        std::initializer_list<float> values) {
+    return std::make_shared<TestTensorBuffer>(
+        sandy::core::TensorDesc(name, std::move(shape), sandy::core::DType::BF16),
+        bf16_bytes(values));
+}
+
 std::shared_ptr<TestTensorBuffer> make_i32_buffer(
         const std::string& name,
         sandy::core::Shape shape,
@@ -112,6 +146,12 @@ float read_f32(std::span<const uint8_t> bytes, size_t index) {
     float value = 0.0f;
     std::memcpy(&value, bytes.data() + index * sizeof(float), sizeof(float));
     return value;
+}
+
+float read_bf16(std::span<const uint8_t> bytes, size_t index) {
+    uint16_t bits = 0;
+    std::memcpy(&bits, bytes.data() + index * sizeof(uint16_t), sizeof(uint16_t));
+    return bf16_bits_to_f32(bits);
 }
 
 int64_t read_i64(std::span<const uint8_t> bytes, size_t index) {
@@ -209,6 +249,26 @@ void expect_f32_output_near(
     for (size_t index = 0; index < expected.size(); index++) {
         EXPECT_NEAR(read_f32(data, index), expected[index], tolerance)
             << "at flat index " << index;
+    }
+}
+
+void expect_bf16_output_near(
+        sandy::device::CudaDevice& device,
+        sandy::device::DeviceBufferId buffer,
+        std::initializer_list<float> expected,
+        float tolerance = 1.0e-2f) {
+    auto read = device.read(buffer);
+    ASSERT_TRUE(read) << read.error();
+    auto access = (*read)->access();
+    ASSERT_TRUE(access) << access.error();
+    auto data = (*access).data();
+    ASSERT_EQ(data.size(), expected.size() * sizeof(uint16_t));
+
+    size_t index = 0;
+    for (float value : expected) {
+        EXPECT_NEAR(read_bf16(data, index), value, tolerance)
+            << "at flat index " << index;
+        index++;
     }
 }
 
@@ -1603,6 +1663,346 @@ TEST(CudaDeviceTest, RunMoeGatherRejectsInvalidExpertId) {
     auto run = device.run(*compiled, op->id(), inputs, outputs);
     ASSERT_FALSE(run);
     EXPECT_NE(run.error().find("expert id out of range"), std::string::npos);
+}
+
+TEST(CudaDeviceTest, RunMoeScatterSumF32Unbatched) {
+    if (auto reason = cuda_device_skip_reason(); !reason.empty())
+        GTEST_SKIP() << reason;
+    namespace kir = sandy::ir::kernel_ir;
+
+    kir::Graph graph;
+    auto packedOut = graph.addValue(tensor_type({4, 2}));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 0, ""},
+        packedOut);
+    auto packedWeights = graph.addValue(tensor_type({4}));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 1, ""},
+        packedWeights);
+    auto tokenIds = graph.addValue(tensor_type({4}, sandy::core::DType::I64));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 2, ""},
+        tokenIds);
+    auto reference = graph.addValue(tensor_type({2, 2}));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 3, ""},
+        reference);
+    auto output = graph.addValue(tensor_type({2, 2}));
+    auto* op = graph.addOp<kir::MoeScatterSumKernelOp>(
+        packedOut,
+        packedWeights,
+        tokenIds,
+        reference,
+        output);
+    graph.setOutputs({output});
+
+    sandy::device::CudaDevice device;
+    auto compiled = device.compile(graph);
+    ASSERT_TRUE(compiled) << compiled.error();
+
+    auto packedOutHost = make_f32_buffer(
+        "packed_out",
+        sandy::core::Shape({4, 2}),
+        {
+            10.0f, 100.0f,
+            20.0f, 200.0f,
+            30.0f, 300.0f,
+            40.0f, 400.0f,
+        });
+    auto packedWeightsHost = make_f32_buffer(
+        "packed_weights",
+        sandy::core::Shape({4}),
+        {0.5f, 1.0f, 0.25f, 0.75f});
+    auto tokenIdsHost = make_i64_buffer(
+        "token_ids",
+        sandy::core::Shape({4}),
+        {0, 1, 0, 1});
+    auto referenceHost = make_f32_buffer(
+        "reference",
+        sandy::core::Shape({2, 2}),
+        {9.0f, 9.0f, 9.0f, 9.0f});
+    auto packedOutBuffer = device.load(*packedOutHost);
+    ASSERT_TRUE(packedOutBuffer) << packedOutBuffer.error();
+    auto packedWeightsBuffer = device.load(*packedWeightsHost);
+    ASSERT_TRUE(packedWeightsBuffer) << packedWeightsBuffer.error();
+    auto tokenIdsBuffer = device.load(*tokenIdsHost);
+    ASSERT_TRUE(tokenIdsBuffer) << tokenIdsBuffer.error();
+    auto referenceBuffer = device.load(*referenceHost);
+    ASSERT_TRUE(referenceBuffer) << referenceBuffer.error();
+    auto outputBuffer = device.alloc(sandy::core::TensorDesc({2, 2}, sandy::core::DType::F32));
+    ASSERT_TRUE(outputBuffer) << outputBuffer.error();
+
+    std::vector<sandy::device::DeviceRunValue> inputs = {
+        tensor_view(device, *packedOutBuffer, packedOutHost->desc()),
+        tensor_view(device, *packedWeightsBuffer, packedWeightsHost->desc()),
+        tensor_view(device, *tokenIdsBuffer, tokenIdsHost->desc()),
+        tensor_view(device, *referenceBuffer, referenceHost->desc()),
+    };
+    std::vector<sandy::device::DeviceRunValue> outputs = {
+        tensor_view(device, *outputBuffer, sandy::core::TensorDesc({2, 2}, sandy::core::DType::F32)),
+    };
+    auto run = device.run(*compiled, op->id(), inputs, outputs);
+    ASSERT_TRUE(run) << run.error();
+
+    expect_f32_output(
+        device,
+        *outputBuffer,
+        {
+            12.5f, 125.0f,
+            50.0f, 500.0f,
+        });
+}
+
+TEST(CudaDeviceTest, RunMoeScatterSumF32Batched) {
+    if (auto reason = cuda_device_skip_reason(); !reason.empty())
+        GTEST_SKIP() << reason;
+    namespace kir = sandy::ir::kernel_ir;
+
+    kir::Graph graph;
+    auto packedOut = graph.addValue(tensor_type({2, 4, 2}));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 0, ""},
+        packedOut);
+    auto packedWeights = graph.addValue(tensor_type({2, 4}));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 1, ""},
+        packedWeights);
+    auto tokenIds = graph.addValue(tensor_type({2, 4}, sandy::core::DType::I64));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 2, ""},
+        tokenIds);
+    auto reference = graph.addValue(tensor_type({2, 2, 2}));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 3, ""},
+        reference);
+    auto output = graph.addValue(tensor_type({2, 2, 2}));
+    auto* op = graph.addOp<kir::MoeScatterSumKernelOp>(
+        packedOut,
+        packedWeights,
+        tokenIds,
+        reference,
+        output);
+    graph.setOutputs({output});
+
+    sandy::device::CudaDevice device;
+    auto compiled = device.compile(graph);
+    ASSERT_TRUE(compiled) << compiled.error();
+
+    auto packedOutHost = make_f32_buffer(
+        "packed_out",
+        sandy::core::Shape({2, 4, 2}),
+        {
+            1.0f, 10.0f,
+            2.0f, 20.0f,
+            3.0f, 30.0f,
+            4.0f, 40.0f,
+            5.0f, 50.0f,
+            6.0f, 60.0f,
+            7.0f, 70.0f,
+            8.0f, 80.0f,
+        });
+    auto packedWeightsHost = make_f32_buffer(
+        "packed_weights",
+        sandy::core::Shape({2, 4}),
+        {
+            1.0f, 0.5f, 0.25f, 2.0f,
+            0.5f, 1.0f, 1.5f, 0.25f,
+        });
+    auto tokenIdsHost = make_i64_buffer(
+        "token_ids",
+        sandy::core::Shape({2, 4}),
+        {
+            0, 1, 0, 1,
+            1, 0, 1, 0,
+        });
+    auto referenceHost = make_f32_buffer(
+        "reference",
+        sandy::core::Shape({2, 2, 2}),
+        {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f});
+    auto packedOutBuffer = device.load(*packedOutHost);
+    ASSERT_TRUE(packedOutBuffer) << packedOutBuffer.error();
+    auto packedWeightsBuffer = device.load(*packedWeightsHost);
+    ASSERT_TRUE(packedWeightsBuffer) << packedWeightsBuffer.error();
+    auto tokenIdsBuffer = device.load(*tokenIdsHost);
+    ASSERT_TRUE(tokenIdsBuffer) << tokenIdsBuffer.error();
+    auto referenceBuffer = device.load(*referenceHost);
+    ASSERT_TRUE(referenceBuffer) << referenceBuffer.error();
+    auto outputBuffer = device.alloc(sandy::core::TensorDesc({2, 2, 2}, sandy::core::DType::F32));
+    ASSERT_TRUE(outputBuffer) << outputBuffer.error();
+
+    std::vector<sandy::device::DeviceRunValue> inputs = {
+        tensor_view(device, *packedOutBuffer, packedOutHost->desc()),
+        tensor_view(device, *packedWeightsBuffer, packedWeightsHost->desc()),
+        tensor_view(device, *tokenIdsBuffer, tokenIdsHost->desc()),
+        tensor_view(device, *referenceBuffer, referenceHost->desc()),
+    };
+    std::vector<sandy::device::DeviceRunValue> outputs = {
+        tensor_view(device, *outputBuffer, sandy::core::TensorDesc({2, 2, 2}, sandy::core::DType::F32)),
+    };
+    auto run = device.run(*compiled, op->id(), inputs, outputs);
+    ASSERT_TRUE(run) << run.error();
+
+    expect_f32_output(
+        device,
+        *outputBuffer,
+        {
+            1.75f, 17.5f,
+            9.0f, 90.0f,
+            8.0f, 80.0f,
+            13.0f, 130.0f,
+        });
+}
+
+TEST(CudaDeviceTest, RunMoeScatterSumBF16Unbatched) {
+    if (auto reason = cuda_device_skip_reason(); !reason.empty())
+        GTEST_SKIP() << reason;
+    namespace kir = sandy::ir::kernel_ir;
+
+    kir::Graph graph;
+    auto packedOut = graph.addValue(tensor_type({4, 2}, sandy::core::DType::BF16));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 0, ""},
+        packedOut);
+    auto packedWeights = graph.addValue(tensor_type({4}, sandy::core::DType::BF16));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 1, ""},
+        packedWeights);
+    auto tokenIds = graph.addValue(tensor_type({4}, sandy::core::DType::I64));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 2, ""},
+        tokenIds);
+    auto reference = graph.addValue(tensor_type({2, 2}, sandy::core::DType::BF16));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 3, ""},
+        reference);
+    auto output = graph.addValue(tensor_type({2, 2}, sandy::core::DType::BF16));
+    auto* op = graph.addOp<kir::MoeScatterSumKernelOp>(
+        packedOut,
+        packedWeights,
+        tokenIds,
+        reference,
+        output);
+    graph.setOutputs({output});
+
+    sandy::device::CudaDevice device;
+    auto compiled = device.compile(graph);
+    ASSERT_TRUE(compiled) << compiled.error();
+
+    auto packedOutHost = make_bf16_buffer(
+        "packed_out",
+        sandy::core::Shape({4, 2}),
+        {
+            8.0f, 16.0f,
+            4.0f, 12.0f,
+            2.0f, 6.0f,
+            10.0f, 14.0f,
+        });
+    auto packedWeightsHost = make_bf16_buffer(
+        "packed_weights",
+        sandy::core::Shape({4}),
+        {0.5f, 1.0f, 0.25f, 0.5f});
+    auto tokenIdsHost = make_i64_buffer(
+        "token_ids",
+        sandy::core::Shape({4}),
+        {0, 1, 0, 1});
+    auto referenceHost = make_bf16_buffer(
+        "reference",
+        sandy::core::Shape({2, 2}),
+        {0.0f, 0.0f, 0.0f, 0.0f});
+    auto packedOutBuffer = device.load(*packedOutHost);
+    ASSERT_TRUE(packedOutBuffer) << packedOutBuffer.error();
+    auto packedWeightsBuffer = device.load(*packedWeightsHost);
+    ASSERT_TRUE(packedWeightsBuffer) << packedWeightsBuffer.error();
+    auto tokenIdsBuffer = device.load(*tokenIdsHost);
+    ASSERT_TRUE(tokenIdsBuffer) << tokenIdsBuffer.error();
+    auto referenceBuffer = device.load(*referenceHost);
+    ASSERT_TRUE(referenceBuffer) << referenceBuffer.error();
+    auto outputBuffer = device.alloc(sandy::core::TensorDesc({2, 2}, sandy::core::DType::BF16));
+    ASSERT_TRUE(outputBuffer) << outputBuffer.error();
+
+    std::vector<sandy::device::DeviceRunValue> inputs = {
+        tensor_view(device, *packedOutBuffer, packedOutHost->desc()),
+        tensor_view(device, *packedWeightsBuffer, packedWeightsHost->desc()),
+        tensor_view(device, *tokenIdsBuffer, tokenIdsHost->desc()),
+        tensor_view(device, *referenceBuffer, referenceHost->desc()),
+    };
+    std::vector<sandy::device::DeviceRunValue> outputs = {
+        tensor_view(device, *outputBuffer, sandy::core::TensorDesc({2, 2}, sandy::core::DType::BF16)),
+    };
+    auto run = device.run(*compiled, op->id(), inputs, outputs);
+    ASSERT_TRUE(run) << run.error();
+
+    expect_bf16_output_near(
+        device,
+        *outputBuffer,
+        {
+            4.5f, 9.5f,
+            9.0f, 19.0f,
+        });
+}
+
+TEST(CudaDeviceTest, RunMoeScatterSumRejectsInvalidTokenId) {
+    if (auto reason = cuda_device_skip_reason(); !reason.empty())
+        GTEST_SKIP() << reason;
+    namespace kir = sandy::ir::kernel_ir;
+
+    kir::Graph graph;
+    auto packedOut = graph.addValue(tensor_type({1, 2}));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 0, ""},
+        packedOut);
+    auto packedWeights = graph.addValue(tensor_type({1}));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 1, ""},
+        packedWeights);
+    auto tokenIds = graph.addValue(tensor_type({1}, sandy::core::DType::I64));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 2, ""},
+        tokenIds);
+    auto reference = graph.addValue(tensor_type({1, 2}));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 3, ""},
+        reference);
+    auto output = graph.addValue(tensor_type({1, 2}));
+    auto* op = graph.addOp<kir::MoeScatterSumKernelOp>(
+        packedOut,
+        packedWeights,
+        tokenIds,
+        reference,
+        output);
+    graph.setOutputs({output});
+
+    sandy::device::CudaDevice device;
+    auto compiled = device.compile(graph);
+    ASSERT_TRUE(compiled) << compiled.error();
+
+    auto packedOutHost = make_f32_buffer("packed_out", sandy::core::Shape({1, 2}), {1.0f, 2.0f});
+    auto packedWeightsHost = make_f32_buffer("packed_weights", sandy::core::Shape({1}), {1.0f});
+    auto tokenIdsHost = make_i64_buffer("token_ids", sandy::core::Shape({1}), {1});
+    auto referenceHost = make_f32_buffer("reference", sandy::core::Shape({1, 2}), {0.0f, 0.0f});
+    auto packedOutBuffer = device.load(*packedOutHost);
+    ASSERT_TRUE(packedOutBuffer) << packedOutBuffer.error();
+    auto packedWeightsBuffer = device.load(*packedWeightsHost);
+    ASSERT_TRUE(packedWeightsBuffer) << packedWeightsBuffer.error();
+    auto tokenIdsBuffer = device.load(*tokenIdsHost);
+    ASSERT_TRUE(tokenIdsBuffer) << tokenIdsBuffer.error();
+    auto referenceBuffer = device.load(*referenceHost);
+    ASSERT_TRUE(referenceBuffer) << referenceBuffer.error();
+    auto outputBuffer = device.alloc(sandy::core::TensorDesc({1, 2}, sandy::core::DType::F32));
+    ASSERT_TRUE(outputBuffer) << outputBuffer.error();
+
+    std::vector<sandy::device::DeviceRunValue> inputs = {
+        tensor_view(device, *packedOutBuffer, packedOutHost->desc()),
+        tensor_view(device, *packedWeightsBuffer, packedWeightsHost->desc()),
+        tensor_view(device, *tokenIdsBuffer, tokenIdsHost->desc()),
+        tensor_view(device, *referenceBuffer, referenceHost->desc()),
+    };
+    std::vector<sandy::device::DeviceRunValue> outputs = {
+        tensor_view(device, *outputBuffer, sandy::core::TensorDesc({1, 2}, sandy::core::DType::F32)),
+    };
+    auto run = device.run(*compiled, op->id(), inputs, outputs);
+    ASSERT_FALSE(run);
+    EXPECT_NE(run.error().find("token id out of range"), std::string::npos);
 }
 
 TEST(CudaDeviceTest, RunMoeMatMulF32BatchedGroupedExperts) {

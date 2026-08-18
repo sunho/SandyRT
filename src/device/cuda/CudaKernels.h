@@ -120,6 +120,8 @@ Result<void> launch_cuda_moe_gather(
     const CudaLaunchContext& context,
     const CudaMoeGatherProgram& program);
 
+Result<void> launch_cuda_moe_scatter_sum(const CudaLaunchContext& context);
+
 Result<void> launch_cuda_gather(const CudaLaunchContext& context);
 
 Result<void> launch_cuda_softmax(

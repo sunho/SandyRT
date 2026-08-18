@@ -496,7 +496,7 @@ Result<void> CudaDevice::run(
                 context,
                 std::get<CudaMoeMatMulProgram>(kernel.program));
         case ir::kernel_ir::OpKind::MoeScatterSumKernel:
-            return make_error("cuda moe_scatter_sum kernel is not implemented");
+            return launch_cuda_moe_scatter_sum(context);
     }
 
     return make_error("cuda device cannot run unknown op kind");
