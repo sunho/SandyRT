@@ -1412,6 +1412,123 @@ TEST(CudaDeviceTest, RunMoeMatMulF32BatchedGroupedExperts) {
         });
 }
 
+TEST(CudaDeviceTest, RunReductionSumF32LastDimKeepDims) {
+    if (auto reason = cuda_device_skip_reason(); !reason.empty())
+        GTEST_SKIP() << reason;
+    namespace kir = sandy::ir::kernel_ir;
+
+    kir::Graph graph;
+    auto x = graph.addValue(tensor_type({2, 3, 4}));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 0, ""},
+        x);
+    auto output = graph.addValue(tensor_type({2, 3, 1}));
+    auto* op = graph.addOp<kir::ReductionKernelOp>(
+        kir::ReduceOp::Sum,
+        x,
+        output,
+        std::vector<int64_t>{-1},
+        true);
+    graph.setOutputs({output});
+
+    sandy::device::CudaDevice device;
+    auto compiled = device.compile(graph);
+    ASSERT_TRUE(compiled) << compiled.error();
+
+    auto xHost = make_f32_buffer(
+        "x",
+        sandy::core::Shape({2, 3, 4}),
+        {
+            1.0f, 2.0f, 3.0f, 4.0f,
+            5.0f, 6.0f, 7.0f, 8.0f,
+            0.5f, 1.5f, 2.5f, 3.5f,
+            -1.0f, 2.0f, -3.0f, 4.0f,
+            10.0f, 0.0f, 1.0f, -2.0f,
+            0.25f, 0.5f, 0.75f, 1.0f,
+        });
+    auto xBuffer = device.load(*xHost);
+    ASSERT_TRUE(xBuffer) << xBuffer.error();
+    auto outputBuffer = device.alloc(sandy::core::TensorDesc({2, 3, 1}, sandy::core::DType::F32));
+    ASSERT_TRUE(outputBuffer) << outputBuffer.error();
+
+    std::vector<sandy::device::DeviceRunValue> inputs = {
+        tensor_view(device, *xBuffer, xHost->desc()),
+    };
+    std::vector<sandy::device::DeviceRunValue> outputs = {
+        tensor_view(
+            device,
+            *outputBuffer,
+            sandy::core::TensorDesc({2, 3, 1}, sandy::core::DType::F32)),
+    };
+    auto run = device.run(*compiled, op->id(), inputs, outputs);
+    ASSERT_TRUE(run) << run.error();
+
+    expect_f32_output(
+        device,
+        *outputBuffer,
+        {
+            10.0f,
+            26.0f,
+            8.0f,
+            2.0f,
+            9.0f,
+            2.5f,
+        });
+}
+
+TEST(CudaDeviceTest, RunReductionRejectsKeepDimsFalse) {
+    if (auto reason = cuda_device_skip_reason(); !reason.empty())
+        GTEST_SKIP() << reason;
+    namespace kir = sandy::ir::kernel_ir;
+
+    kir::Graph graph;
+    auto x = graph.addValue(tensor_type({2, 3, 4}));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 0, ""},
+        x);
+    auto output = graph.addValue(tensor_type({2, 3}));
+    auto* op = graph.addOp<kir::ReductionKernelOp>(
+        kir::ReduceOp::Sum,
+        x,
+        output,
+        std::vector<int64_t>{-1},
+        false);
+    graph.setOutputs({output});
+
+    sandy::device::CudaDevice device;
+    auto compiled = device.compile(graph);
+    ASSERT_TRUE(compiled) << compiled.error();
+
+    auto xHost = make_f32_buffer(
+        "x",
+        sandy::core::Shape({2, 3, 4}),
+        {
+            1.0f, 2.0f, 3.0f, 4.0f,
+            5.0f, 6.0f, 7.0f, 8.0f,
+            0.5f, 1.5f, 2.5f, 3.5f,
+            -1.0f, 2.0f, -3.0f, 4.0f,
+            10.0f, 0.0f, 1.0f, -2.0f,
+            0.25f, 0.5f, 0.75f, 1.0f,
+        });
+    auto xBuffer = device.load(*xHost);
+    ASSERT_TRUE(xBuffer) << xBuffer.error();
+    auto outputBuffer = device.alloc(sandy::core::TensorDesc({2, 3}, sandy::core::DType::F32));
+    ASSERT_TRUE(outputBuffer) << outputBuffer.error();
+
+    std::vector<sandy::device::DeviceRunValue> inputs = {
+        tensor_view(device, *xBuffer, xHost->desc()),
+    };
+    std::vector<sandy::device::DeviceRunValue> outputs = {
+        tensor_view(
+            device,
+            *outputBuffer,
+            sandy::core::TensorDesc({2, 3}, sandy::core::DType::F32)),
+    };
+    auto run = device.run(*compiled, op->id(), inputs, outputs);
+    ASSERT_FALSE(run);
+    EXPECT_NE(run.error().find("keepDims=true"), std::string::npos);
+}
+
 TEST(CudaDeviceTest, RunSoftmaxF32LastDim) {
     if (auto reason = cuda_device_skip_reason(); !reason.empty())
         GTEST_SKIP() << reason;
