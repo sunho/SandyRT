@@ -1,13 +1,63 @@
 #include "MidIRToKernelIR.h"
+#include "ShapeUtil.h"
 
+#include <algorithm>
+#include <cstdint>
+#include <memory>
+#include <optional>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
+#include <vector>
 
 namespace sandy::ir::kernel_ir {
 
 namespace {
 
 using ValueMap = std::unordered_map<const mid_ir::Value*, ValueId>;
+
+enum class FusionKind {
+    Elementwise,
+    Attention,
+};
+
+using FusionId = uint32_t;
+
+struct FusionGroup {
+    FusionId id = 0;
+    FusionKind kind = FusionKind::Elementwise;
+    const mid_ir::Op* root = nullptr;
+    std::vector<const mid_ir::Op*> ops;
+    std::vector<const mid_ir::Value*> inputs;
+    std::vector<const mid_ir::Value*> outputs;
+};
+
+struct FusionPlan {
+    std::vector<FusionGroup> groups;
+    std::unordered_map<const mid_ir::Op*, FusionId> owner;
+    std::unordered_map<const mid_ir::Op*, FusionId> rootOwner;
+
+    bool isClaimed(const mid_ir::Op* op) const {
+        return owner.find(op) != owner.end();
+    }
+
+    const FusionGroup* groupForRoot(const mid_ir::Op* op) const {
+        auto it = rootOwner.find(op);
+        if (it == rootOwner.end())
+            return nullptr;
+        return &groups[static_cast<size_t>(it->second)];
+    }
+
+    void add(FusionGroup group) {
+        auto id = static_cast<FusionId>(groups.size());
+        group.id = id;
+        for (auto* op : group.ops)
+            owner[op] = id;
+        if (group.root)
+            rootOwner[group.root] = id;
+        groups.push_back(std::move(group));
+    }
+};
 
 ValueType value_type_from_mid(const mid_ir::Value& value) {
     ValueType type;
@@ -142,6 +192,248 @@ ScalarOp binary_scalar_op(mid_ir::OpKind kind) {
         case mid_ir::OpKind::Div: return ScalarOp::Div;
         default: return ScalarOp::Constant;
     }
+}
+
+bool is_graph_output(const mid_ir::Graph& graph, const mid_ir::Value* value) {
+    const auto& outputs = graph.outputs();
+    return std::find(outputs.begin(), outputs.end(), value) != outputs.end();
+}
+
+bool is_fusible_elementwise(const mid_ir::Op& op) {
+    switch (op.kind) {
+        case mid_ir::OpKind::Constant:
+        case mid_ir::OpKind::Add:
+        case mid_ir::OpKind::Mul:
+        case mid_ir::OpKind::Div:
+        case mid_ir::OpKind::ReLU:
+        case mid_ir::OpKind::Sqrt:
+        case mid_ir::OpKind::Tanh:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool is_unary_elementwise(mid_ir::OpKind kind) {
+    switch (kind) {
+        case mid_ir::OpKind::ReLU:
+        case mid_ir::OpKind::Sqrt:
+        case mid_ir::OpKind::Tanh:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool is_binary_elementwise(mid_ir::OpKind kind) {
+    switch (kind) {
+        case mid_ir::OpKind::Add:
+        case mid_ir::OpKind::Mul:
+        case mid_ir::OpKind::Div:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool elementwise_op_shape_is_supported(const mid_ir::Op& op) {
+    if (op.results.size() != 1)
+        return false;
+    if (op.kind == mid_ir::OpKind::Constant)
+        return op.operands.empty();
+    if (is_unary_elementwise(op.kind))
+        return op.operands.size() == 1;
+    if (is_binary_elementwise(op.kind))
+        return op.operands.size() == 2;
+    return false;
+}
+
+bool has_single_use(const mid_ir::Value& value) {
+    return value.uses.size() == 1;
+}
+
+bool can_broadcast_to(const mid_ir::Value& input, const mid_ir::Value& output) {
+    if (input.kind != mid_ir::ValueKind::Tensor ||
+        output.kind != mid_ir::ValueKind::Tensor) {
+        return false;
+    }
+    auto shape = core::broadcast_shape(input.shape, output.shape);
+    return shape && *shape == output.shape;
+}
+
+class FusionPattern {
+public:
+    virtual ~FusionPattern() = default;
+    virtual int priority() const = 0;
+    virtual bool enabled(const LoweringOptions& options) const = 0;
+    virtual std::optional<FusionGroup> match(
+        const mid_ir::Graph& graph,
+        const mid_ir::Op& root,
+        const FusionPlan& plan,
+        const LoweringOptions& options) const = 0;
+};
+
+class AttentionFusionPattern final : public FusionPattern {
+public:
+    int priority() const override { return 100; }
+
+    bool enabled(const LoweringOptions& options) const override {
+        return options.fusor.attention;
+    }
+
+    std::optional<FusionGroup> match(
+        const mid_ir::Graph&,
+        const mid_ir::Op& root,
+        const FusionPlan& plan,
+        const LoweringOptions&) const override
+    {
+        if (plan.isClaimed(&root) || root.kind != mid_ir::OpKind::Attention)
+            return std::nullopt;
+        if (root.results.size() != 1 ||
+            (root.operands.size() != 3 && root.operands.size() != 4)) {
+            return std::nullopt;
+        }
+
+        FusionGroup group;
+        group.kind = FusionKind::Attention;
+        group.root = &root;
+        group.ops = {&root};
+        group.inputs.assign(root.operands.begin(), root.operands.end());
+        group.outputs.assign(root.results.begin(), root.results.end());
+        return group;
+    }
+};
+
+class ElementwiseFusionPattern final : public FusionPattern {
+public:
+    int priority() const override { return 10; }
+
+    bool enabled(const LoweringOptions& options) const override {
+        return options.fusor.elementwise;
+    }
+
+    std::optional<FusionGroup> match(
+        const mid_ir::Graph& graph,
+        const mid_ir::Op& root,
+        const FusionPlan& plan,
+        const LoweringOptions& options) const override
+    {
+        if (plan.isClaimed(&root) || !is_fusible_elementwise(root) ||
+            !elementwise_op_shape_is_supported(root)) {
+            return std::nullopt;
+        }
+
+        ElementwiseCollector collector(graph, plan, root);
+        collector.collect(root);
+
+        auto group = collector.take();
+        if (group.inputs.size() > options.fusor.maxElementwiseInputs)
+            return std::nullopt;
+        auto scalarCount = group.inputs.size() + group.ops.size();
+        if (scalarCount > options.fusor.maxElementwiseScalars)
+            return std::nullopt;
+        return group;
+    }
+
+private:
+    class ElementwiseCollector {
+    public:
+        ElementwiseCollector(
+            const mid_ir::Graph& graph,
+            const FusionPlan& plan,
+            const mid_ir::Op& root)
+            : graph_(graph), plan_(plan)
+        {
+            group_.kind = FusionKind::Elementwise;
+            group_.root = &root;
+            group_.outputs.assign(root.results.begin(), root.results.end());
+        }
+
+        void collect(const mid_ir::Op& op) {
+            if (!visitedOps_.insert(&op).second)
+                return;
+
+            for (auto* operand : op.operands) {
+                auto* producer = operand ? operand->def : nullptr;
+                if (canInlineProducer(operand, producer)) {
+                    collect(*producer);
+                } else {
+                    addInput(operand);
+                }
+            }
+
+            group_.ops.push_back(&op);
+        }
+
+        FusionGroup take() { return std::move(group_); }
+
+    private:
+        bool canInlineProducer(
+            const mid_ir::Value* value,
+            const mid_ir::Op* producer) const
+        {
+            if (!value || !producer)
+                return false;
+            if (plan_.isClaimed(producer))
+                return false;
+            if (!is_fusible_elementwise(*producer) ||
+                !elementwise_op_shape_is_supported(*producer)) {
+                return false;
+            }
+            if (producer->def && producer->def->has_side_effects())
+                return false;
+            if (!has_single_use(*value) || is_graph_output(graph_, value))
+                return false;
+            return can_broadcast_to(*value, *group_.outputs[0]);
+        }
+
+        void addInput(const mid_ir::Value* value) {
+            if (!value || !seenInputs_.insert(value).second)
+                return;
+            group_.inputs.push_back(value);
+        }
+
+        const mid_ir::Graph& graph_;
+        const FusionPlan& plan_;
+        FusionGroup group_;
+        std::unordered_set<const mid_ir::Op*> visitedOps_;
+        std::unordered_set<const mid_ir::Value*> seenInputs_;
+    };
+};
+
+FusionPlan build_fusion_plan(
+    const mid_ir::Graph& graph,
+    const LoweringOptions& options)
+{
+    FusionPlan plan;
+    std::vector<std::unique_ptr<FusionPattern>> patterns;
+    patterns.push_back(std::make_unique<AttentionFusionPattern>());
+    patterns.push_back(std::make_unique<ElementwiseFusionPattern>());
+    std::sort(
+        patterns.begin(),
+        patterns.end(),
+        [](const auto& lhs, const auto& rhs) {
+            return lhs->priority() > rhs->priority();
+        });
+
+    const auto& ops = graph.entry()->ops;
+    for (auto it = ops.rbegin(); it != ops.rend(); ++it) {
+        const auto* op = *it;
+        if (!op || plan.isClaimed(op))
+            continue;
+
+        for (const auto& pattern : patterns) {
+            if (!pattern->enabled(options))
+                continue;
+            auto group = pattern->match(graph, *op, plan, options);
+            if (!group)
+                continue;
+            plan.add(std::move(*group));
+            break;
+        }
+    }
+
+    return plan;
 }
 
 Result<std::vector<ValueId>> mapped_operands(
@@ -905,6 +1197,151 @@ Result<void> lower_attention(
     return {};
 }
 
+Result<void> lower_elementwise_fusion_group(
+    Graph& graph,
+    const FusionGroup& group,
+    ValueMap& valueMap)
+{
+    if (!group.root || group.root->results.size() != 1) {
+        return make_error("elementwise fusion group expects one root result");
+    }
+
+    auto* rootOutput = group.root->results[0];
+    auto output = add_single_result_value(graph, *group.root, valueMap);
+    if (!output)
+        return make_error(output.error());
+    auto outputId = output.take();
+
+    std::vector<ElementwiseInput> inputs;
+    inputs.reserve(group.inputs.size());
+    std::vector<ScalarNode> scalars;
+    scalars.reserve(group.inputs.size() + group.ops.size());
+    std::unordered_map<const mid_ir::Value*, ScalarId> scalarForValue;
+
+    ScalarId nextScalar = 0;
+    for (size_t i = 0; i < group.inputs.size(); ++i) {
+        auto* input = group.inputs[i];
+        if (!input)
+            return make_error("elementwise fusion group has null input");
+        if (!can_broadcast_to(*input, *rootOutput)) {
+            return make_error("elementwise fusion input cannot broadcast to root output");
+        }
+
+        auto mapped = mapped_value(valueMap, input);
+        if (!mapped)
+            return make_error(mapped.error());
+        inputs.push_back(ElementwiseInput{
+            mapped.take(),
+            broadcast_mode(*input, *rootOutput),
+        });
+
+        auto id = nextScalar++;
+        scalars.push_back(ScalarNode{
+            id,
+            ScalarOp::Load,
+            input->dtype,
+            static_cast<uint32_t>(i),
+            0.0,
+            {},
+        });
+        scalarForValue[input] = id;
+    }
+
+    auto scalarForOperand = [&](const mid_ir::Value* value) -> Result<ScalarId> {
+        auto it = scalarForValue.find(value);
+        if (it == scalarForValue.end()) {
+            return make_error("elementwise fusion operand scalar is not available");
+        }
+        return it->second;
+    };
+
+    for (auto* op : group.ops) {
+        if (!op || op->results.size() != 1)
+            return make_error("elementwise fusion op expects one result");
+
+        auto id = nextScalar++;
+        if (op->kind == mid_ir::OpKind::Constant) {
+            auto attr = find_attr(*op, "value", mid_ir::AttrValue::Float);
+            if (!attr)
+                return make_error(attr.error());
+            scalars.push_back(ScalarNode{
+                id,
+                ScalarOp::Constant,
+                op->results[0]->dtype,
+                0,
+                (*attr)->floatVal,
+                {},
+            });
+            scalarForValue[op->results[0]] = id;
+            continue;
+        }
+
+        if (is_unary_elementwise(op->kind)) {
+            auto input = scalarForOperand(op->operands[0]);
+            if (!input)
+                return make_error(input.error());
+            scalars.push_back(ScalarNode{
+                id,
+                unary_scalar_op(op->kind),
+                op->results[0]->dtype,
+                0,
+                0.0,
+                {input.take()},
+            });
+            scalarForValue[op->results[0]] = id;
+            continue;
+        }
+
+        if (is_binary_elementwise(op->kind)) {
+            auto lhs = scalarForOperand(op->operands[0]);
+            if (!lhs)
+                return make_error(lhs.error());
+            auto rhs = scalarForOperand(op->operands[1]);
+            if (!rhs)
+                return make_error(rhs.error());
+            scalars.push_back(ScalarNode{
+                id,
+                binary_scalar_op(op->kind),
+                op->results[0]->dtype,
+                0,
+                0.0,
+                {lhs.take(), rhs.take()},
+            });
+            scalarForValue[op->results[0]] = id;
+            continue;
+        }
+
+        return make_error("elementwise fusion group contains unsupported op");
+    }
+
+    auto result = scalarForOperand(rootOutput);
+    if (!result)
+        return make_error(result.error());
+
+    graph.addOp<ElementwiseKernelOp>(
+        std::move(inputs),
+        outputId,
+        result.take(),
+        std::move(scalars));
+    return {};
+}
+
+Result<void> lower_fusion_group(
+    Graph& graph,
+    const FusionGroup& group,
+    ValueMap& valueMap)
+{
+    switch (group.kind) {
+        case FusionKind::Elementwise:
+            return lower_elementwise_fusion_group(graph, group, valueMap);
+        case FusionKind::Attention:
+            if (!group.root)
+                return make_error("attention fusion group has no root");
+            return lower_attention(graph, *group.root, valueMap, true);
+    }
+    return make_error("unknown fusion group kind");
+}
+
 Result<void> lower_op(
     Graph& graph,
     const mid_ir::Op& op,
@@ -943,7 +1380,7 @@ Result<void> lower_op(
         case mid_ir::OpKind::SlidingQueryKeyScore:
             return lower_sliding_query_key_score(graph, op, valueMap);
         case mid_ir::OpKind::Attention:
-            return lower_attention(graph, op, valueMap, options.fusor.attention);
+            return lower_attention(graph, op, valueMap, false);
         case mid_ir::OpKind::Softmax:
             return lower_softmax(graph, op, valueMap);
         case mid_ir::OpKind::TopK:
@@ -980,8 +1417,20 @@ Result<std::unique_ptr<Graph>> MidIRToKernelIRLowering::lower(
 {
     auto graph = std::make_unique<Graph>();
     ValueMap valueMap;
+    auto fusionPlan = build_fusion_plan(midGraph, options_);
 
     for (const auto* op : midGraph.entry()->ops) {
+        const auto* group = fusionPlan.groupForRoot(op);
+        if (group) {
+            auto result = lower_fusion_group(*graph, *group, valueMap);
+            if (!result)
+                return make_error(result.error());
+            continue;
+        }
+
+        if (fusionPlan.isClaimed(op))
+            continue;
+
         auto result = lower_op(*graph, *op, valueMap, options_);
         if (!result)
             return make_error(result.error());

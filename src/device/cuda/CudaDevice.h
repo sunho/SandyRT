@@ -8,7 +8,6 @@
 #include <cuda_runtime.h>
 
 #include <cstdint>
-#include <optional>
 #include <string>
 #include <unordered_map>
 #include <variant>
@@ -83,7 +82,6 @@ private:
     Result<void> ensure_stream();
     Result<void> ensure_cublas_handle();
     Result<void> ensure_async_memory_pool();
-    Result<const cudaDeviceProp*> ensure_device_properties();
     Result<void> set_device() const;
     Result<CudaDeviceBufferView> buffer_view(DeviceBufferId buffer, bool writable);
     Result<CudaDevicePagedTensorView> paged_tensor_view(DevicePagedTensorId tensor) const;
@@ -92,9 +90,9 @@ private:
     int cudaDevice_ = 0;
     cudaStream_t stream_ = nullptr;
     cublasHandle_t cublasHandle_ = nullptr;
-    std::optional<cudaDeviceProp> deviceProps_;
+    cudaDeviceProp deviceProps_{};
+    std::string initializationError_;
     bool asyncMemoryPoolConfigured_ = false;
-    CudaWorkspace workspace_;
     DeviceBufferId nextBufferId_ = 1;
     DeviceCompiledGraphId nextGraphId_ = 1;
     DevicePagedPoolId nextPagedPoolId_ = 1;

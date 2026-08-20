@@ -387,6 +387,107 @@ TEST_F(MidIRToKernelIRTest, LowersConstantAndScalarBroadcastMul) {
               sandy::core::DType::BF16);
 }
 
+TEST_F(MidIRToKernelIRTest, ElementwiseFusorMergesChainIntoSingleKernel) {
+    mid_ir::Graph midGraph;
+    mid_ir::Builder builder(midGraph);
+
+    auto* lhs = builder.createInput(
+        0, sandy::core::Shape({2, 3, 4}), sandy::core::DType::F32);
+    auto* rhs = builder.createInput(
+        1, sandy::core::Shape({3, 1}), sandy::core::DType::F32);
+    auto* add = builder.createAdd(lhs, rhs);
+    auto* sqrt = builder.createSqrt(add);
+    auto* tanh = builder.createTanh(sqrt);
+    mid_ir::Value* outputs[] = {tanh};
+    builder.setOutputs(outputs);
+
+    kernel_ir::LoweringOptions options;
+    options.fusor.elementwise = true;
+    auto lowered = kernel_ir::lowerMidIRToKernelIR(midGraph, options);
+    ASSERT_TRUE(lowered) << lowered.error();
+    auto graph = lowered.take();
+
+    ASSERT_EQ(graph->ops().size(), 3u);
+    const auto& fused = as_elementwise(graph->ops()[2]);
+    ASSERT_EQ(fused.elementwiseInputs().size(), 2u);
+    EXPECT_EQ(fused.elementwiseInputs()[0].broadcast,
+              kernel_ir::BroadcastMode::None);
+    EXPECT_EQ(fused.elementwiseInputs()[1].broadcast,
+              kernel_ir::BroadcastMode::RightAligned);
+
+    ASSERT_EQ(fused.scalars().size(), 5u);
+    EXPECT_EQ(fused.scalars()[0].op, kernel_ir::ScalarOp::Load);
+    EXPECT_EQ(fused.scalars()[1].op, kernel_ir::ScalarOp::Load);
+    EXPECT_EQ(fused.scalars()[2].op, kernel_ir::ScalarOp::Add);
+    EXPECT_EQ(fused.scalars()[3].op, kernel_ir::ScalarOp::Sqrt);
+    EXPECT_EQ(fused.scalars()[4].op, kernel_ir::ScalarOp::Tanh);
+    EXPECT_EQ(fused.result(), 4u);
+    EXPECT_EQ(graph->outputs()[0], fused.outputs()[0]);
+}
+
+TEST_F(MidIRToKernelIRTest, ElementwiseFusorInlinesScalarConstant) {
+    mid_ir::Graph midGraph;
+    mid_ir::Builder builder(midGraph);
+
+    auto* input = builder.createInput(
+        0, sandy::core::Shape({2, 3}), sandy::core::DType::BF16);
+    auto* scale = builder.createConstantF32(0.5f);
+    auto* mul = builder.createMul(input, scale);
+    auto* tanh = builder.createTanh(mul);
+    mid_ir::Value* outputs[] = {tanh};
+    builder.setOutputs(outputs);
+
+    kernel_ir::LoweringOptions options;
+    options.fusor.elementwise = true;
+    auto lowered = kernel_ir::lowerMidIRToKernelIR(midGraph, options);
+    ASSERT_TRUE(lowered) << lowered.error();
+    auto graph = lowered.take();
+
+    ASSERT_EQ(graph->ops().size(), 2u);
+    const auto& fused = as_elementwise(graph->ops()[1]);
+    ASSERT_EQ(fused.elementwiseInputs().size(), 1u);
+    ASSERT_EQ(fused.scalars().size(), 4u);
+    EXPECT_EQ(fused.scalars()[0].op, kernel_ir::ScalarOp::Load);
+    EXPECT_EQ(fused.scalars()[1].op, kernel_ir::ScalarOp::Constant);
+    EXPECT_EQ(fused.scalars()[1].constant, 0.5);
+    EXPECT_EQ(fused.scalars()[2].op, kernel_ir::ScalarOp::Mul);
+    EXPECT_EQ(fused.scalars()[3].op, kernel_ir::ScalarOp::Tanh);
+    EXPECT_EQ(fused.result(), 3u);
+}
+
+TEST_F(MidIRToKernelIRTest, ElementwiseFusorKeepsSharedProducerMaterialized) {
+    mid_ir::Graph midGraph;
+    mid_ir::Builder builder(midGraph);
+
+    auto* lhs = builder.createInput(
+        0, sandy::core::Shape({2, 3}), sandy::core::DType::F32);
+    auto* rhs = builder.createInput(
+        1, sandy::core::Shape({2, 3}), sandy::core::DType::F32);
+    auto* add = builder.createAdd(lhs, rhs);
+    auto* sqrt = builder.createSqrt(add);
+    auto* tanh = builder.createTanh(add);
+    mid_ir::Value* outputs[] = {sqrt, tanh};
+    builder.setOutputs(outputs);
+
+    kernel_ir::LoweringOptions options;
+    options.fusor.elementwise = true;
+    auto lowered = kernel_ir::lowerMidIRToKernelIR(midGraph, options);
+    ASSERT_TRUE(lowered) << lowered.error();
+    auto graph = lowered.take();
+
+    ASSERT_EQ(graph->ops().size(), 5u);
+    const auto& addOp = as_elementwise(graph->ops()[2]);
+    const auto& sqrtOp = as_elementwise(graph->ops()[3]);
+    const auto& tanhOp = as_elementwise(graph->ops()[4]);
+
+    ASSERT_EQ(addOp.scalars().size(), 3u);
+    EXPECT_EQ(addOp.scalars()[2].op, kernel_ir::ScalarOp::Add);
+    ASSERT_EQ(sqrtOp.elementwiseInputs().size(), 1u);
+    ASSERT_EQ(tanhOp.elementwiseInputs().size(), 1u);
+    EXPECT_EQ(sqrtOp.inputs()[0], addOp.outputs()[0]);
+    EXPECT_EQ(tanhOp.inputs()[0], addOp.outputs()[0]);
+}
+
 TEST_F(MidIRToKernelIRTest, AttentionFusorOptionControlsLowering) {
     mid_ir::Graph midGraph;
     mid_ir::Builder builder(midGraph);

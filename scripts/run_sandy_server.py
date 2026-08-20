@@ -322,6 +322,8 @@ def main() -> int:
             "--prefill-model", str(args.prefill_model),
             "--prefill-chunk-tokens", str(args.prefill_chunk_tokens),
         ])
+    else:
+        worker_cmd.extend(["--prefill-chunk-tokens", "0"])
     if args.debug:
         worker_cmd.append("--debug")
     if args.profile:

@@ -126,6 +126,17 @@ __global__ void flash_attention_prefill_kernel(DeviceAttentionProgram program) {
         output[i] = 0.0f;
 
     bool validQuery = query < program.tq;
+    float qValues[kLaneValues];
+    #pragma unroll
+    for (int frag = 0; frag < kLaneValues; ++frag) {
+        int dim = lane + frag * 32;
+        qValues[frag] = validQuery && dim < HeadDim
+            ? cuda_kernel::load_float(
+                  program.q,
+                  q_linear_index(program, batch, qHead, query, dim))
+            : 0.0f;
+    }
+
     int64_t blockFirstQuery = queryBlock * QueriesPerBlock;
     int64_t blockLastQuery = device_min_i64(
         blockFirstQuery + QueriesPerBlock - 1,
@@ -165,11 +176,11 @@ __global__ void flash_attention_prefill_kernel(DeviceAttentionProgram program) {
 
                 float partial = 0.0f;
                 #pragma unroll
-                for (int dim = lane; dim < HeadDim; dim += 32) {
-                    float qValue = cuda_kernel::load_float(
-                        program.q,
-                        q_linear_index(program, batch, qHead, query, dim));
-                    partial += qValue * kTile[keyOffset * HeadDim + dim];
+                for (int frag = 0; frag < kLaneValues; ++frag) {
+                    int dim = lane + frag * 32;
+                    if (dim >= HeadDim)
+                        continue;
+                    partial += qValues[frag] * kTile[keyOffset * HeadDim + dim];
                 }
 
                 float score = warp_reduce_sum(partial) * program.scale;
@@ -268,19 +279,30 @@ __global__ void flash_attention_decode_partial_kernel(
     for (int i = 0; i < kLaneValues; ++i)
         output[i] = 0.0f;
 
+    float qValues[kLaneValues];
+    #pragma unroll
+    for (int frag = 0; frag < kLaneValues; ++frag) {
+        int dim = lane + frag * 32;
+        qValues[frag] = dim < HeadDim
+            ? cuda_kernel::load_float(
+                  program.q,
+                  q_linear_index(program, batch, qHead, 0, dim))
+            : 0.0f;
+    }
+
     for (int64_t key = splitStart; key < splitEnd; ++key) {
         bool visible = key <= maxKey && key >= minKey;
 
         float partialDot = 0.0f;
         #pragma unroll
-        for (int dim = lane; dim < HeadDim; dim += 32) {
-            float qValue = cuda_kernel::load_float(
-                program.q,
-                q_linear_index(program, batch, qHead, 0, dim));
+        for (int frag = 0; frag < kLaneValues; ++frag) {
+            int dim = lane + frag * 32;
+            if (dim >= HeadDim)
+                continue;
             float kValue = cuda_kernel::load_float(
                 program.k,
                 kv_linear_index(program, batch, kvHead, key, dim));
-            partialDot += qValue * kValue;
+            partialDot += qValues[frag] * kValue;
         }
 
         float score = warp_reduce_sum(partialDot) * program.scale;
@@ -452,44 +474,35 @@ int choose_decoder_split_size(
         1,
         ceil_div_i64(static_cast<int64_t>(props.multiProcessorCount) * 4, baseBlocks));
 
-    if (ceil_div_i64(program.tk, 512) >= targetSplits)
-        return 512;
-    if (ceil_div_i64(program.tk, 256) >= targetSplits)
-        return 256;
-    return 128;
+    for (int splitSize = 512; splitSize >= 1; splitSize /= 2) {
+        if (ceil_div_i64(program.tk, splitSize) >= targetSplits)
+            return splitSize;
+    }
+    return 1;
 }
 
-template <int HeadDim, int SplitSize>
+template <int HeadDim>
 Result<void> launch_attention_decoder_variant(
         DeviceAttentionProgram program,
-        const CudaLaunchContext& context) {
+        const CudaLaunchContext& context,
+        int splitSize) {
     cudaStream_t stream = context.stream;
-    int numSplits = static_cast<int>(ceil_div_i64(program.tk, SplitSize));
+    int numSplits = static_cast<int>(ceil_div_i64(program.tk, splitSize));
     int64_t stateCount = program.batch * program.qHeads * numSplits;
     size_t partialElements =
         static_cast<size_t>(stateCount) * static_cast<size_t>(HeadDim + 2);
     size_t partialBytes = partialElements * sizeof(float);
 
     float* partial = nullptr;
-    bool ownsPartial = false;
-    if (context.workspace) {
-        auto reserved = context.workspace->reserve(context.cudaDevice, stream, partialBytes);
-        if (!reserved)
-            return make_error(reserved.error());
-        partial = static_cast<float*>(reserved.take());
-    } else {
-        auto allocated = cuda_malloc_stream_ordered(
-            &partial,
-            partialBytes,
-            stream,
-            "cudaMallocAsync attention decoder partials");
-        if (!allocated)
-            return make_error(allocated.error());
-        ownsPartial = true;
-    }
+    auto allocated = cuda_malloc_stream_ordered(
+        &partial,
+        partialBytes,
+        stream,
+        "cudaMallocAsync attention decoder partials");
+    if (!allocated)
+        return make_error(allocated.error());
+
     auto releasePartial = [&]() -> Result<void> {
-        if (!ownsPartial)
-            return {};
         auto freed = cuda_free_stream_ordered(
             partial,
             stream,
@@ -508,7 +521,7 @@ Result<void> launch_attention_decoder_variant(
         <<<partialGrid, partialBlock, 0, stream>>>(
             program,
             partial,
-            SplitSize,
+            splitSize,
             numSplits);
     auto partialLaunch = cuda_check(cudaGetLastError(), "cuda attention decoder partial launch");
     if (!partialLaunch) {
@@ -543,12 +556,10 @@ Result<void> launch_attention_decoder_best_split(
         DeviceAttentionProgram program,
         const CudaLaunchContext& context,
         const cudaDeviceProp& props) {
-    int splitSize = choose_decoder_split_size(program, props);
-    if (splitSize == 512)
-        return launch_attention_decoder_variant<HeadDim, 512>(program, context);
-    if (splitSize == 256)
-        return launch_attention_decoder_variant<HeadDim, 256>(program, context);
-    return launch_attention_decoder_variant<HeadDim, 128>(program, context);
+    int splitSize = choose_decoder_split_size(
+        program,
+        props);
+    return launch_attention_decoder_variant<HeadDim>(program, context, splitSize);
 }
 
 Result<DeviceAttentionProgram> pack_attention_program(
@@ -694,7 +705,9 @@ Result<void> launch_cuda_attention(
     const cudaDeviceProp& props = *context.deviceProps;
 
     if (launchProgram.tq == 1) {
-        int splitSize = choose_decoder_split_size(launchProgram, props);
+        int splitSize = choose_decoder_split_size(
+            launchProgram,
+            props);
         int64_t numSplits = ceil_div_i64(launchProgram.tk, splitSize);
         if (numSplits > std::numeric_limits<unsigned>::max()) {
             return make_error("cuda attention decoder split count exceeds CUDA grid limit");
