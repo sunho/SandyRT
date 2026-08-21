@@ -1,5 +1,6 @@
 #include "Device.h"
 
+#include <bit>
 #include <utility>
 #include <vector>
 
@@ -9,7 +10,15 @@ std::unique_ptr<DeviceScratchAllocator> Device::createScratchAllocator() {
     return nullptr;
 }
 
-Result<DevicePagedPoolId> Device::createPagedPool(DevicePagedPoolDesc) {
+Result<DevicePagedPoolId> Device::createPagedPool(DevicePagedPoolDesc desc) {
+    if (desc.pageSize <= 0)
+        return make_error("paged tensor pool page_size must be > 0");
+    if (!std::has_single_bit(static_cast<uint64_t>(desc.pageSize)))
+        return make_error("paged tensor pool page_size must be a power of two");
+    return createPagedPoolImpl(std::move(desc));
+}
+
+Result<DevicePagedPoolId> Device::createPagedPoolImpl(DevicePagedPoolDesc) {
     return make_error("device does not support paged tensor pools");
 }
 

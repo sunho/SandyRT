@@ -37,7 +37,7 @@ public:
 
     virtual Result<DeviceBufferId> load(core::TensorBuffer& src) = 0;
 
-    virtual Result<DevicePagedPoolId> createPagedPool(DevicePagedPoolDesc desc);
+    Result<DevicePagedPoolId> createPagedPool(DevicePagedPoolDesc desc);
     virtual Result<void> destroyPagedPool(DevicePagedPoolId pool);
     virtual Result<DevicePagedTensorId> allocPaged(
         DevicePagedPoolId pool,
@@ -60,6 +60,9 @@ public:
 
     virtual Result<TensorBufferPtr> read(DeviceTensorView src) = 0;
     virtual Result<TensorBufferPtr> read(DevicePagedTensorView src);
+
+protected:
+    virtual Result<DevicePagedPoolId> createPagedPoolImpl(DevicePagedPoolDesc desc);
 };
 
 } // namespace sandy::device

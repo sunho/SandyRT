@@ -1,5 +1,6 @@
 #include "MidIRMaterializer.h"
 
+#include <bit>
 #include <functional>
 #include <memory>
 
@@ -44,6 +45,8 @@ Result<ValueType> value_type_from_high_tensor_type(
     if (type.kind == high_ir::TensorKind::PagedTensor) {
         if (type.pageSize <= 0)
             return make_error("PagedTensor requires positive page_size");
+        if (!std::has_single_bit(static_cast<uint64_t>(type.pageSize)))
+            return make_error("PagedTensor page_size must be a power of two");
         auto growDim = infer_paged_tensor_grow_dim(type.dims);
         if (!growDim)
             return make_error(growDim.error());

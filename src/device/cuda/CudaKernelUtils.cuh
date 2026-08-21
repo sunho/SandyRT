@@ -2,8 +2,10 @@
 
 #include "CudaKernels.h"
 
+#include <bit>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 
 namespace sandy::device::cuda_kernel {
 
@@ -30,6 +32,11 @@ struct TensorArg {
     int64_t pageSize = -1;
     int64_t pageCount = 0;
     int64_t pageElementCount = 0;
+    int pageShift = -1;
+    int64_t pageMask = 0;
+    int64_t pagedInnerElements = 0;
+    int64_t pagedLogicalPrefixElements = 0;
+    int64_t pagedPhysicalPrefixElements = 0;
 };
 
 template <int MaxInputs = kMaxInputs>
@@ -74,142 +81,176 @@ __device__ inline uint16_t float_to_bf16_bits(float value) {
 
 __device__ inline int64_t paged_storage_index(
         const TensorArg& tensor,
-        int64_t index,
+        int64_t linear,
         void** pageOut) {
-    int64_t remaining = index;
-    int64_t coords[kMaxRank]{};
-    for (int d = tensor.rank - 1; d >= 0; --d) {
-        coords[d] = remaining % tensor.dims[d];
-        remaining /= tensor.dims[d];
+    if (tensor.pagedInnerElements <= 0 ||
+        tensor.pagedLogicalPrefixElements <= 0 ||
+        tensor.pageShift < 0) {
+        *pageOut = nullptr;
+        return -1;
     }
 
-    int64_t prefix = 0;
-    int64_t inner = 0;
-    int64_t innerElementCount = 1;
-
-    for (int d = tensor.rank - 1; d > tensor.growDim; --d)
-        innerElementCount *= tensor.dims[d];
-    for (int d = 0; d < tensor.growDim; ++d)
-        prefix = prefix * tensor.dims[d] + coords[d];
-    for (int d = tensor.growDim + 1; d < tensor.rank; ++d)
-        inner = inner * tensor.dims[d] + coords[d];
-
-    int64_t grow = coords[tensor.growDim];
-    int64_t pageOrdinal = grow / tensor.pageSize;
-    int64_t growInPage = grow % tensor.pageSize;
+    int64_t prefix = linear / tensor.pagedLogicalPrefixElements;
+    int64_t prefixRemainder =
+        linear - prefix * tensor.pagedLogicalPrefixElements;
+    int64_t grow = prefixRemainder / tensor.pagedInnerElements;
+    int64_t inner = prefixRemainder - grow * tensor.pagedInnerElements;
+    int64_t pageOrdinal = grow >> tensor.pageShift;
+    int64_t growInPage = grow & tensor.pageMask;
     if (pageOrdinal < 0 || pageOrdinal >= tensor.pageCount) {
         *pageOut = nullptr;
         return -1;
     }
 
     *pageOut = static_cast<void**>(tensor.data)[pageOrdinal];
-    return (prefix * tensor.pageSize + growInPage) * innerElementCount + inner;
+    return prefix * tensor.pagedPhysicalPrefixElements +
+           growInPage * tensor.pagedInnerElements + inner;
+}
+
+__device__ inline void* storage_data(
+        const TensorArg& tensor,
+        int64_t linear,
+        int64_t* storageIndex) {
+    if (tensor.access == AccessKind::Paged) {
+        void* page = nullptr;
+        *storageIndex = paged_storage_index(tensor, linear, &page);
+        return page;
+    }
+
+    *storageIndex = storage_index(tensor, linear);
+    return tensor.data;
 }
 
 __device__ inline float load_float_at_storage(
-        const TensorArg& tensor,
+        const void* data,
+        core::DType dtype,
         int64_t index) {
-    if (tensor.access == AccessKind::Paged) {
-        void* page = nullptr;
-        int64_t pageIndex = paged_storage_index(tensor, index, &page);
-        if (!page || pageIndex < 0)
-            return 0.0f;
-        switch (tensor.dtype) {
-            case core::DType::F32:
-                return static_cast<const float*>(page)[pageIndex];
-            case core::DType::BF16:
-                return bf16_bits_to_float(
-                    static_cast<const uint16_t*>(page)[pageIndex]);
-            default:
-                return 0.0f;
-        }
-    }
+    if (!data || index < 0)
+        return 0.0f;
 
-    switch (tensor.dtype) {
+    switch (dtype) {
         case core::DType::F32:
-            return static_cast<const float*>(tensor.data)[index];
+            return static_cast<const float*>(data)[index];
         case core::DType::BF16:
             return bf16_bits_to_float(
-                static_cast<const uint16_t*>(tensor.data)[index]);
+                static_cast<const uint16_t*>(data)[index]);
         default:
             return 0.0f;
     }
 }
 
+__device__ inline float load_float_at_storage(
+        const TensorArg& tensor,
+        int64_t index) {
+    return load_float_at_storage(tensor.data, tensor.dtype, index);
+}
+
 __device__ inline float load_float(
         const TensorArg& tensor,
         int64_t linear) {
-    return load_float_at_storage(tensor, storage_index(tensor, linear));
+    int64_t index = -1;
+    const void* data = storage_data(tensor, linear, &index);
+    return load_float_at_storage(data, tensor.dtype, index);
+}
+
+__device__ inline int64_t load_int_at_storage(
+        const void* data,
+        core::DType dtype,
+        int64_t index) {
+    if (!data || index < 0)
+        return 0;
+
+    if (dtype == core::DType::I32)
+        return static_cast<int64_t>(static_cast<const int32_t*>(data)[index]);
+    if (dtype == core::DType::I64)
+        return static_cast<const int64_t*>(data)[index];
+    return 0;
 }
 
 __device__ inline int64_t load_int_at_storage(
         const TensorArg& tensor,
         int64_t index) {
-    if (tensor.access == AccessKind::Paged) {
-        void* page = nullptr;
-        int64_t pageIndex = paged_storage_index(tensor, index, &page);
-        if (!page || pageIndex < 0)
-            return 0;
-        if (tensor.dtype == core::DType::I32)
-            return static_cast<int64_t>(static_cast<const int32_t*>(page)[pageIndex]);
-        return static_cast<const int64_t*>(page)[pageIndex];
-    }
-
-    if (tensor.dtype == core::DType::I32)
-        return static_cast<int64_t>(static_cast<const int32_t*>(tensor.data)[index]);
-    return static_cast<const int64_t*>(tensor.data)[index];
+    return load_int_at_storage(tensor.data, tensor.dtype, index);
 }
 
 __device__ inline int64_t load_int(
         const TensorArg& tensor,
         int64_t linear) {
-    return load_int_at_storage(tensor, storage_index(tensor, linear));
+    int64_t index = -1;
+    const void* data = storage_data(tensor, linear, &index);
+    return load_int_at_storage(data, tensor.dtype, index);
+}
+
+__device__ inline void store_int_at_storage(
+        void* data,
+        core::DType dtype,
+        int64_t index,
+        int64_t value) {
+    if (!data || index < 0)
+        return;
+
+    switch (dtype) {
+        case core::DType::I32:
+            static_cast<int32_t*>(data)[index] = static_cast<int32_t>(value);
+            return;
+        case core::DType::I64:
+            static_cast<int64_t*>(data)[index] = value;
+            return;
+        default:
+            return;
+    }
 }
 
 __device__ inline void store_int_at_storage(
         const TensorArg& tensor,
         int64_t index,
         int64_t value) {
-    switch (tensor.dtype) {
-        case core::DType::I32:
-            static_cast<int32_t*>(tensor.data)[index] = static_cast<int32_t>(value);
-            return;
-        case core::DType::I64:
-            static_cast<int64_t*>(tensor.data)[index] = value;
-            return;
-        default:
-            return;
-    }
+    store_int_at_storage(tensor.data, tensor.dtype, index, value);
 }
 
 __device__ inline void store_int(
         const TensorArg& tensor,
         int64_t linear,
         int64_t value) {
-    store_int_at_storage(tensor, storage_index(tensor, linear), value);
+    int64_t index = -1;
+    void* data = storage_data(tensor, linear, &index);
+    store_int_at_storage(data, tensor.dtype, index, value);
 }
 
 __device__ inline void store_float_at_storage(
-        const TensorArg& tensor,
+        void* data,
+        core::DType dtype,
         int64_t index,
         float value) {
-    switch (tensor.dtype) {
+    if (!data || index < 0)
+        return;
+
+    switch (dtype) {
         case core::DType::F32:
-            static_cast<float*>(tensor.data)[index] = value;
+            static_cast<float*>(data)[index] = value;
             return;
         case core::DType::BF16:
-            static_cast<uint16_t*>(tensor.data)[index] = float_to_bf16_bits(value);
+            static_cast<uint16_t*>(data)[index] = float_to_bf16_bits(value);
             return;
         default:
             return;
     }
 }
 
+__device__ inline void store_float_at_storage(
+        const TensorArg& tensor,
+        int64_t index,
+        float value) {
+    store_float_at_storage(tensor.data, tensor.dtype, index, value);
+}
+
 __device__ inline void store_float(
         const TensorArg& tensor,
         int64_t linear,
         float value) {
-    store_float_at_storage(tensor, storage_index(tensor, linear), value);
+    int64_t index = -1;
+    void* data = storage_data(tensor, linear, &index);
+    store_float_at_storage(data, tensor.dtype, index, value);
 }
 
 inline bool is_contiguous(const TensorViewDesc& view) {
@@ -253,6 +294,8 @@ inline Result<TensorArg> pack_tensor_arg(const CudaDeviceBufferView& buffer) {
             return make_error("cuda paged tensor grow_dim out of range");
         if (buffer.pageSize <= 0)
             return make_error("cuda paged tensor page_size must be > 0");
+        if (!std::has_single_bit(static_cast<uint64_t>(buffer.pageSize)))
+            return make_error("cuda paged tensor page_size must be a power of two");
         if (buffer.pageCount < 0)
             return make_error("cuda paged tensor page_count must be >= 0");
         if (buffer.pageElementCount <= 0)
@@ -262,6 +305,8 @@ inline Result<TensorArg> pack_tensor_arg(const CudaDeviceBufferView& buffer) {
         arg.pageSize = buffer.pageSize;
         arg.pageCount = buffer.pageCount;
         arg.pageElementCount = buffer.pageElementCount;
+        arg.pageShift = std::countr_zero(static_cast<uint64_t>(buffer.pageSize));
+        arg.pageMask = buffer.pageSize - 1;
     }
 
     int64_t maxStorageIndex = view.storageOffset;
@@ -276,6 +321,32 @@ inline Result<TensorArg> pack_tensor_arg(const CudaDeviceBufferView& buffer) {
         arg.strides[i] = stride;
         if (numel != 0 && dim > 0)
             maxStorageIndex += (dim - 1) * stride;
+    }
+
+    if (buffer.paged) {
+        int64_t innerElements = 1;
+        for (int i = static_cast<int>(buffer.growDim) + 1; i < rank; ++i) {
+            auto dim = arg.dims[i];
+            if (dim <= 0)
+                return make_error("cuda paged tensor inner dimensions must be positive");
+            if (innerElements > std::numeric_limits<int64_t>::max() / dim)
+                return make_error("cuda paged tensor inner element count overflow");
+            innerElements *= dim;
+        }
+
+        auto growLength = arg.dims[buffer.growDim];
+        if (growLength < 0)
+            return make_error("cuda paged tensor grow dimension must be static");
+        if (growLength != 0 &&
+            innerElements > std::numeric_limits<int64_t>::max() / growLength) {
+            return make_error("cuda paged tensor logical prefix size overflow");
+        }
+        if (innerElements > std::numeric_limits<int64_t>::max() / buffer.pageSize)
+            return make_error("cuda paged tensor physical prefix size overflow");
+
+        arg.pagedInnerElements = innerElements;
+        arg.pagedLogicalPrefixElements = growLength * innerElements;
+        arg.pagedPhysicalPrefixElements = buffer.pageSize * innerElements;
     }
 
     if (numel != 0 && !buffer.paged) {

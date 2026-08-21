@@ -23,7 +23,6 @@ public:
 
     Result<DeviceBufferId> load(core::TensorBuffer& src) override;
 
-    Result<DevicePagedPoolId> createPagedPool(DevicePagedPoolDesc desc) override;
     Result<void> destroyPagedPool(DevicePagedPoolId pool) override;
     Result<DevicePagedTensorId> allocPaged(
         DevicePagedPoolId pool,
@@ -50,6 +49,8 @@ public:
     Result<TensorBufferPtr> readPaged(DevicePagedTensorId src);
 
 private:
+    Result<DevicePagedPoolId> createPagedPoolImpl(DevicePagedPoolDesc desc) override;
+
     struct CpuDeviceBuffer {
         core::TensorDesc desc;
         std::vector<uint8_t> data;

@@ -2,6 +2,7 @@
 #include "ShapeUtil.h"
 
 #include <algorithm>
+#include <bit>
 #include <cstdio>
 #include <cstdlib>
 #include <iostream>
@@ -1639,6 +1640,10 @@ Value* Builder::createPagedTensorInput(int64_t index,
     }
     if (pageSize <= 0) {
         fprintf(stderr, "paged_tensor_input page_size must be > 0\n");
+        abort();
+    }
+    if (!std::has_single_bit(static_cast<uint64_t>(pageSize))) {
+        fprintf(stderr, "paged_tensor_input page_size must be a power of two\n");
         abort();
     }
     for (int i = 0; i < dims.rank(); i++) {

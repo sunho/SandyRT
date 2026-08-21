@@ -29,7 +29,6 @@ public:
 
     Result<DeviceBufferId> load(core::TensorBuffer& src) override;
 
-    Result<DevicePagedPoolId> createPagedPool(DevicePagedPoolDesc desc) override;
     Result<void> destroyPagedPool(DevicePagedPoolId pool) override;
     Result<DevicePagedTensorId> allocPaged(
         DevicePagedPoolId pool,
@@ -50,6 +49,8 @@ public:
     Result<TensorBufferPtr> read(DeviceBufferId src);
 
 private:
+    Result<DevicePagedPoolId> createPagedPoolImpl(DevicePagedPoolDesc desc) override;
+
     using KernelProgram = std::variant<
         std::monostate,
         CudaElementwiseProgram,

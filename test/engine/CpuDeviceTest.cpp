@@ -155,6 +155,20 @@ TEST_F(CpuDeviceTest, LoadReadAndDeallocBuffer) {
     EXPECT_FALSE(readAfterDealloc);
 }
 
+TEST_F(CpuDeviceTest, PagedPoolRejectsNonPowerOfTwoPageSize) {
+    sandy::device::CpuDevice device;
+    sandy::device::DevicePagedPoolDesc poolDesc;
+    poolDesc.templateDesc = sandy::core::TensorDesc(
+        sandy::core::Shape({2, sandy::core::Shape::kDynamic, 4}),
+        sandy::core::DType::F32);
+    poolDesc.growDim = 1;
+    poolDesc.pageSize = 3;
+
+    auto pool = device.createPagedPool(poolDesc);
+    ASSERT_FALSE(pool);
+    EXPECT_NE(pool.error().find("power of two"), std::string::npos);
+}
+
 TEST_F(CpuDeviceTest, PagedPoolAllocReserveAppendAndMeta) {
     sandy::device::CpuDevice device;
     sandy::device::DevicePagedPoolDesc poolDesc;

@@ -462,7 +462,7 @@ void CudaPagedTensor::release_table() {
     syncedPageCount_ = 0;
 }
 
-Result<DevicePagedPoolId> CudaDevice::createPagedPool(DevicePagedPoolDesc desc) {
+Result<DevicePagedPoolId> CudaDevice::createPagedPoolImpl(DevicePagedPoolDesc desc) {
     auto stream = ensure_stream();
     if (!stream)
         return make_error(stream.error());

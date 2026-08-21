@@ -1,6 +1,7 @@
 #include "KernelIR.h"
 
 #include <algorithm>
+#include <bit>
 #include <iostream>
 #include <sstream>
 
@@ -110,6 +111,9 @@ Result<void> verify_value_type_impl(const ValueType& type, const std::string& na
     }
     if (type.paged.pageSize <= 0) {
         return make_error(name + " paged tensor page_size must be > 0");
+    }
+    if (!std::has_single_bit(static_cast<uint64_t>(type.paged.pageSize))) {
+        return make_error(name + " paged tensor page_size must be a power of two");
     }
     for (int i = 0; i < rank; ++i) {
         auto dim = type.shape.dim(i);

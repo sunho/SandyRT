@@ -341,7 +341,7 @@ Result<DeviceBufferId> CpuDevice::load(core::TensorBuffer& src) {
     return id;
 }
 
-Result<DevicePagedPoolId> CpuDevice::createPagedPool(DevicePagedPoolDesc desc) {
+Result<DevicePagedPoolId> CpuDevice::createPagedPoolImpl(DevicePagedPoolDesc desc) {
     auto valid = validate_paged_pool_desc(desc);
     if (!valid)
         return make_error(valid.error());

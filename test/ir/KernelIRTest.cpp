@@ -113,6 +113,21 @@ TEST(KernelIRGraphTest, VerifyTracksPagedTensorInput) {
     EXPECT_NE(dump.find("page_size=16"), std::string::npos);
 }
 
+TEST(KernelIRGraphTest, VerifyRejectsNonPowerOfTwoPagedTensorPageSize) {
+    kernel_ir::Graph graph;
+
+    auto cache = graph.addValue(
+        paged_tensor_type({2, -1, 128}, sandy::core::DType::BF16, 1, 3));
+    graph.addOp<kernel_ir::InputOp>(
+        kernel_ir::InputSource{kernel_ir::InputSourceKind::Argument, 0, ""},
+        cache);
+    graph.setOutputs({cache});
+
+    auto result = graph.verify();
+    ASSERT_FALSE(result);
+    EXPECT_NE(result.error().find("power of two"), std::string::npos);
+}
+
 TEST(KernelIRGraphTest, VerifyRejectsLayoutTransformOnPagedInput) {
     kernel_ir::Graph graph;
 
