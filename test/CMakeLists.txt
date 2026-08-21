@@ -159,6 +159,7 @@ add_executable(engine_tests
   engine/EngineTest.cpp
   engine/EngineCompileTest.cpp
   engine/CpuDeviceTest.cpp
+  engine/RuntimeTensorDescTest.cpp
 )
 
 target_link_libraries(engine_tests

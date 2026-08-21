@@ -1,5 +1,7 @@
 #include "CudaDevice.h"
+#include "CudaScratchAllocator.h"
 
+#include <limits>
 #include <memory>
 #include <span>
 #include <utility>
@@ -349,6 +351,10 @@ Result<void> CudaDevice::dealloc(DeviceBufferId buffer) {
     return {};
 }
 
+std::unique_ptr<DeviceScratchAllocator> CudaDevice::createScratchAllocator() {
+    return std::make_unique<CudaScratchAllocator>(*this);
+}
+
 Result<DeviceBufferId> CudaDevice::load(core::TensorBuffer& src) {
     auto stream = ensure_stream();
     if (!stream)
@@ -582,13 +588,37 @@ Result<TensorBufferPtr> CudaDevice::read(DeviceTensorView src) {
     if (it == buffers_.end())
         return make_error("cuda device buffer not found");
 
-    std::vector<uint8_t> data(it->second.bytes);
-    if (it->second.bytes != 0) {
+    auto expectedBytes = tensor_byte_size(src.view.desc);
+    if (!expectedBytes)
+        return make_error(expectedBytes.error());
+    auto defaultView = isDefaultView(src.view);
+    if (!defaultView)
+        return make_error(defaultView.error());
+
+    size_t sourceOffset = 0;
+    if (*defaultView) {
+        if (src.view.storageOffset < 0)
+            return make_error("cuda device view has a negative storage offset");
+        auto elementBytes = core::dtype_size(src.view.desc.dtype);
+        if (static_cast<size_t>(src.view.storageOffset) >
+            std::numeric_limits<size_t>::max() / elementBytes)
+            return make_error("cuda device view storage offset overflow");
+        sourceOffset = static_cast<size_t>(src.view.storageOffset) * elementBytes;
+        if (sourceOffset > it->second.bytes ||
+            *expectedBytes > it->second.bytes - sourceOffset)
+            return make_error("cuda device view exceeds its backing buffer");
+    } else if (src.view.storageOffset != 0 || *expectedBytes != it->second.bytes) {
+        return make_error("cuda device cannot read a non-contiguous subview");
+    }
+
+    std::vector<uint8_t> data(*expectedBytes);
+    if (*expectedBytes != 0) {
+        auto* source = static_cast<const uint8_t*>(it->second.data) + sourceOffset;
         auto copied = cuda_check(
             cudaMemcpyAsync(
                 data.data(),
-                it->second.data,
-                it->second.bytes,
+                source,
+                *expectedBytes,
                 cudaMemcpyDeviceToHost,
                 stream_),
             "cudaMemcpyAsync device to host");

@@ -93,6 +93,10 @@ private:
     std::vector<uint32_t> pageIndices_;
     void** pageTable_ = nullptr;
     int64_t pageTableCapacity_ = 0;
+    void** hostPageTable_ = nullptr;
+    int64_t hostPageTableCapacity_ = 0;
+    int64_t syncedPageCount_ = 0;
+    std::vector<void**> retiredHostPageTables_;
 };
 
 } // namespace sandy::device

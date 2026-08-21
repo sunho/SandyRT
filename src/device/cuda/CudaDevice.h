@@ -25,6 +25,8 @@ public:
     Result<DeviceBufferId> alloc(core::TensorDesc desc) override;
     Result<void> dealloc(DeviceBufferId buffer) override;
 
+    std::unique_ptr<DeviceScratchAllocator> createScratchAllocator() override;
+
     Result<DeviceBufferId> load(core::TensorBuffer& src) override;
 
     Result<DevicePagedPoolId> createPagedPool(DevicePagedPoolDesc desc) override;
@@ -35,6 +37,7 @@ public:
     Result<void> deallocPaged(DevicePagedTensorId tensor) override;
     Result<void> reservePaged(DevicePagedTensorId tensor, int64_t pageCount) override;
     Result<void> appendPaged(DevicePagedTensorId dst, core::TensorBuffer& denseChunk) override;
+    Result<void> appendPaged(DevicePagedTensorId dst, DeviceTensorView denseChunk) override;
     Result<DevicePagedTensorMeta> pagedMeta(DevicePagedTensorId tensor) const override;
 
     Result<void> run(

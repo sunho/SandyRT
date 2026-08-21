@@ -5,6 +5,7 @@ build-fast/
 build-server/
 build-server-cublas/
 build-server-cuda/
+build-server-cuda-*/
 build-cublas/
 build-cublas12/
 build-cuda/
@@ -27,3 +28,8 @@ experiments/gemma4_a4b26b/
 *.safetensors
 tokenizer.json
 logs/
+profiles/
+gmon.out
+gmon.*
+perf.data*
+perf.script

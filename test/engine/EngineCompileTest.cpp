@@ -5,7 +5,9 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstdint>
+#include <initializer_list>
 #include <memory>
 #include <span>
 #include <string>
@@ -14,6 +16,14 @@
 #include <vector>
 
 namespace {
+
+void expect_same_buffers(
+        const std::vector<sandy::device::DeviceBufferId>& actual,
+        std::initializer_list<sandy::device::DeviceBufferId> expected) {
+    EXPECT_EQ(actual.size(), expected.size());
+    EXPECT_TRUE(std::is_permutation(
+        actual.begin(), actual.end(), expected.begin(), expected.end()));
+}
 
 class FakeTensorBuffer final : public sandy::core::TensorBuffer {
 public:
@@ -243,7 +253,7 @@ TEST_F(EngineCompileTest, RunExecutesKernelGraphWithFakeDevice) {
     EXPECT_EQ(fakePtr->runs[0].outputs, std::vector<sandy::device::DeviceBufferId>({202}));
 
     EXPECT_EQ(fakePtr->reads, std::vector<sandy::device::DeviceBufferId>({202}));
-    EXPECT_EQ(fakePtr->deallocs, std::vector<sandy::device::DeviceBufferId>({200, 201, 202}));
+    expect_same_buffers(fakePtr->deallocs, {200, 201, 202});
 }
 
 TEST_F(EngineCompileTest, RunEmbeddingWithRank1WeightAllocatesScalarLookupShape) {
@@ -345,8 +355,7 @@ TEST_F(EngineCompileTest, RunValuesKeepsTupleOutputElementsAliveUntilReadAndThen
 
     EXPECT_EQ(fake->reads,
               std::vector<sandy::device::DeviceBufferId>({202, 203}));
-    EXPECT_EQ(fake->deallocs,
-              std::vector<sandy::device::DeviceBufferId>({200, 201, 202, 203}));
+    expect_same_buffers(fake->deallocs, {200, 201, 202, 203});
     EXPECT_TRUE(fake->bufferDescs.empty());
 }
 
@@ -526,7 +535,7 @@ TEST_F(EngineCompileTest, RunExecutesKernelOnDeviceSelectedByTransferredInput) {
     EXPECT_EQ(second->runs[0].inputs, std::vector<sandy::device::DeviceBufferId>({200}));
     EXPECT_EQ(second->runs[0].outputs, std::vector<sandy::device::DeviceBufferId>({201}));
     EXPECT_EQ(second->reads, std::vector<sandy::device::DeviceBufferId>({201}));
-    EXPECT_EQ(second->deallocs, std::vector<sandy::device::DeviceBufferId>({200, 201}));
+    expect_same_buffers(second->deallocs, {200, 201});
 }
 
 TEST_F(EngineCompileTest, RunReportsProfileEventsForKernels) {

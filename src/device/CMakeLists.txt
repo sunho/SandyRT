@@ -9,6 +9,7 @@ if(SANDY_ENABLE_CUDA)
   target_sources(DeviceLib
     PRIVATE
     cuda/CudaRuntime.cpp
+    cuda/CudaScratchAllocator.cpp
     cuda/CudaDevice.cpp
     cuda/CudaPagedTensor.cpp
     cuda/CudaAttentionKernels.cu

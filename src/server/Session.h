@@ -23,6 +23,10 @@ struct GenerateResult {
     std::string finishReason;
     int32_t promptTokens = 0;
     int32_t completionTokens = 0;
+    double prefillMilliseconds = 0.0;
+    double decodeMilliseconds = 0.0;
+    double prefillTokensPerSecond = 0.0;
+    double decodeTokensPerSecond = 0.0;
 };
 
 struct CacheGroupConfig {

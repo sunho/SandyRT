@@ -2,7 +2,8 @@
 
 #include "DeviceWiseCopier.h"
 #include "MidIRToKernelIR.h"
-#include "ShapeUtil.h"
+#include "RuntimeScratchPlan.h"
+#include "RuntimeTensorDesc.h"
 
 #include <algorithm>
 #include <chrono>
@@ -33,7 +34,6 @@ using ir::kernel_ir::Op;
 using ir::kernel_ir::OpKind;
 using ir::kernel_ir::PagedAppendOp;
 using ir::kernel_ir::ValueId;
-using ir::kernel_ir::ValueType;
 
 using Clock = std::chrono::steady_clock;
 
@@ -83,14 +83,56 @@ void profile_device_run_boundary(
 }
 
 struct RuntimeState {
+    struct BufferRef {
+        size_t valueCount = 0;
+        bool owned = false;
+    };
+
     std::unordered_map<ValueId, DeviceBufferId> buffers;
     std::unordered_map<ValueId, DevicePagedTensorView> pagedTensors;
     std::unordered_map<ValueId, TensorViewDesc> views;
     std::unordered_map<ValueId, uint32_t> bufferDevices;
     std::unordered_map<ValueId, std::vector<ValueId>> tensorTuples;
-    std::unordered_set<ValueId> borrowedBuffers;
-    std::vector<size_t> remainingUses;
-    std::vector<bool> isOutput;
+    std::unordered_map<DeviceId, std::unordered_map<DeviceBufferId, BufferRef>> bufferRefs;
+    std::vector<std::pair<DeviceId, DeviceBufferId>> retiredOwnedBuffers;
+    std::unordered_map<DeviceId, DeviceBufferId> scratchBuffers;
+    RuntimeTensorDescs tensorDescs;
+
+    void addBuffer(
+            ValueId value,
+            DeviceBufferId buffer,
+            TensorViewDesc view,
+            DeviceId device,
+            bool owned) {
+        auto existing = buffers.find(value);
+        if (existing != buffers.end()) {
+            auto oldDevice = bufferDevices.at(value);
+            auto oldBuffer = existing->second;
+            if (oldDevice == device && oldBuffer == buffer) {
+                views[value] = std::move(view);
+                bufferRefs[device][buffer].owned |= owned;
+                return;
+            }
+
+            auto refsByDevice = bufferRefs.find(oldDevice);
+            auto oldRef = refsByDevice->second.find(oldBuffer);
+            oldRef->second.valueCount--;
+            if (oldRef->second.valueCount == 0) {
+                if (oldRef->second.owned)
+                    retiredOwnedBuffers.emplace_back(oldDevice, oldBuffer);
+                refsByDevice->second.erase(oldRef);
+                if (refsByDevice->second.empty())
+                    bufferRefs.erase(refsByDevice);
+            }
+        }
+
+        buffers[value] = buffer;
+        views[value] = std::move(view);
+        bufferDevices[value] = device;
+        auto& ref = bufferRefs[device][buffer];
+        ref.valueCount++;
+        ref.owned = ref.owned || owned;
+    }
 };
 
 Result<Device*> lookup_device(
@@ -137,15 +179,6 @@ Result<DeviceBufferId> lookup_runtime_buffer(
     return it->second;
 }
 
-Result<core::TensorDesc> lookup_runtime_desc(
-        const std::unordered_map<ValueId, TensorViewDesc>& views,
-        ValueId value) {
-    auto it = views.find(value);
-    if (it == views.end())
-        return make_error("missing runtime descriptor for value: " + std::to_string(value));
-    return it->second.desc;
-}
-
 Result<TensorViewDesc> lookup_runtime_view(
         const std::unordered_map<ValueId, TensorViewDesc>& views,
         ValueId value) {
@@ -153,389 +186,6 @@ Result<TensorViewDesc> lookup_runtime_view(
     if (it == views.end())
         return make_error("missing runtime view for value: " + std::to_string(value));
     return it->second;
-}
-
-Result<void> verify_desc_matches_type(
-        const core::TensorDesc& desc,
-        const ValueType& type,
-        const std::string& valueName) {
-    if (desc.dtype != type.dtype) {
-        return make_error(valueName + " dtype mismatch: expected " +
-                          std::string(core::dtype_name(type.dtype)) + ", got " +
-                          core::dtype_name(desc.dtype));
-    }
-    if (desc.shape.has_dynamic())
-        return make_error(valueName + " runtime shape must be static");
-    if (desc.shape.rank() != type.shape.rank()) {
-        return make_error(valueName + " rank mismatch: expected " +
-                          std::to_string(type.shape.rank()) + ", got " +
-                          std::to_string(desc.shape.rank()));
-    }
-    for (int i = 0; i < type.shape.rank(); i++) {
-        int64_t expected = type.shape.dim(i);
-        if (expected != core::Shape::kDynamic && expected != desc.shape.dim(i)) {
-            return make_error(valueName + " dimension " + std::to_string(i) +
-                              " mismatch: expected " + std::to_string(expected) +
-                              ", got " + std::to_string(desc.shape.dim(i)));
-        }
-    }
-    return {};
-}
-
-Result<core::TensorDesc> desc_from_static_type(const ValueType& type) {
-    if (type.shape.has_dynamic())
-        return make_error("cannot allocate unresolved dynamic KernelIR value");
-    return core::TensorDesc(type.shape, type.dtype);
-}
-
-Result<core::TensorDesc> desc_with_shape(
-        const Graph& graph,
-        ValueId value,
-        core::Shape shape) {
-    const auto& type = graph.value(value).type;
-    core::TensorDesc desc(std::move(shape), type.dtype);
-    auto verify = verify_desc_matches_type(desc, type, "value %" + std::to_string(value));
-    if (!verify)
-        return make_error(verify.error());
-    return desc;
-}
-
-Result<core::TensorDesc> resolve_matmul_desc(
-        const Graph& graph,
-        const ir::kernel_ir::MatMulKernelOp& op,
-        ValueId output,
-        const std::unordered_map<ValueId, TensorViewDesc>& views) {
-    auto lhsDesc = lookup_runtime_desc(views, op.inputs()[0]);
-    if (!lhsDesc)
-        return make_error(lhsDesc.error());
-    auto rhsDesc = lookup_runtime_desc(views, op.inputs()[1]);
-    if (!rhsDesc)
-        return make_error(rhsDesc.error());
-
-    const auto& lhsShape = lhsDesc->shape;
-    const auto& rhsShape = rhsDesc->shape;
-    auto lhsDims = lhsShape.dims();
-    auto rhsDims = rhsShape.dims();
-    core::Shape lhsBatch(std::vector<int64_t>(lhsDims.begin(), lhsDims.end() - 2));
-    core::Shape rhsBatch(std::vector<int64_t>(rhsDims.begin(), rhsDims.end() - 2));
-    auto batch = core::matmul_batch_shape(lhsBatch, rhsBatch);
-    if (!batch)
-        return make_error(batch.error());
-    auto outDims = batch.take().dims();
-    outDims.push_back(lhsShape.dim(lhsShape.rank() - (op.transposeLhs() ? 1 : 2)));
-    outDims.push_back(rhsShape.dim(rhsShape.rank() - (op.transposeRhs() ? 2 : 1)));
-    return desc_with_shape(graph, output, core::Shape(std::move(outDims)));
-}
-
-Result<core::TensorDesc> resolve_reduction_desc(
-        const Graph& graph,
-        const ir::kernel_ir::ReductionKernelOp& op,
-        ValueId output,
-        const std::unordered_map<ValueId, TensorViewDesc>& views) {
-    auto input = lookup_runtime_desc(views, op.inputs()[0]);
-    if (!input)
-        return make_error(input.error());
-
-    int rank = input->shape.rank();
-    std::vector<int> axes;
-    axes.reserve(op.axes().size());
-    for (auto axis : op.axes()) {
-        if (axis < -rank || axis >= rank)
-            return make_error("reduction axis out of range");
-        axis = axis < 0 ? axis + rank : axis;
-        for (auto existing : axes) {
-            if (existing == axis)
-                return make_error("reduction axes must be unique");
-        }
-        axes.push_back(static_cast<int>(axis));
-    }
-
-    auto dims = input->shape.dims();
-    if (op.keepDims()) {
-        for (auto axis : axes)
-            dims[static_cast<size_t>(axis)] = 1;
-    } else {
-        std::sort(axes.begin(), axes.end(), [](int lhs, int rhs) {
-            return lhs > rhs;
-        });
-        for (auto axis : axes)
-            dims.erase(dims.begin() + axis);
-    }
-    return desc_with_shape(graph, output, core::Shape(std::move(dims)));
-}
-
-Result<core::TensorDesc> resolve_topk_desc(
-        const Graph& graph,
-        const ir::kernel_ir::TopKKernelOp& op,
-        ValueId output,
-        const std::unordered_map<ValueId, TensorViewDesc>& views) {
-    auto input = lookup_runtime_desc(views, op.inputs()[0]);
-    if (!input)
-        return make_error(input.error());
-
-    int rank = input->shape.rank();
-    int64_t axis = op.axis();
-    if (axis < -rank || axis >= rank)
-        return make_error("topk axis out of range");
-    axis = axis < 0 ? axis + rank : axis;
-
-    auto dims = input->shape.dims();
-    dims[static_cast<size_t>(axis)] = op.k();
-    return desc_with_shape(graph, output, core::Shape(std::move(dims)));
-}
-
-Result<core::TensorDesc> resolve_moe_gather_desc(
-        const Graph& graph,
-        const ir::kernel_ir::MoeGatherKernelOp& op,
-        ValueId output,
-        const std::unordered_map<ValueId, TensorViewDesc>& views) {
-    auto x = lookup_runtime_desc(views, op.inputs()[0]);
-    if (!x)
-        return make_error(x.error());
-
-    int rank = x->shape.rank();
-    if (rank != 2 && rank != 3)
-        return make_error("moe_gather input rank must be 2 or 3");
-
-    int64_t seq = x->shape.dim(rank == 3 ? 1 : 0);
-    int64_t hidden = x->shape.dim(rank - 1);
-    if (seq < 0 || hidden < 0)
-        return make_error("moe_gather runtime dimensions must be static");
-    int64_t rows = seq * op.topK();
-
-    auto outputs = op.outputs();
-    if (output == outputs[0]) {
-        if (rank == 3) {
-            return desc_with_shape(
-                graph,
-                output,
-                core::Shape({x->shape.dim(0), rows, hidden}));
-        }
-        return desc_with_shape(graph, output, core::Shape({rows, hidden}));
-    }
-    if (output == outputs[1] || output == outputs[2]) {
-        if (rank == 3) {
-            return desc_with_shape(
-                graph,
-                output,
-                core::Shape({x->shape.dim(0), rows}));
-        }
-        return desc_with_shape(graph, output, core::Shape({rows}));
-    }
-    if (output == outputs[3]) {
-        if (rank == 3) {
-            return desc_with_shape(
-                graph,
-                output,
-                core::Shape({x->shape.dim(0), op.numExperts() + 1}));
-        }
-        return desc_with_shape(graph, output, core::Shape({op.numExperts() + 1}));
-    }
-
-    return make_error("moe_gather unknown output");
-}
-
-Result<core::TensorDesc> resolve_moe_matmul_desc(
-        const Graph& graph,
-        const ir::kernel_ir::MoeMatMulKernelOp& op,
-        ValueId output,
-        const std::unordered_map<ValueId, TensorViewDesc>& views) {
-    auto x = lookup_runtime_desc(views, op.inputs()[0]);
-    if (!x)
-        return make_error(x.error());
-    auto weight = lookup_runtime_desc(views, op.inputs()[2]);
-    if (!weight)
-        return make_error(weight.error());
-
-    int rank = x->shape.rank();
-    if (rank != 2 && rank != 3)
-        return make_error("moe_matmul input rank must be 2 or 3");
-    if (weight->shape.rank() != 3)
-        return make_error("moe_matmul weight rank must be 3");
-
-    int64_t rows = x->shape.dim(rank - 2);
-    int64_t outFeatures = weight->shape.dim(op.transposeRhs() ? 1 : 2);
-    if (rank == 3) {
-        return desc_with_shape(
-            graph,
-            output,
-            core::Shape({x->shape.dim(0), rows, outFeatures}));
-    }
-    return desc_with_shape(graph, output, core::Shape({rows, outFeatures}));
-}
-
-Result<core::TensorDesc> resolve_output_desc(
-        const Graph& graph,
-        const Op& op,
-        ValueId output,
-        const std::unordered_map<ValueId, TensorViewDesc>& views) {
-    switch (op.kind()) {
-        case OpKind::Input:
-            return make_error("input op output descriptor is bound externally");
-        case OpKind::DeviceTransfer: {
-            auto input = lookup_runtime_desc(views, op.inputs()[0]);
-            if (!input)
-                return make_error(input.error());
-            return desc_with_shape(graph, output, input->shape);
-        }
-        case OpKind::ElementwiseKernel: {
-            auto inputs = op.inputs();
-            if (inputs.empty())
-                return desc_from_static_type(graph.value(output).type);
-            if (inputs.size() == 1) {
-                auto desc = lookup_runtime_desc(views, inputs[0]);
-                if (!desc)
-                    return make_error(desc.error());
-                return desc_with_shape(graph, output, desc->shape);
-            }
-            if (inputs.size() == 2) {
-                auto lhs = lookup_runtime_desc(views, inputs[0]);
-                if (!lhs)
-                    return make_error(lhs.error());
-                auto rhs = lookup_runtime_desc(views, inputs[1]);
-                if (!rhs)
-                    return make_error(rhs.error());
-                auto shape = core::broadcast_shape(lhs->shape, rhs->shape);
-                if (!shape)
-                    return make_error(shape.error());
-                return desc_with_shape(graph, output, shape.take());
-            }
-            return desc_from_static_type(graph.value(output).type);
-        }
-        case OpKind::LayoutTransform: {
-            const auto& layout = static_cast<const ir::kernel_ir::LayoutTransformOp&>(op);
-            auto input = lookup_runtime_desc(views, layout.inputs()[0]);
-            if (!input)
-                return make_error(input.error());
-            switch (layout.transform()) {
-                case LayoutTransformKind::Reshape: {
-                    auto shape = core::infer_reshape_shape(
-                        input->shape,
-                        core::Shape(layout.dims()));
-                    if (!shape)
-                        return make_error(shape.error());
-                    return desc_with_shape(graph, output, shape.take());
-                }
-                case LayoutTransformKind::Transpose: {
-                    auto dims = input->shape.dims();
-                    if (dims.size() < 2)
-                        return make_error("transpose input rank must be >= 2");
-                    std::swap(dims[dims.size() - 1], dims[dims.size() - 2]);
-                    return desc_with_shape(graph, output, core::Shape(std::move(dims)));
-                }
-                case LayoutTransformKind::Permute: {
-                    std::vector<int64_t> dims;
-                    dims.reserve(layout.dims().size());
-                    for (int64_t axis : layout.dims())
-                        dims.push_back(input->shape.dim(static_cast<int>(axis)));
-                    return desc_with_shape(graph, output, core::Shape(std::move(dims)));
-                }
-                case LayoutTransformKind::Contiguous:
-                    return desc_with_shape(graph, output, input->shape);
-            }
-            return make_error("unsupported layout transform");
-        }
-        case OpKind::MatMulKernel:
-            return resolve_matmul_desc(
-                graph,
-                static_cast<const ir::kernel_ir::MatMulKernelOp&>(op),
-                output,
-                views);
-        case OpKind::GatherKernel: {
-            auto ids = lookup_runtime_desc(views, op.inputs()[0]);
-            if (!ids)
-                return make_error(ids.error());
-            auto table = lookup_runtime_desc(views, op.inputs()[1]);
-            if (!table)
-                return make_error(table.error());
-            if (table->shape.rank() != 1 && table->shape.rank() != 2)
-                return make_error("gather table must have rank 1 or rank 2");
-            auto dims = ids->shape.dims();
-            if (table->shape.rank() == 2)
-                dims.push_back(table->shape.dim(1));
-            return desc_with_shape(graph, output, core::Shape(std::move(dims)));
-        }
-        case OpKind::SoftmaxKernel:
-        case OpKind::NormKernel:
-        case OpKind::RoPEKernel: {
-            auto input = lookup_runtime_desc(views, op.inputs()[0]);
-            if (!input)
-                return make_error(input.error());
-            return desc_with_shape(graph, output, input->shape);
-        }
-        case OpKind::SlidingQueryKeyScoreKernel: {
-            auto q = lookup_runtime_desc(views, op.inputs()[0]);
-            if (!q)
-                return make_error(q.error());
-            auto k = lookup_runtime_desc(views, op.inputs()[1]);
-            if (!k)
-                return make_error(k.error());
-            int rank = q->shape.rank();
-            std::vector<int64_t> outDims;
-            if (rank == 4)
-                outDims.push_back(q->shape.dim(0));
-            outDims.push_back(q->shape.dim(rank - 3));
-            outDims.push_back(q->shape.dim(rank - 2));
-            outDims.push_back(k->shape.dim(rank - 2));
-            return desc_with_shape(graph, output, core::Shape(std::move(outDims)));
-        }
-        case OpKind::AttentionKernel: {
-            auto q = lookup_runtime_desc(views, op.inputs()[0]);
-            if (!q)
-                return make_error(q.error());
-            auto v = lookup_runtime_desc(views, op.inputs()[2]);
-            if (!v)
-                return make_error(v.error());
-            auto dims = q->shape.dims();
-            if (dims.empty())
-                return make_error("attention query rank must be >= 1");
-            dims.back() = v->shape.dim(v->shape.rank() - 1);
-            return desc_with_shape(graph, output, core::Shape(std::move(dims)));
-        }
-        case OpKind::LinearKernel: {
-            auto x = lookup_runtime_desc(views, op.inputs()[0]);
-            if (!x)
-                return make_error(x.error());
-            auto weight = lookup_runtime_desc(views, op.inputs()[1]);
-            if (!weight)
-                return make_error(weight.error());
-            auto dims = x->shape.dims();
-            dims.back() = weight->shape.dim(0);
-            return desc_with_shape(graph, output, core::Shape(std::move(dims)));
-        }
-        case OpKind::TopKKernel:
-            return resolve_topk_desc(
-                graph,
-                static_cast<const ir::kernel_ir::TopKKernelOp&>(op),
-                output,
-                views);
-        case OpKind::MoeGatherKernel:
-            return resolve_moe_gather_desc(
-                graph,
-                static_cast<const ir::kernel_ir::MoeGatherKernelOp&>(op),
-                output,
-                views);
-        case OpKind::MoeMatMulKernel:
-            return resolve_moe_matmul_desc(
-                graph,
-                static_cast<const ir::kernel_ir::MoeMatMulKernelOp&>(op),
-                output,
-                views);
-        case OpKind::MoeScatterSumKernel:
-        {
-            auto reference = lookup_runtime_desc(views, op.inputs()[3]);
-            if (!reference)
-                return make_error(reference.error());
-            return desc_with_shape(graph, output, reference->shape);
-        }
-        case OpKind::ReductionKernel:
-            return resolve_reduction_desc(
-                graph,
-                static_cast<const ir::kernel_ir::ReductionKernelOp&>(op),
-                output,
-                views);
-    }
-    return make_error("unknown KernelIR op kind");
 }
 
 Result<void> dealloc_value(
@@ -550,86 +200,55 @@ Result<void> dealloc_value(
         return {};
     }
 
-    auto buffer = lookup_runtime_buffer(state.buffers, value);
-    if (!buffer)
-        return make_error(buffer.error());
+    auto bufferIt = state.buffers.find(value);
+    if (bufferIt == state.buffers.end())
+        return make_error("missing runtime buffer for value: " + std::to_string(value));
     auto deviceIt = state.bufferDevices.find(value);
     if (deviceIt == state.bufferDevices.end())
         return make_error("missing runtime device for value: " + std::to_string(value));
-    auto device = lookup_device(devices, deviceIt->second);
-    if (!device)
-        return make_error(device.error());
 
-    auto bufferId = buffer.take();
-    bool shared = false;
-    for (const auto& item : state.buffers) {
-        if (item.first == value || item.second != bufferId)
-            continue;
-        auto otherDevice = state.bufferDevices.find(item.first);
-        if (otherDevice != state.bufferDevices.end() &&
-            otherDevice->second == deviceIt->second) {
-            shared = true;
-            break;
+    auto refsByDevice = state.bufferRefs.find(deviceIt->second);
+    if (refsByDevice == state.bufferRefs.end())
+        return make_error("missing runtime buffer refs for value: " + std::to_string(value));
+    auto refIt = refsByDevice->second.find(bufferIt->second);
+    if (refIt == refsByDevice->second.end() || refIt->second.valueCount == 0)
+        return make_error("missing runtime buffer ref for value: " + std::to_string(value));
+
+    refIt->second.valueCount--;
+    if (refIt->second.valueCount == 0) {
+        auto owned = refIt->second.owned;
+        auto buffer = bufferIt->second;
+        refsByDevice->second.erase(refIt);
+        if (refsByDevice->second.empty())
+            state.bufferRefs.erase(refsByDevice);
+        if (owned) {
+            auto device = lookup_device(devices, deviceIt->second);
+            if (!device)
+                return make_error(device.error());
+            auto dealloc = (*device)->dealloc(buffer);
+            if (!dealloc)
+                return make_error(dealloc.error());
         }
-    }
-
-    if (!shared && state.borrowedBuffers.find(value) == state.borrowedBuffers.end()) {
-        auto dealloc = (*device)->dealloc(bufferId);
-        if (!dealloc)
-            return make_error(dealloc.error());
     }
     state.buffers.erase(value);
     state.views.erase(value);
     state.bufferDevices.erase(value);
-    state.borrowedBuffers.erase(value);
     return {};
 }
 
-Result<void> finish_op_lifetimes(
-        std::vector<std::unique_ptr<Device>>& devices,
-        RuntimeState& state,
-        const Op& finishedOp) {
-    for (auto input : finishedOp.inputs()) {
-        if (state.remainingUses[input] == 0)
-            return make_error("KernelIR value use count underflow");
-        state.remainingUses[input]--;
-        if (state.remainingUses[input] == 0 && !state.isOutput[input]) {
-            auto dealloc = dealloc_value(devices, state, input);
-            if (!dealloc)
-                return make_error(dealloc.error());
-        }
-    }
-
-    for (auto output : finishedOp.outputs()) {
-        if (state.remainingUses[output] == 0 && !state.isOutput[output]) {
-            auto dealloc = dealloc_value(devices, state, output);
-            if (!dealloc)
-                return make_error(dealloc.error());
-        }
-    }
-
-    return {};
-}
-
-RuntimeState initialize_runtime_state(const Graph& graph) {
+RuntimeState initialize_runtime_state(
+        RuntimeTensorDescs tensorDescs,
+        RuntimeScratchPlan scratch) {
     RuntimeState state;
-    state.remainingUses.resize(graph.values().size(), 0);
-    state.isOutput.resize(graph.values().size(), false);
-    for (const auto& value : graph.values())
-        state.remainingUses[value.id] = value.uses.size();
-    for (auto output : graph.outputs()) {
-        if (output < state.isOutput.size()) {
-            state.isOutput[output] = true;
-            const auto& value = graph.value(output);
-            if (value.type.kind == ir::kernel_ir::ValueKind::TensorTuple &&
-                value.def.op != ir::kernel_ir::kInvalidOpId) {
-                const auto& def = graph.op(value.def.op);
-                for (auto input : def.inputs()) {
-                    if (input < state.isOutput.size())
-                        state.isOutput[input] = true;
-                }
-            }
-        }
+    state.tensorDescs = std::move(tensorDescs);
+    state.scratchBuffers = std::move(scratch.buffers);
+    for (auto& [value, tensor] : scratch.views) {
+        state.addBuffer(
+            value,
+            tensor.buffer,
+            std::move(tensor.view),
+            scratch.devices.at(value),
+            false);
     }
     return state;
 }
@@ -681,6 +300,80 @@ Result<TensorBufferPtr> resolve_input_buffer(
     return make_error("unknown KernelIR input source");
 }
 
+Result<core::TensorDesc> argument_input_desc(
+        const InputOp& inputOp,
+        std::span<const RunInput> inputs) {
+    auto index = inputOp.source().index;
+    if (index < 0 || static_cast<size_t>(index) >= inputs.size())
+        return make_error("input index out of range: " + std::to_string(index));
+
+    const auto* value = &inputs[static_cast<size_t>(index)];
+    if (inputOp.source().tupleElement >= 0) {
+        auto* tuple = std::get_if<RunTensorTuple>(value);
+        if (!tuple)
+            return make_error("input arg " + std::to_string(index) + " must be a tensor tuple");
+        auto element = static_cast<size_t>(inputOp.source().tupleElement);
+        if (element >= tuple->elements.size())
+            return make_error("input tuple element out of range");
+        const auto& item = tuple->elements[element];
+        if (auto* tensor = std::get_if<TensorBufferPtr>(&item)) {
+            if (!*tensor) return make_error("null tensor tuple element");
+            return (*tensor)->desc();
+        }
+        if (auto* paged = std::get_if<DevicePagedTensorView>(&item))
+            return paged->meta.logicalDesc;
+        return make_error("unsupported tensor tuple element");
+    }
+
+    if (auto* tensor = std::get_if<TensorBufferPtr>(value)) {
+        if (!*tensor) return make_error("null input buffer at index: " + std::to_string(index));
+        return (*tensor)->desc();
+    }
+    if (auto* paged = std::get_if<DevicePagedTensorView>(value))
+        return paged->meta.logicalDesc;
+    return make_error("input arg " + std::to_string(index) + " must be a tensor");
+}
+
+Result<RuntimeTensorDescs> infer_invocation_tensor_descs(
+        const Graph& graph,
+        std::span<const RunInput> inputs,
+        const TensorMap* hostWeights,
+        const DeviceWeightMap* deviceWeights,
+        DeviceId defaultDevice) {
+    RuntimeTensorDescs inputDescs(graph.values().size());
+    for (const auto& opPtr : graph.ops()) {
+        if (opPtr->kind() != OpKind::Input)
+            continue;
+        const auto& input = static_cast<const InputOp&>(*opPtr);
+        auto output = input.outputs()[0];
+        Result<core::TensorDesc> desc = make_error("unresolved input descriptor");
+        if (input.source().kind == InputSourceKind::Argument) {
+            desc = argument_input_desc(input, inputs);
+        } else if (input.source().kind == InputSourceKind::Weight && hostWeights) {
+            auto weight = hostWeights->find(input.source().name);
+            if (weight == hostWeights->end() || !weight->second)
+                return make_error("missing weight buffer: " + input.source().name);
+            desc = weight->second->desc();
+        } else if (input.source().kind == InputSourceKind::Weight && deviceWeights) {
+            auto device = deviceWeights->weightsByDevice.find(defaultDevice);
+            if (device == deviceWeights->weightsByDevice.end())
+                return make_error("missing device weights for device: " + std::to_string(defaultDevice));
+            auto weight = device->second.tensors.find(input.source().name);
+            if (weight == device->second.tensors.end())
+                return make_error("missing device weight buffer: " + input.source().name);
+            desc = weight->second.view.desc;
+        } else if (input.source().kind == InputSourceKind::External) {
+            return make_error("external KernelIR inputs are not supported by Engine::runValues");
+        }
+        if (!desc)
+            return make_error(desc.error());
+        auto set = inputDescs.set(output, desc.take());
+        if (!set)
+            return make_error(set.error());
+    }
+    return inferRuntimeTensorDescs(graph, std::move(inputDescs));
+}
+
 Result<void> bind_input_op(
         Device& defaultDevice,
         DeviceId defaultDeviceId,
@@ -717,7 +410,7 @@ Result<void> bind_input_op(
             return make_error("input arg " + std::to_string(index) +
                               " must be a paged tensor");
 
-        auto verify = verify_desc_matches_type(
+        auto verify = verifyRuntimeTensorDesc(
             paged->meta.logicalDesc,
             outputType,
             "value %" + std::to_string(output));
@@ -741,7 +434,7 @@ Result<void> bind_input_op(
     if (!host)
         return make_error(host.error());
 
-    auto verify = verify_desc_matches_type(
+    auto verify = verifyRuntimeTensorDesc(
         (*host)->desc(),
         graph.value(output).type,
         "value %" + std::to_string(output));
@@ -755,9 +448,12 @@ Result<void> bind_input_op(
     if (!view)
         return make_error(view.error());
 
-    state.buffers[output] = loaded.take();
-    state.views[output] = view.take();
-    state.bufferDevices[output] = defaultDeviceId;
+    state.addBuffer(
+        output,
+        loaded.take(),
+        view.take(),
+        defaultDeviceId,
+        true);
     return {};
 }
 
@@ -789,17 +485,19 @@ Result<void> bind_input_op(
     if (weightIt == deviceIt->second.tensors.end())
         return make_error("missing device weight buffer: " + inputOp.source().name);
 
-    auto verify = verify_desc_matches_type(
+    auto verify = verifyRuntimeTensorDesc(
         weightIt->second.view.desc,
         graph.value(output).type,
         "value %" + std::to_string(output));
     if (!verify)
         return make_error(verify.error());
 
-    state.buffers[output] = weightIt->second.buffer;
-    state.views[output] = weightIt->second.view;
-    state.bufferDevices[output] = defaultDeviceId;
-    state.borrowedBuffers.insert(output);
+    state.addBuffer(
+        output,
+        weightIt->second.buffer,
+        weightIt->second.view,
+        defaultDeviceId,
+        false);
     return {};
 }
 
@@ -837,9 +535,12 @@ Result<void> transfer_op(
         return make_error(loaded.error());
 
     auto loadedView = loaded.take();
-    state.buffers[output] = loadedView.buffer;
-    state.views[output] = std::move(loadedView.view);
-    state.bufferDevices[output] = transfer.targetDevice();
+    state.addBuffer(
+        output,
+        loadedView.buffer,
+        std::move(loadedView.view),
+        transfer.targetDevice(),
+        true);
     return {};
 }
 
@@ -876,10 +577,9 @@ Result<void> paged_append_op(
     if (!chunkView)
         return make_error(chunkView.error());
 
-    auto denseChunk = (*device)->read(DeviceTensorView{chunkBuffer.take(), chunkView.take()});
-    if (!denseChunk)
-        return make_error(denseChunk.error());
-    auto appended = (*device)->appendPaged(cacheIt->second.tensor, **denseChunk);
+    auto appended = (*device)->appendPaged(
+        cacheIt->second.tensor,
+        DeviceTensorView{chunkBuffer.take(), chunkView.take()});
     if (!appended)
         return make_error(appended.error());
     auto meta = (*device)->pagedMeta(cacheIt->second.tensor);
@@ -903,7 +603,6 @@ Result<void> verify_static_view_shape(
 }
 
 Result<bool> try_alias_layout_op(
-        const Graph& graph,
         Device& device,
         DeviceId opDevice,
         const ir::kernel_ir::LayoutTransformOp& layout,
@@ -933,25 +632,24 @@ Result<bool> try_alias_layout_op(
         if (!*isDefault)
             return false;
 
-        auto desc = resolve_output_desc(graph, layout, output, state.views);
-        if (!desc)
-            return make_error(desc.error());
-        auto view = device.defaultView(desc.take());
+        auto view = device.defaultView(state.tensorDescs.get(output));
         if (!view)
             return make_error(view.error());
 
-        state.buffers[output] = inputBuffer.take();
-        state.views[output] = view.take();
-        state.bufferDevices[output] = opDevice;
+        view->storageOffset = inputView->storageOffset;
+
+        state.addBuffer(
+            output,
+            inputBuffer.take(),
+            view.take(),
+            opDevice,
+            false);
         return true;
     }
 
     if (layout.transform() == LayoutTransformKind::Transpose ||
         layout.transform() == LayoutTransformKind::Permute) {
-        auto desc = resolve_output_desc(graph, layout, output, state.views);
-        if (!desc)
-            return make_error(desc.error());
-        auto descValue = desc.take();
+        auto descValue = state.tensorDescs.get(output);
         if (descValue.shape.has_dynamic())
             return make_error("layout transform output cannot use strides with dynamic shape");
 
@@ -975,9 +673,12 @@ Result<bool> try_alias_layout_op(
             }
         }
 
-        state.buffers[output] = inputBuffer.take();
-        state.views[output] = std::move(outputView);
-        state.bufferDevices[output] = opDevice;
+        state.addBuffer(
+            output,
+            inputBuffer.take(),
+            std::move(outputView),
+            opDevice,
+            false);
         return true;
     }
 
@@ -988,16 +689,18 @@ Result<bool> try_alias_layout_op(
         if (!*isDefault)
             return false;
 
-        auto desc = resolve_output_desc(graph, layout, output, state.views);
-        if (!desc)
-            return make_error(desc.error());
-        auto view = device.defaultView(desc.take());
+        auto view = device.defaultView(state.tensorDescs.get(output));
         if (!view)
             return make_error(view.error());
 
-        state.buffers[output] = inputBuffer.take();
-        state.views[output] = view.take();
-        state.bufferDevices[output] = opDevice;
+        view->storageOffset = inputView->storageOffset;
+
+        state.addBuffer(
+            output,
+            inputBuffer.take(),
+            view.take(),
+            opDevice,
+            false);
         return true;
     }
 
@@ -1005,25 +708,26 @@ Result<bool> try_alias_layout_op(
 }
 
 Result<void> allocate_kernel_outputs(
-        const Graph& graph,
         Device& device,
         DeviceId opDevice,
         const Op& op,
         RuntimeState& state) {
     for (auto output : op.outputs()) {
-        auto desc = resolve_output_desc(graph, op, output, state.views);
-        if (!desc)
-            return make_error(desc.error());
-        auto descValue = desc.take();
+        if (state.buffers.contains(output))
+            continue;
+        auto descValue = state.tensorDescs.get(output);
         auto buffer = device.alloc(descValue);
         if (!buffer)
             return make_error(buffer.error());
         auto view = device.defaultView(std::move(descValue));
         if (!view)
             return make_error(view.error());
-        state.buffers[output] = buffer.take();
-        state.views[output] = view.take();
-        state.bufferDevices[output] = opDevice;
+        state.addBuffer(
+            output,
+            buffer.take(),
+            view.take(),
+            opDevice,
+            true);
     }
     return {};
 }
@@ -1076,7 +780,6 @@ Result<std::vector<device::DeviceRunValue>> collect_output_views(
 }
 
 Result<void> run_kernel_op(
-        const Graph& graph,
         Device& device,
         DeviceCompiledGraphId deviceGraph,
         DeviceId opDevice,
@@ -1085,7 +788,7 @@ Result<void> run_kernel_op(
         RuntimeState& state,
         const EngineRunOptions* options) {
     auto allocateStart = Clock::now();
-    auto allocated = allocate_kernel_outputs(graph, device, opDevice, op, state);
+    auto allocated = allocate_kernel_outputs(device, opDevice, op, state);
     auto allocateEnd = Clock::now();
     profile_stage(
         options,
@@ -1262,24 +965,41 @@ Result<void> dealloc_values(
 Result<void> dealloc_remaining_buffers(
         std::vector<std::unique_ptr<Device>>& devices,
         RuntimeState& state) {
-    for (auto it = state.buffers.begin(); it != state.buffers.end();) {
-        auto value = it->first;
-        auto deviceIt = state.bufferDevices.find(value);
-        if (deviceIt == state.bufferDevices.end())
-            return make_error("missing runtime device for value: " + std::to_string(value));
-        auto leftoverDevice = lookup_device(devices, deviceIt->second);
-        if (!leftoverDevice)
-            return make_error(leftoverDevice.error());
-        if (state.borrowedBuffers.find(value) == state.borrowedBuffers.end()) {
-            auto dealloc = (*leftoverDevice)->dealloc(it->second);
-            if (!dealloc)
-                return make_error(dealloc.error());
-        }
-        it = state.buffers.erase(it);
-        state.views.erase(value);
-        state.bufferDevices.erase(value);
-        state.borrowedBuffers.erase(value);
+    std::vector<ValueId> values;
+    values.reserve(state.buffers.size());
+    for (const auto& [value, _] : state.buffers)
+        values.push_back(value);
+    for (auto value : values) {
+        if (!state.buffers.contains(value))
+            continue;
+        auto deallocated = dealloc_value(devices, state, value);
+        if (!deallocated)
+            return make_error(deallocated.error());
     }
+    for (const auto& [deviceId, buffer] : state.retiredOwnedBuffers) {
+        auto device = lookup_device(devices, deviceId);
+        if (!device)
+            return make_error(device.error());
+        auto deallocated = (*device)->dealloc(buffer);
+        if (!deallocated)
+            return make_error(deallocated.error());
+    }
+    state.retiredOwnedBuffers.clear();
+    return {};
+}
+
+Result<void> dealloc_scratch_buffers(
+        std::vector<std::unique_ptr<Device>>& devices,
+        RuntimeState& state) {
+    for (const auto& [deviceId, buffer] : state.scratchBuffers) {
+        auto device = lookup_device(devices, deviceId);
+        if (!device)
+            return make_error(device.error());
+        auto deallocated = (*device)->dealloc(buffer);
+        if (!deallocated)
+            return make_error(deallocated.error());
+    }
+    state.scratchBuffers.clear();
     return {};
 }
 
@@ -1381,7 +1101,7 @@ Result<std::unique_ptr<DeviceWeightMap>> Engine::loadWeights(
             return make_error("null weight buffer: " + name);
 
         auto output = input.outputs()[0];
-        auto verify = verify_desc_matches_type(
+        auto verify = verifyRuntimeTensorDesc(
             hostIt->second->desc(),
             graph.value(output).type,
             "value %" + std::to_string(output));
@@ -1512,7 +1232,34 @@ Result<std::vector<RunOutput>> Engine::runValuesImpl(
     auto& defaultDevice = **defaultDeviceResult;
     const auto& graph = *compiled.graph;
 
-    auto state = initialize_runtime_state(graph);
+    auto inferDescsStart = Clock::now();
+    auto tensorDescs = infer_invocation_tensor_descs(
+        graph,
+        inputs,
+        hostWeights,
+        deviceWeights,
+        graphDefaultDevice);
+    auto inferDescsEnd = Clock::now();
+    profile_stage(
+        options,
+        "run_values.infer_tensor_descs",
+        inferDescsStart,
+        inferDescsEnd);
+    if (!tensorDescs)
+        return make_error(tensorDescs.error());
+
+    auto scratchPlanStart = Clock::now();
+    auto scratchPlan = planRuntimeScratch(compiled, *tensorDescs, devices_);
+    auto scratchPlanEnd = Clock::now();
+    profile_stage(
+        options,
+        "run_values.plan_scratch",
+        scratchPlanStart,
+        scratchPlanEnd);
+    if (!scratchPlan)
+        return make_error(scratchPlan.error());
+
+    auto state = initialize_runtime_state(tensorDescs.take(), scratchPlan.take());
 
     for (size_t opIndex = 0; opIndex < graph.ops().size(); opIndex++) {
         const auto& op = *graph.ops()[opIndex];
@@ -1552,19 +1299,6 @@ Result<std::vector<RunOutput>> Engine::runValuesImpl(
                 op.kind());
             if (!bound)
                 return make_error(bound.error());
-            auto finishStart = Clock::now();
-            auto finish = finish_op_lifetimes(devices_, state, op);
-            auto finishEnd = Clock::now();
-            profile_stage(
-                options,
-                "op.finish_lifetimes",
-                finishStart,
-                finishEnd,
-                opIndex,
-                op.id(),
-                op.kind());
-            if (!finish)
-                return make_error(finish.error());
             continue;
         }
 
@@ -1601,19 +1335,6 @@ Result<std::vector<RunOutput>> Engine::runValuesImpl(
                 op.kind());
             if (!appended)
                 return make_error(appended.error());
-            auto finishStart = Clock::now();
-            auto finish = finish_op_lifetimes(devices_, state, op);
-            auto finishEnd = Clock::now();
-            profile_stage(
-                options,
-                "op.finish_lifetimes",
-                finishStart,
-                finishEnd,
-                opIndex,
-                op.id(),
-                op.kind());
-            if (!finish)
-                return make_error(finish.error());
             continue;
         }
 
@@ -1635,19 +1356,6 @@ Result<std::vector<RunOutput>> Engine::runValuesImpl(
                 op.kind());
             if (!transferred)
                 return make_error(transferred.error());
-            auto finishStart = Clock::now();
-            auto finish = finish_op_lifetimes(devices_, state, op);
-            auto finishEnd = Clock::now();
-            profile_stage(
-                options,
-                "op.finish_lifetimes",
-                finishStart,
-                finishEnd,
-                opIndex,
-                op.id(),
-                op.kind());
-            if (!finish)
-                return make_error(finish.error());
             continue;
         }
 
@@ -1663,7 +1371,6 @@ Result<std::vector<RunOutput>> Engine::runValuesImpl(
         if (op.kind() == OpKind::LayoutTransform) {
             auto aliasStart = Clock::now();
             auto handled = try_alias_layout_op(
-                graph,
                 device,
                 opDevice,
                 static_cast<const ir::kernel_ir::LayoutTransformOp&>(op),
@@ -1680,25 +1387,11 @@ Result<std::vector<RunOutput>> Engine::runValuesImpl(
             if (!handled)
                 return make_error(handled.error());
             if (*handled) {
-                auto finishStart = Clock::now();
-                auto finish = finish_op_lifetimes(devices_, state, op);
-                auto finishEnd = Clock::now();
-                profile_stage(
-                    options,
-                    "op.finish_lifetimes",
-                    finishStart,
-                    finishEnd,
-                    opIndex,
-                    op.id(),
-                    op.kind());
-                if (!finish)
-                    return make_error(finish.error());
                 continue;
             }
         }
 
         auto runResult = run_kernel_op(
-            graph,
             device,
             *deviceGraph,
             opDevice,
@@ -1709,19 +1402,6 @@ Result<std::vector<RunOutput>> Engine::runValuesImpl(
         if (!runResult)
             return make_error(runResult.error());
 
-        auto finishStart = Clock::now();
-        auto finish = finish_op_lifetimes(devices_, state, op);
-        auto finishEnd = Clock::now();
-        profile_stage(
-            options,
-            "op.finish_lifetimes",
-            finishStart,
-            finishEnd,
-            opIndex,
-            op.id(),
-            op.kind());
-        if (!finish)
-            return make_error(finish.error());
     }
 
     std::vector<ValueId> uniqueOutputs;
@@ -1757,6 +1437,17 @@ Result<std::vector<RunOutput>> Engine::runValuesImpl(
         deallocRemainingEnd);
     if (!deallocRemaining)
         return make_error(deallocRemaining.error());
+
+    auto deallocScratchStart = Clock::now();
+    auto deallocScratch = dealloc_scratch_buffers(devices_, state);
+    auto deallocScratchEnd = Clock::now();
+    profile_stage(
+        options,
+        "run_values.dealloc_scratch",
+        deallocScratchStart,
+        deallocScratchEnd);
+    if (!deallocScratch)
+        return make_error(deallocScratch.error());
 
     profile_stage(
         options,

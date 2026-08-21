@@ -507,6 +507,46 @@ void run_attention_test(
 
 } // namespace
 
+TEST(CudaDeviceTest, ScratchAllocatorFinalizesOneBackingBufferWithValueViews) {
+    if (auto reason = cuda_device_skip_reason(); !reason.empty())
+        GTEST_SKIP() << reason;
+
+    sandy::device::CudaDevice device;
+    auto allocator = device.createScratchAllocator();
+    ASSERT_NE(allocator, nullptr);
+
+    ASSERT_TRUE(allocator->alloc(
+        7, sandy::core::TensorDesc(
+               sandy::core::Shape({3}), sandy::core::DType::F32)));
+    ASSERT_TRUE(allocator->free(7));
+    ASSERT_TRUE(allocator->alloc(
+        11, sandy::core::TensorDesc(
+                sandy::core::Shape({5}), sandy::core::DType::BF16)));
+    ASSERT_TRUE(allocator->free(11));
+
+    auto allocation = allocator->finalize();
+    ASSERT_TRUE(allocation) << allocation.error();
+    ASSERT_NE(allocation->buffer, 0u);
+    ASSERT_EQ(allocation->views.size(), 2u);
+    EXPECT_EQ(allocation->views.at(7).buffer, allocation->buffer);
+    EXPECT_EQ(allocation->views.at(11).buffer, allocation->buffer);
+    EXPECT_EQ(allocation->views.at(7).view.storageOffset, 0);
+    EXPECT_EQ(allocation->views.at(11).view.storageOffset, 128);
+    EXPECT_EQ(allocation->views.at(7).view.desc.shape,
+              sandy::core::Shape({3}));
+    EXPECT_EQ(allocation->views.at(11).view.desc.shape,
+              sandy::core::Shape({5}));
+
+    auto second = device.read(allocation->views.at(11));
+    ASSERT_TRUE(second) << second.error();
+    auto secondAccess = (*second)->access();
+    ASSERT_TRUE(secondAccess) << secondAccess.error();
+    EXPECT_EQ(secondAccess->data().size(), 10u);
+
+    auto deallocated = device.dealloc(allocation->buffer);
+    ASSERT_TRUE(deallocated) << deallocated.error();
+}
+
 TEST(CudaDeviceTest, RunChainedElementwiseF32) {
     if (auto reason = cuda_device_skip_reason(); !reason.empty())
         GTEST_SKIP() << reason;
@@ -686,11 +726,19 @@ TEST(CudaDeviceTest, RunElementwiseReadsPagedTensorF32) {
     auto paged = device.allocPaged(*pool, sandy::core::Shape({2, 0, 4}));
     ASSERT_TRUE(paged) << paged.error();
 
-    std::vector<float> values(24);
-    for (size_t i = 0; i < values.size(); i++)
-        values[i] = static_cast<float>(i);
-    auto chunk = make_f32_buffer("chunk", sandy::core::Shape({2, 3, 4}), values);
-    auto append = device.appendPaged(*paged, *chunk);
+    std::vector<float> values(26, -1.0f);
+    for (size_t i = 0; i < 24; i++)
+        values[i + 2] = static_cast<float>(i);
+    auto chunk = make_f32_buffer("chunk", sandy::core::Shape({26}), values);
+    auto chunkBuffer = device.load(*chunk);
+    ASSERT_TRUE(chunkBuffer) << chunkBuffer.error();
+    auto chunkView = device.defaultView(
+        sandy::core::TensorDesc({2, 3, 4}, sandy::core::DType::F32));
+    ASSERT_TRUE(chunkView) << chunkView.error();
+    chunkView->storageOffset = 2;
+    auto append = device.appendPaged(
+        *paged,
+        sandy::device::DeviceTensorView{*chunkBuffer, chunkView.take()});
     ASSERT_TRUE(append) << append.error();
 
     auto outputBuffer = device.alloc(
@@ -714,6 +762,7 @@ TEST(CudaDeviceTest, RunElementwiseReadsPagedTensorF32) {
         expected[i] = static_cast<float>(i + 1);
     expect_f32_output_near(device, *outputBuffer, expected);
 
+    EXPECT_TRUE(device.dealloc(*chunkBuffer));
     EXPECT_TRUE(device.deallocPaged(*paged));
     EXPECT_TRUE(device.destroyPagedPool(*pool));
 }

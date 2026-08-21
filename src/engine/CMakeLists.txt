@@ -1,5 +1,7 @@
 add_library(EngineLib
   Engine.cpp
+  RuntimeScratchPlan.cpp
+  RuntimeTensorDesc.cpp
 )
 
 target_include_directories(EngineLib

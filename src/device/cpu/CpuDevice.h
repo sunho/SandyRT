@@ -14,6 +14,8 @@ namespace sandy::device {
 
 class CpuDevice final : public Device {
 public:
+    using Device::appendPaged;
+
     Result<DeviceCompiledGraphId> compile(const ir::kernel_ir::Graph& graph) override;
 
     Result<DeviceBufferId> alloc(core::TensorDesc desc) override;

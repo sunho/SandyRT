@@ -3,6 +3,8 @@
 #include "HostTensorBuffer.h"
 
 #include <algorithm>
+#include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <memory>
 #include <span>
@@ -12,6 +14,18 @@
 namespace sandy::server {
 
 namespace {
+
+using Clock = std::chrono::steady_clock;
+
+double elapsed_milliseconds(Clock::time_point start, Clock::time_point end) {
+    return std::chrono::duration<double, std::milli>(end - start).count();
+}
+
+double tokens_per_second(int64_t tokens, double milliseconds) {
+    return milliseconds > 0.0
+        ? static_cast<double>(tokens) * 1000.0 / milliseconds
+        : 0.0;
+}
 
 std::shared_ptr<HostTensorBuffer> make_i64_buffer(
         std::string name,
@@ -389,6 +403,7 @@ Result<GenerateResult> Session::generate(
     std::unordered_set<int64_t> stopTokens(stopTokenIds.begin(), stopTokenIds.end());
 
     int64_t nextToken = 0;
+    auto prefillStart = Clock::now();
     if (prefillCompiled_ && config_.prefillChunkTokens > 0) {
         ServerStageScope promptTimer(logger_, "prompt", "server.prompt.prefill");
         size_t begin = 0;
@@ -419,8 +434,13 @@ Result<GenerateResult> Session::generate(
                 nextToken = next->first;
         }
     }
+    result.prefillMilliseconds = elapsed_milliseconds(prefillStart, Clock::now());
+    result.prefillTokensPerSecond = tokens_per_second(
+        result.promptTokens,
+        result.prefillMilliseconds);
 
     ServerStageScope decodeTimer(logger_, "decode", "server.decode.total");
+    auto decodeStart = Clock::now();
     for (int32_t step = 0; step < maxTokens; step++) {
         result.outputIds.push_back(nextToken);
         result.completionTokens = static_cast<int32_t>(result.outputIds.size());
@@ -434,25 +454,11 @@ Result<GenerateResult> Session::generate(
 
         if (shouldStop(nextToken, stopTokens)) {
             result.finishReason = "stop";
-            if (logger_) {
-                logger_->logf(
-                    "server.generate.finish reason=%s prompt_tokens=%d completion_tokens=%d",
-                    result.finishReason.c_str(),
-                    result.promptTokens,
-                    result.completionTokens);
-            }
-            return result;
+            break;
         }
         if (step + 1 >= maxTokens) {
             result.finishReason = "length";
-            if (logger_) {
-                logger_->logf(
-                    "server.generate.finish reason=%s prompt_tokens=%d completion_tokens=%d",
-                    result.finishReason.c_str(),
-                    result.promptTokens,
-                    result.completionTokens);
-            }
-            return result;
+            break;
         }
 
         auto phase = "decode_step_" + std::to_string(step + 1);
@@ -465,14 +471,39 @@ Result<GenerateResult> Session::generate(
         nextToken = next->first;
     }
 
-    result.finishReason = "length";
+    result.decodeMilliseconds = elapsed_milliseconds(decodeStart, Clock::now());
+    result.decodeTokensPerSecond = tokens_per_second(
+        result.completionTokens,
+        result.decodeMilliseconds);
+    if (result.finishReason.empty())
+        result.finishReason = "length";
     if (logger_) {
+        logger_->logf(
+            "server.throughput prefill_tokens=%d prefill_ms=%.3f "
+            "prefill_toks_per_s=%.3f decode_tokens=%d decode_ms=%.3f "
+            "decode_toks_per_s=%.3f",
+            result.promptTokens,
+            result.prefillMilliseconds,
+            result.prefillTokensPerSecond,
+            result.completionTokens,
+            result.decodeMilliseconds,
+            result.decodeTokensPerSecond);
         logger_->logf(
             "server.generate.finish reason=%s prompt_tokens=%d completion_tokens=%d",
             result.finishReason.c_str(),
             result.promptTokens,
             result.completionTokens);
     }
+    std::fprintf(
+        stderr,
+        "sandy throughput: prefill_tokens=%d prefill_ms=%.3f prefill_toks_per_s=%.3f "
+        "decode_tokens=%d decode_ms=%.3f decode_toks_per_s=%.3f\n",
+        result.promptTokens,
+        result.prefillMilliseconds,
+        result.prefillTokensPerSecond,
+        result.completionTokens,
+        result.decodeMilliseconds,
+        result.decodeTokensPerSecond);
     return result;
 }
 

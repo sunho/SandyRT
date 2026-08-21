@@ -5,6 +5,10 @@
 
 namespace sandy::device {
 
+std::unique_ptr<DeviceScratchAllocator> Device::createScratchAllocator() {
+    return nullptr;
+}
+
 Result<DevicePagedPoolId> Device::createPagedPool(DevicePagedPoolDesc) {
     return make_error("device does not support paged tensor pools");
 }
@@ -27,6 +31,15 @@ Result<void> Device::reservePaged(DevicePagedTensorId, int64_t) {
 
 Result<void> Device::appendPaged(DevicePagedTensorId, core::TensorBuffer&) {
     return make_error("device does not support paged tensors");
+}
+
+Result<void> Device::appendPaged(
+        DevicePagedTensorId dst,
+        DeviceTensorView denseChunk) {
+    auto hostChunk = read(std::move(denseChunk));
+    if (!hostChunk)
+        return make_error(hostChunk.error());
+    return appendPaged(dst, **hostChunk);
 }
 
 Result<DevicePagedTensorMeta> Device::pagedMeta(DevicePagedTensorId) const {
@@ -66,7 +79,7 @@ Result<bool> Device::isDefaultView(const TensorViewDesc& view) const {
     auto strides = defaultStrides(view.desc.shape);
     if (!strides)
         return make_error(strides.error());
-    return view.storageOffset == 0 && view.strides == *strides;
+    return view.strides == *strides;
 }
 
 } // namespace sandy::device

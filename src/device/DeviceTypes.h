@@ -1,6 +1,7 @@
 #pragma once
 
 #include "TensorBuffer.h"
+#include "KernelIR.h"
 
 #include <cstdint>
 #include <cstddef>
@@ -65,5 +66,10 @@ using DeviceRunValue = std::variant<
     DeviceTensorView,
     DevicePagedTensorView,
     DeviceTensorTupleView>;
+
+struct DeviceScratchAllocation {
+    DeviceBufferId buffer = 0;
+    std::unordered_map<ir::kernel_ir::ValueId, DeviceTensorView> views;
+};
 
 } // namespace sandy::device

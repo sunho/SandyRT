@@ -81,6 +81,61 @@ core::Shape shape_with_grow_length(core::Shape shape, int64_t growDim, int64_t g
     return core::Shape(std::move(dims));
 }
 
+struct PagedAppendLayout {
+    int64_t chunkGrowLength = 0;
+    int64_t newGrowLength = 0;
+    int64_t requiredPages = 0;
+    int64_t prefixCount = 0;
+    int64_t trailingCount = 0;
+    size_t elementSize = 0;
+    size_t expectedBytes = 0;
+    size_t trailingBytes = 0;
+};
+
+Result<PagedAppendLayout> plan_paged_append(
+        const DevicePagedPoolDesc& pool,
+        const core::TensorDesc& chunk,
+        int64_t oldGrowLength) {
+    auto valid = validate_paged_logical_shape(pool, chunk.shape);
+    if (!valid)
+        return make_error(valid.error());
+    if (chunk.dtype != pool.templateDesc.dtype)
+        return make_error("cuda device paged append dtype mismatch");
+
+    auto chunkGrowLength = chunk.shape.dim(static_cast<int>(pool.growDim));
+    if (chunkGrowLength <= 0)
+        return make_error("cuda device paged append grow dimension must be > 0");
+    auto chunkNumel = chunk.shape.numel();
+    if (chunkNumel < 0)
+        return make_error("cuda device paged append chunk shape must be concrete");
+    if (oldGrowLength > std::numeric_limits<int64_t>::max() - chunkGrowLength)
+        return make_error("cuda device paged append grow length overflow");
+
+    auto prefixCount = checked_product(
+        pool.templateDesc.shape,
+        0,
+        static_cast<int>(pool.growDim));
+    if (!prefixCount)
+        return make_error(prefixCount.error());
+    auto trailingCount = checked_product(
+        pool.templateDesc.shape,
+        static_cast<int>(pool.growDim) + 1,
+        pool.templateDesc.shape.rank());
+    if (!trailingCount)
+        return make_error(trailingCount.error());
+
+    PagedAppendLayout layout;
+    layout.chunkGrowLength = chunkGrowLength;
+    layout.newGrowLength = oldGrowLength + chunkGrowLength;
+    layout.requiredPages = ceil_div(layout.newGrowLength, pool.pageSize);
+    layout.prefixCount = *prefixCount;
+    layout.trailingCount = *trailingCount;
+    layout.elementSize = core::dtype_size(chunk.dtype);
+    layout.expectedBytes = static_cast<size_t>(chunkNumel) * layout.elementSize;
+    layout.trailingBytes = static_cast<size_t>(*trailingCount) * layout.elementSize;
+    return layout;
+}
+
 } // namespace
 
 CudaPagedTensorPool::CudaPagedTensorPool(int cudaDevice)
@@ -252,9 +307,16 @@ CudaPagedTensor::CudaPagedTensor(CudaPagedTensor&& other) noexcept
       growLength_(other.growLength_),
       pageIndices_(std::move(other.pageIndices_)),
       pageTable_(other.pageTable_),
-      pageTableCapacity_(other.pageTableCapacity_) {
+      pageTableCapacity_(other.pageTableCapacity_),
+      hostPageTable_(other.hostPageTable_),
+      hostPageTableCapacity_(other.hostPageTableCapacity_),
+      syncedPageCount_(other.syncedPageCount_),
+      retiredHostPageTables_(std::move(other.retiredHostPageTables_)) {
     other.pageTable_ = nullptr;
     other.pageTableCapacity_ = 0;
+    other.hostPageTable_ = nullptr;
+    other.hostPageTableCapacity_ = 0;
+    other.syncedPageCount_ = 0;
 }
 
 CudaPagedTensor& CudaPagedTensor::operator=(CudaPagedTensor&& other) noexcept {
@@ -268,8 +330,15 @@ CudaPagedTensor& CudaPagedTensor::operator=(CudaPagedTensor&& other) noexcept {
     pageIndices_ = std::move(other.pageIndices_);
     pageTable_ = other.pageTable_;
     pageTableCapacity_ = other.pageTableCapacity_;
+    hostPageTable_ = other.hostPageTable_;
+    hostPageTableCapacity_ = other.hostPageTableCapacity_;
+    syncedPageCount_ = other.syncedPageCount_;
+    retiredHostPageTables_ = std::move(other.retiredHostPageTables_);
     other.pageTable_ = nullptr;
     other.pageTableCapacity_ = 0;
+    other.hostPageTable_ = nullptr;
+    other.hostPageTableCapacity_ = 0;
+    other.syncedPageCount_ = 0;
     return *this;
 }
 
@@ -281,9 +350,51 @@ Result<void> CudaPagedTensor::sync_page_table(
         return make_error(set.error());
 
     auto pageCount = static_cast<int64_t>(pageIndices_.size());
+    if (pageCount <= syncedPageCount_)
+        return {};
+
+    if (pageCount > hostPageTableCapacity_) {
+        auto newCapacity = std::max<int64_t>(
+            pageCount,
+            std::max<int64_t>(1, hostPageTableCapacity_ * 2));
+        void** hostTable = nullptr;
+        auto allocated = cuda_check(
+            cudaHostAlloc(
+                reinterpret_cast<void**>(&hostTable),
+                static_cast<size_t>(newCapacity) * sizeof(void*),
+                cudaHostAllocDefault),
+            "cudaHostAlloc paged tensor host table");
+        if (!allocated)
+            return make_error(allocated.error());
+        if (hostPageTable_ && syncedPageCount_ > 0) {
+            std::copy_n(hostPageTable_, syncedPageCount_, hostTable);
+            retiredHostPageTables_.push_back(hostPageTable_);
+        } else if (hostPageTable_) {
+            auto freed = cuda_check(
+                cudaFreeHost(hostPageTable_),
+                "cudaFreeHost paged tensor host table");
+            if (!freed) {
+                cudaFreeHost(hostTable);
+                return make_error(freed.error());
+            }
+        }
+        hostPageTable_ = hostTable;
+        hostPageTableCapacity_ = newCapacity;
+    }
+
+    for (int64_t i = syncedPageCount_; i < pageCount; i++) {
+        auto data = pool.page_data(pageIndices_[static_cast<size_t>(i)]);
+        if (!data)
+            return make_error(data.error());
+        hostPageTable_[i] = *data;
+    }
+
     if (pageCount > pageTableCapacity_) {
         void** table = nullptr;
-        auto bytes = static_cast<size_t>(pageCount) * sizeof(void*);
+        auto newCapacity = std::max<int64_t>(
+            pageCount,
+            std::max<int64_t>(1, pageTableCapacity_ * 2));
+        auto bytes = static_cast<size_t>(newCapacity) * sizeof(void*);
         if (bytes > 0) {
             auto allocated = cuda_malloc_stream_ordered(
                 &table,
@@ -293,55 +404,62 @@ Result<void> CudaPagedTensor::sync_page_table(
             if (!allocated)
                 return make_error(allocated.error());
         }
+        auto copied = cuda_check(
+            cudaMemcpyAsync(
+                table,
+                hostPageTable_,
+                static_cast<size_t>(pageCount) * sizeof(void*),
+                cudaMemcpyHostToDevice,
+                stream),
+            "cudaMemcpyAsync paged tensor table");
+        if (!copied) {
+            (void)cuda_free_stream_ordered(
+                table,
+                stream,
+                "cudaFreeAsync paged tensor table");
+            return make_error(copied.error());
+        }
         if (pageTable_) {
             auto freed = cuda_free_stream_ordered(
                 pageTable_,
                 stream,
                 "cudaFreeAsync paged tensor table");
-            if (!freed) {
-                if (table)
-                    (void)cuda_free_stream_ordered(
-                        table,
-                        stream,
-                        "cudaFreeAsync paged tensor table");
+            if (!freed)
                 return make_error(freed.error());
-            }
         }
         pageTable_ = table;
-        pageTableCapacity_ = pageCount;
+        pageTableCapacity_ = newCapacity;
+    } else {
+        auto copied = cuda_check(
+            cudaMemcpyAsync(
+                pageTable_ + syncedPageCount_,
+                hostPageTable_ + syncedPageCount_,
+                static_cast<size_t>(pageCount - syncedPageCount_) * sizeof(void*),
+                cudaMemcpyHostToDevice,
+                stream),
+            "cudaMemcpyAsync paged tensor table entries");
+        if (!copied)
+            return make_error(copied.error());
     }
-    if (pageCount == 0)
-        return {};
 
-    std::vector<void*> hostTable;
-    hostTable.reserve(pageIndices_.size());
-    for (auto page : pageIndices_) {
-        auto data = pool.page_data(page);
-        if (!data)
-            return make_error(data.error());
-        hostTable.push_back(*data);
-    }
-
-    auto copied = cuda_check(
-        cudaMemcpyAsync(
-            pageTable_,
-            hostTable.data(),
-            hostTable.size() * sizeof(void*),
-            cudaMemcpyHostToDevice,
-            stream),
-        "cudaMemcpyAsync paged tensor table");
-    if (!copied)
-        return make_error(copied.error());
-    return cuda_check(cudaStreamSynchronize(stream), "cudaStreamSynchronize");
+    syncedPageCount_ = pageCount;
+    return {};
 }
 
 void CudaPagedTensor::release_table() {
-    if (!pageTable_)
-        return;
     cudaSetDevice(cudaDevice_);
-    cudaFree(pageTable_);
+    if (pageTable_)
+        cudaFree(pageTable_);
     pageTable_ = nullptr;
     pageTableCapacity_ = 0;
+    if (hostPageTable_)
+        cudaFreeHost(hostPageTable_);
+    hostPageTable_ = nullptr;
+    hostPageTableCapacity_ = 0;
+    for (auto* table : retiredHostPageTables_)
+        cudaFreeHost(table);
+    retiredHostPageTables_.clear();
+    syncedPageCount_ = 0;
 }
 
 Result<DevicePagedPoolId> CudaDevice::createPagedPool(DevicePagedPoolDesc desc) {
@@ -475,53 +593,21 @@ Result<void> CudaDevice::appendPaged(
         return make_error(access.error());
     const auto& chunkDesc = (*access).desc();
     const auto& pool = poolIt->second;
-    auto valid = validate_paged_logical_shape(pool.desc(), chunkDesc.shape);
-    if (!valid)
-        return make_error(valid.error());
-    if (chunkDesc.dtype != pool.desc().templateDesc.dtype)
-        return make_error("cuda device paged append dtype mismatch");
-
-    int growDim = static_cast<int>(pool.desc().growDim);
-    auto chunkGrowLength = chunkDesc.shape.dim(growDim);
-    if (chunkGrowLength <= 0)
-        return make_error("cuda device paged append grow dimension must be > 0");
-
-    auto chunkNumel = chunkDesc.shape.numel();
-    if (chunkNumel < 0)
-        return make_error("cuda device paged append chunk shape must be concrete");
-    auto expectedBytes = static_cast<size_t>(chunkNumel) * core::dtype_size(chunkDesc.dtype);
-    if ((*access).data().size() != expectedBytes)
-        return make_error("cuda device paged append chunk byte size mismatch");
-
     auto& tensor = tensorIt->second;
     auto oldGrowLength = tensor.grow_length();
-    if (oldGrowLength > std::numeric_limits<int64_t>::max() - chunkGrowLength)
-        return make_error("cuda device paged append grow length overflow");
-    auto newGrowLength = oldGrowLength + chunkGrowLength;
-    auto requiredPages = ceil_div(newGrowLength, pool.desc().pageSize);
-    auto reserved = reservePaged(tensorId, requiredPages);
+    auto layout = plan_paged_append(pool.desc(), chunkDesc, oldGrowLength);
+    if (!layout)
+        return make_error(layout.error());
+    if ((*access).data().size() != layout->expectedBytes)
+        return make_error("cuda device paged append chunk byte size mismatch");
+
+    auto reserved = reservePaged(tensorId, layout->requiredPages);
     if (!reserved)
         return make_error(reserved.error());
-
-    auto prefixCount = checked_product(
-        pool.desc().templateDesc.shape,
-        0,
-        static_cast<int>(pool.desc().growDim));
-    if (!prefixCount)
-        return make_error(prefixCount.error());
-    auto trailingCount = checked_product(
-        pool.desc().templateDesc.shape,
-        static_cast<int>(pool.desc().growDim) + 1,
-        pool.desc().templateDesc.shape.rank());
-    if (!trailingCount)
-        return make_error(trailingCount.error());
-
-    auto elementSize = core::dtype_size(chunkDesc.dtype);
-    auto trailingBytes = static_cast<size_t>(*trailingCount) * elementSize;
     auto source = (*access).data();
 
-    for (int64_t prefix = 0; prefix < *prefixCount; prefix++) {
-        for (int64_t chunkGrow = 0; chunkGrow < chunkGrowLength; chunkGrow++) {
+    for (int64_t prefix = 0; prefix < layout->prefixCount; prefix++) {
+        for (int64_t chunkGrow = 0; chunkGrow < layout->chunkGrowLength; chunkGrow++) {
             auto dstGrow = oldGrowLength + chunkGrow;
             auto dstPageOrdinal = dstGrow / pool.desc().pageSize;
             auto dstGrowInPage = dstGrow % pool.desc().pageSize;
@@ -531,15 +617,15 @@ Result<void> CudaDevice::appendPaged(
                 return make_error(pageData.error());
 
             auto sourceElement =
-                (prefix * chunkGrowLength + chunkGrow) * *trailingCount;
+                (prefix * layout->chunkGrowLength + chunkGrow) * layout->trailingCount;
             auto dstElement =
-                (prefix * pool.desc().pageSize + dstGrowInPage) * *trailingCount;
+                (prefix * pool.desc().pageSize + dstGrowInPage) * layout->trailingCount;
             auto copied = cuda_check(
                 cudaMemcpyAsync(
                     static_cast<uint8_t*>(*pageData) +
-                        static_cast<size_t>(dstElement) * elementSize,
-                    source.data() + static_cast<size_t>(sourceElement) * elementSize,
-                    trailingBytes,
+                        static_cast<size_t>(dstElement) * layout->elementSize,
+                    source.data() + static_cast<size_t>(sourceElement) * layout->elementSize,
+                    layout->trailingBytes,
                     cudaMemcpyHostToDevice,
                     stream_),
                 "cudaMemcpyAsync paged append host to device");
@@ -552,11 +638,98 @@ Result<void> CudaDevice::appendPaged(
     if (!synced)
         return make_error(synced.error());
 
-    tensor.set_grow_length(newGrowLength);
+    tensor.set_grow_length(layout->newGrowLength);
     tensor.set_logical_shape(shape_with_grow_length(
         pool.desc().templateDesc.shape,
         pool.desc().growDim,
-        newGrowLength));
+        layout->newGrowLength));
+    return {};
+}
+
+Result<void> CudaDevice::appendPaged(
+        DevicePagedTensorId tensorId,
+        DeviceTensorView denseChunk) {
+    auto stream = ensure_stream();
+    if (!stream)
+        return make_error(stream.error());
+    auto tensorIt = pagedTensors_.find(tensorId);
+    if (tensorIt == pagedTensors_.end())
+        return make_error("cuda device paged tensor not found");
+    auto poolIt = pagedPools_.find(tensorIt->second.pool());
+    if (poolIt == pagedPools_.end())
+        return make_error("cuda device paged pool not found");
+
+    auto sourceBuffer = buffer_view(denseChunk.buffer, false);
+    if (!sourceBuffer)
+        return make_error(sourceBuffer.error());
+    auto contiguous = isDefaultView(denseChunk.view);
+    if (!contiguous)
+        return make_error(contiguous.error());
+    if (!*contiguous)
+        return make_error("cuda device paged append requires a contiguous source view");
+    if (denseChunk.view.storageOffset < 0)
+        return make_error("cuda device paged append source has a negative storage offset");
+
+    const auto& pool = poolIt->second;
+    auto& tensor = tensorIt->second;
+    auto oldGrowLength = tensor.grow_length();
+    auto layout = plan_paged_append(pool.desc(), denseChunk.view.desc, oldGrowLength);
+    if (!layout)
+        return make_error(layout.error());
+
+    auto storageOffset = static_cast<size_t>(denseChunk.view.storageOffset);
+    if (storageOffset > std::numeric_limits<size_t>::max() / layout->elementSize)
+        return make_error("cuda device paged append source offset overflow");
+    auto sourceByteOffset = storageOffset * layout->elementSize;
+    if (sourceByteOffset > sourceBuffer->bytes ||
+        layout->expectedBytes > sourceBuffer->bytes - sourceByteOffset) {
+        return make_error("cuda device paged append source view exceeds its buffer");
+    }
+
+    auto reserved = reservePaged(tensorId, layout->requiredPages);
+    if (!reserved)
+        return make_error(reserved.error());
+
+    auto* source = static_cast<const uint8_t*>(sourceBuffer->data) + sourceByteOffset;
+    for (int64_t prefix = 0; prefix < layout->prefixCount; prefix++) {
+        int64_t chunkGrow = 0;
+        while (chunkGrow < layout->chunkGrowLength) {
+            auto dstGrow = oldGrowLength + chunkGrow;
+            auto dstPageOrdinal = dstGrow / pool.desc().pageSize;
+            auto dstGrowInPage = dstGrow % pool.desc().pageSize;
+            auto copyGrowLength = std::min(
+                layout->chunkGrowLength - chunkGrow,
+                pool.desc().pageSize - dstGrowInPage);
+            auto pageIndex = tensor.page_indices()[static_cast<size_t>(dstPageOrdinal)];
+            auto pageData = pool.page_data(pageIndex);
+            if (!pageData)
+                return make_error(pageData.error());
+
+            auto sourceElement =
+                (prefix * layout->chunkGrowLength + chunkGrow) * layout->trailingCount;
+            auto dstElement =
+                (prefix * pool.desc().pageSize + dstGrowInPage) * layout->trailingCount;
+            auto copyBytes = static_cast<size_t>(copyGrowLength) * layout->trailingBytes;
+            auto copied = cuda_check(
+                cudaMemcpyAsync(
+                    static_cast<uint8_t*>(*pageData) +
+                        static_cast<size_t>(dstElement) * layout->elementSize,
+                    source + static_cast<size_t>(sourceElement) * layout->elementSize,
+                    copyBytes,
+                    cudaMemcpyDeviceToDevice,
+                    stream_),
+                "cudaMemcpyAsync paged append device to device");
+            if (!copied)
+                return make_error(copied.error());
+            chunkGrow += copyGrowLength;
+        }
+    }
+
+    tensor.set_grow_length(layout->newGrowLength);
+    tensor.set_logical_shape(shape_with_grow_length(
+        pool.desc().templateDesc.shape,
+        pool.desc().growDim,
+        layout->newGrowLength));
     return {};
 }
 
