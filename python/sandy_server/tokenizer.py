@@ -27,13 +27,22 @@ def _normalize_messages(messages: list[dict[str, Any]]) -> list[dict[str, str]]:
     return normalized
 
 
-def encode_messages(tokenizer, messages: list[dict[str, Any]]) -> list[int]:
+def encode_messages(
+        tokenizer,
+        messages: list[dict[str, Any]],
+        chat_template_kwargs: dict[str, Any] | None = None) -> list[int]:
     normalized = _normalize_messages(messages)
     if getattr(tokenizer, "chat_template", None):
+        template_kwargs = dict(chat_template_kwargs or {})
+        reserved = {"tokenize", "add_generation_prompt"} & template_kwargs.keys()
+        if reserved:
+            names = ", ".join(sorted(reserved))
+            raise ValueError(f"chat_template_kwargs cannot override: {names}")
         ids = tokenizer.apply_chat_template(
             normalized,
             tokenize=True,
             add_generation_prompt=True,
+            **template_kwargs,
         )
     else:
         prompt = _fallback_chat_prompt(tokenizer, normalized)

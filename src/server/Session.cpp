@@ -206,20 +206,24 @@ Result<std::vector<engine::RunInput>> Session::makePrefillInputs(
 }
 
 Result<std::pair<int64_t, float>> Session::sampleOutputs(
-        std::vector<engine::RunOutput>& outputs) {
+        std::vector<engine::RunOutput>& outputs,
+        bool useSampling) {
     if (outputs.empty())
         return make_error("eval-token graph produced no outputs");
     auto* first = std::get_if<engine::TensorBufferPtr>(&outputs[0]);
     if (!first || !*first)
         return make_error("eval-token output 0 must be a tensor");
+    auto sampling = config_.sampling;
+    if (!useSampling)
+        sampling.temperature = 0.0f;
     if (outputs.size() == 1)
-        return sampler_.argmaxLast(*first);
+        return sampler_.sampleLogitsLast(*first, sampling);
     if (outputs.size() != 2)
         return make_error("eval-token graph must produce logits or topk values and indices");
     auto* second = std::get_if<engine::TensorBufferPtr>(&outputs[1]);
     if (!second || !*second)
         return make_error("eval-token output 1 must be topk indices tensor");
-    return sampler_.topkLast(*first, *second);
+    return sampler_.sampleTopKLast(*first, *second, sampling);
 }
 
 Result<std::vector<engine::RunOutput>> Session::runValuesProfiled(
@@ -272,7 +276,8 @@ Result<std::vector<engine::RunOutput>> Session::runValuesProfiled(
 Result<std::pair<int64_t, float>> Session::evalToken(
         int64_t token,
         int64_t position,
-        const std::string& phase) {
+        const std::string& phase,
+        bool useSampling) {
     ServerStageScope timer(logger_, phase, "server.eval_token.total");
     if (logger_) {
         logger_->logf(
@@ -292,7 +297,7 @@ Result<std::pair<int64_t, float>> Session::evalToken(
         return make_error(outputs.error());
     auto sampled = [&]() {
         ServerStageScope sampleTimer(logger_, phase, "server.sampler.sample");
-        return sampleOutputs(*outputs);
+        return sampleOutputs(*outputs, useSampling);
     }();
     if (!sampled)
         return make_error(sampled.error());
@@ -311,7 +316,8 @@ Result<std::pair<int64_t, float>> Session::prefillChunk(
         size_t begin,
         size_t end,
         int64_t position,
-        const std::string& phase) {
+        const std::string& phase,
+        bool useSampling) {
     ServerStageScope timer(logger_, phase, "server.prefill_chunk.total");
     if (!prefillCompiled_)
         return make_error("prefill graph is not loaded");
@@ -336,7 +342,7 @@ Result<std::pair<int64_t, float>> Session::prefillChunk(
         return make_error(outputs.error());
     auto sampled = [&]() {
         ServerStageScope sampleTimer(logger_, phase, "server.sampler.sample");
-        return sampleOutputs(*outputs);
+        return sampleOutputs(*outputs, useSampling);
     }();
     if (!sampled)
         return make_error(sampled.error());
@@ -411,7 +417,8 @@ Result<GenerateResult> Session::generate(
                 begin,
                 end,
                 static_cast<int64_t>(begin),
-                phase);
+                phase,
+                end == inputIds.size());
             if (!next)
                 return make_error(next.error());
             if (end == inputIds.size())
@@ -422,7 +429,11 @@ Result<GenerateResult> Session::generate(
         ServerStageScope promptTimer(logger_, "prompt", "server.prompt.eval_tokens");
         for (size_t i = 0; i < inputIds.size(); i++) {
             auto phase = "prompt_token_" + std::to_string(i);
-            auto next = evalToken(inputIds[i], static_cast<int64_t>(i), phase);
+            auto next = evalToken(
+                inputIds[i],
+                static_cast<int64_t>(i),
+                phase,
+                i + 1 == inputIds.size());
             if (!next)
                 return make_error(next.error());
             if (i + 1 == inputIds.size())

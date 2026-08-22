@@ -6,7 +6,11 @@
 #include "CudaDevice.h"
 #endif
 
+#include <nlohmann/json.hpp>
+
 #include <chrono>
+#include <filesystem>
+#include <fstream>
 #include <memory>
 #include <mutex>
 #include <utility>
@@ -55,6 +59,41 @@ Result<std::unique_ptr<engine::CompiledKernelGraph>> compile_model_graph(
     if (!compiled)
         return make_error(compiled.error());
     return compiled.take();
+}
+
+Result<void> load_model_config(ModelConfig& config) {
+    auto path = std::filesystem::path(config.modelPath).parent_path() / "model_config.json";
+    std::error_code filesystemError;
+    bool exists = std::filesystem::exists(path, filesystemError);
+    if (filesystemError) {
+        return make_error(
+            "failed to inspect model config " + path.string() + ": " +
+            filesystemError.message());
+    }
+    if (!exists)
+        return {};
+
+    try {
+        std::ifstream input(path);
+        if (!input)
+            return make_error("failed to open model config: " + path.string());
+        auto json = nlohmann::json::parse(input);
+        if (json.contains("top_k"))
+            config.sampling.topK = json.at("top_k").get<int32_t>();
+        if (json.contains("top_p"))
+            config.sampling.topP = json.at("top_p").get<float>();
+        if (json.contains("temperature"))
+            config.sampling.temperature = json.at("temperature").get<float>();
+    } catch (const std::exception& error) {
+        return make_error(
+            "failed to parse model config " + path.string() + ": " + error.what());
+    }
+
+    auto validated = resolveSamplingConfig(config.sampling);
+    if (!validated)
+        return make_error("invalid model config " + path.string() + ": " + validated.error());
+    config.sampling = validated.take();
+    return {};
 }
 
 } // namespace
@@ -141,6 +180,10 @@ Result<void> Model::initialize() {
     if (config_.weightsPath.empty())
         return make_error("--weights is required");
 
+    auto loadedConfig = load_model_config(config_);
+    if (!loadedConfig)
+        return make_error(loadedConfig.error());
+
     weights_ = weight::EagerSafeTensorWeights::load(config_.weightsPath);
     if (!weights_)
         return make_error("failed to load weights: " + config_.weightsPath);
@@ -169,7 +212,7 @@ Result<void> Model::initialize() {
     if (config_.architecture == "gemma4a4b26b" ||
         config_.architecture == "gemma4a4b" ||
         config_.architecture == "gemma4moe") {
-        sandyGoOptions.configConstants["TOP_K"] = 1;
+        sandyGoOptions.configConstants["TOP_K"] = config_.sampling.topK;
     }
     ir::mid_ir::MaterializeOptions evalOptions;
     evalOptions.input_tensor_descs["input_id"] =
@@ -224,7 +267,8 @@ Result<GenerateResult> Model::generate(
         const std::vector<int64_t>& inputIds,
         int32_t maxTokens,
         const std::vector<int64_t>& stopTokenIds,
-        RequestLogger* logger) {
+        RequestLogger* logger,
+        const SamplingOverrides& samplingOverrides) {
     std::unique_ptr<RequestLogger> ownedLogger;
     if (!logger) {
         ownedLogger = RequestLogger::create(config_.logging, requestId);
@@ -252,6 +296,10 @@ Result<GenerateResult> Model::generate(
     if (!engine_ || !compiled_ || !device_ || !deviceWeights_)
         return make_error("model is not initialized");
 
+    auto sampling = resolveSamplingConfig(config_.sampling, samplingOverrides);
+    if (!sampling)
+        return make_error(sampling.error());
+
     std::vector<int64_t> effectiveStopTokens = stopTokenIds;
     if (config_.eosTokenId >= 0) {
         bool found = false;
@@ -271,13 +319,15 @@ Result<GenerateResult> Model::generate(
             config_.eosTokenId);
     }
 
+    auto sessionConfig = config_.session;
+    sessionConfig.sampling = sampling.take();
     Session session(
         *device_,
         *engine_,
         *compiled_,
         prefillCompiled_.get(),
         *deviceWeights_,
-        config_.session,
+        std::move(sessionConfig),
         logger);
     auto generated = session.generate(inputIds, maxTokens, effectiveStopTokens);
     if (!generated) {

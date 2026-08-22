@@ -36,7 +36,9 @@ class ChatCompletionRequest(BaseModel):
     model: str | None = None
     messages: list[ChatMessage]
     max_tokens: int = Field(default=32, ge=0)
-    temperature: float = 0.0
+    temperature: float | None = Field(default=None, ge=0)
+    top_p: float | None = Field(default=None, gt=0, le=1)
+    chat_template_kwargs: dict[str, Any] | None = None
     stream: bool = False
     stop: str | list[str] | None = None
     n: int = 1
@@ -96,8 +98,6 @@ def create_app(config: ServerConfig) -> FastAPI:
             raise HTTPException(status_code=400, detail="streaming is not supported in MVP")
         if request.n != 1:
             raise HTTPException(status_code=400, detail="n > 1 is not supported in MVP")
-        if request.temperature != 0:
-            raise HTTPException(status_code=400, detail="only temperature=0 is supported in MVP")
         if request.model is not None and request.model != config.model_id:
             raise HTTPException(status_code=404, detail=f"unknown model: {request.model}")
         if request.stop is not None:
@@ -108,6 +108,7 @@ def create_app(config: ServerConfig) -> FastAPI:
             input_ids = encode_messages(
                 tokenizer,
                 [model_dump(message) for message in request.messages],
+                request.chat_template_kwargs,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -122,6 +123,8 @@ def create_app(config: ServerConfig) -> FastAPI:
                 input_ids=input_ids,
                 max_tokens=request.max_tokens,
                 stop_token_ids=stop_token_ids,
+                temperature=request.temperature,
+                top_p=request.top_p,
             )
         except grpc.RpcError as exc:
             raise HTTPException(

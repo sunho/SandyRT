@@ -24,7 +24,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x15sandy_inference.proto\x12\x0csandy.server\"\x0f\n\rHealthRequest\"-\n\x0eHealthResponse\x12\n\n\x02ok\x18\x01 \x01(\x08\x12\x0f\n\x07message\x18\x02 \x01(\t\"\x12\n\x10ModelInfoRequest\"R\n\x11ModelInfoResponse\x12\x10\n\x08model_id\x18\x01 \x01(\t\x12\x0f\n\x07\x62\x61\x63kend\x18\x02 \x01(\t\x12\x1a\n\x12max_context_tokens\x18\x03 \x01(\x05\"d\n\x0fGenerateRequest\x12\x12\n\nrequest_id\x18\x01 \x01(\t\x12\x11\n\tinput_ids\x18\x02 \x03(\x03\x12\x12\n\nmax_tokens\x18\x03 \x01(\x05\x12\x16\n\x0estop_token_ids\x18\x04 \x03(\x03\"\x92\x01\n\x10GenerateResponse\x12\x12\n\nrequest_id\x18\x01 \x01(\t\x12\x12\n\noutput_ids\x18\x02 \x03(\x03\x12\x15\n\rfinish_reason\x18\x03 \x01(\t\x12\x15\n\rprompt_tokens\x18\x04 \x01(\x05\x12\x19\n\x11\x63ompletion_tokens\x18\x05 \x01(\x05\x12\r\n\x05\x65rror\x18\x06 \x01(\t2\xee\x01\n\x0eSandyInference\x12\x43\n\x06Health\x12\x1b.sandy.server.HealthRequest\x1a\x1c.sandy.server.HealthResponse\x12L\n\tModelInfo\x12\x1e.sandy.server.ModelInfoRequest\x1a\x1f.sandy.server.ModelInfoResponse\x12I\n\x08Generate\x12\x1d.sandy.server.GenerateRequest\x1a\x1e.sandy.server.GenerateResponseb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x15sandy_inference.proto\x12\x0csandy.server\"\x0f\n\rHealthRequest\"-\n\x0eHealthResponse\x12\n\n\x02ok\x18\x01 \x01(\x08\x12\x0f\n\x07message\x18\x02 \x01(\t\"\x12\n\x10ModelInfoRequest\"R\n\x11ModelInfoResponse\x12\x10\n\x08model_id\x18\x01 \x01(\t\x12\x0f\n\x07\x62\x61\x63kend\x18\x02 \x01(\t\x12\x1a\n\x12max_context_tokens\x18\x03 \x01(\x05\"\xac\x01\n\x0fGenerateRequest\x12\x12\n\nrequest_id\x18\x01 \x01(\t\x12\x11\n\tinput_ids\x18\x02 \x03(\x03\x12\x12\n\nmax_tokens\x18\x03 \x01(\x05\x12\x16\n\x0estop_token_ids\x18\x04 \x03(\x03\x12\x18\n\x0btemperature\x18\x05 \x01(\x02H\x00\x88\x01\x01\x12\x12\n\x05top_p\x18\x06 \x01(\x02H\x01\x88\x01\x01\x42\x0e\n\x0c_temperatureB\x08\n\x06_top_p\"\x92\x01\n\x10GenerateResponse\x12\x12\n\nrequest_id\x18\x01 \x01(\t\x12\x12\n\noutput_ids\x18\x02 \x03(\x03\x12\x15\n\rfinish_reason\x18\x03 \x01(\t\x12\x15\n\rprompt_tokens\x18\x04 \x01(\x05\x12\x19\n\x11\x63ompletion_tokens\x18\x05 \x01(\x05\x12\r\n\x05\x65rror\x18\x06 \x01(\t2\xee\x01\n\x0eSandyInference\x12\x43\n\x06Health\x12\x1b.sandy.server.HealthRequest\x1a\x1c.sandy.server.HealthResponse\x12L\n\tModelInfo\x12\x1e.sandy.server.ModelInfoRequest\x1a\x1f.sandy.server.ModelInfoResponse\x12I\n\x08Generate\x12\x1d.sandy.server.GenerateRequest\x1a\x1e.sandy.server.GenerateResponseb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -39,10 +39,10 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_MODELINFOREQUEST']._serialized_end=121
   _globals['_MODELINFORESPONSE']._serialized_start=123
   _globals['_MODELINFORESPONSE']._serialized_end=205
-  _globals['_GENERATEREQUEST']._serialized_start=207
-  _globals['_GENERATEREQUEST']._serialized_end=307
-  _globals['_GENERATERESPONSE']._serialized_start=310
-  _globals['_GENERATERESPONSE']._serialized_end=456
-  _globals['_SANDYINFERENCE']._serialized_start=459
-  _globals['_SANDYINFERENCE']._serialized_end=697
+  _globals['_GENERATEREQUEST']._serialized_start=208
+  _globals['_GENERATEREQUEST']._serialized_end=380
+  _globals['_GENERATERESPONSE']._serialized_start=383
+  _globals['_GENERATERESPONSE']._serialized_end=529
+  _globals['_SANDYINFERENCE']._serialized_start=532
+  _globals['_SANDYINFERENCE']._serialized_end=770
 # @@protoc_insertion_point(module_scope)

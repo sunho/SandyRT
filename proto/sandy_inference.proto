@@ -28,6 +28,8 @@ message GenerateRequest {
   repeated int64 input_ids = 2;
   int32 max_tokens = 3;
   repeated int64 stop_token_ids = 4;
+  optional float temperature = 5;
+  optional float top_p = 6;
 }
 
 message GenerateResponse {

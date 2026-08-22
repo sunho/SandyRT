@@ -90,7 +90,12 @@ grpc::Status SandyInferenceService::Generate(
         inputIds,
         request->max_tokens(),
         stopTokenIds,
-        logger.get());
+        logger.get(),
+        SamplingOverrides{
+            request->has_top_p() ? std::optional<float>(request->top_p()) : std::nullopt,
+            request->has_temperature()
+                ? std::optional<float>(request->temperature())
+                : std::nullopt});
     if (!generated) {
         response->set_error(generated.error());
         if (logger) {

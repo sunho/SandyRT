@@ -1,0 +1,5 @@
+{
+  "top_k": 64,
+  "top_p": 0.95,
+  "temperature": 1.0
+}

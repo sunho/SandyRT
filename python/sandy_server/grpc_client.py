@@ -39,11 +39,18 @@ class SandyGrpcClient:
             request_id: str,
             input_ids: list[int],
             max_tokens: int,
-            stop_token_ids: list[int]) -> object:
-        request = sandy_inference_pb2.GenerateRequest(
+            stop_token_ids: list[int],
+            temperature: float | None = None,
+            top_p: float | None = None) -> object:
+        request_fields = dict(
             request_id=request_id,
             input_ids=input_ids,
             max_tokens=max_tokens,
             stop_token_ids=stop_token_ids,
         )
+        if temperature is not None:
+            request_fields["temperature"] = temperature
+        if top_p is not None:
+            request_fields["top_p"] = top_p
+        request = sandy_inference_pb2.GenerateRequest(**request_fields)
         return self._stub.Generate(request)

@@ -6,6 +6,7 @@
 #include "Logger.h"
 #include "Result.h"
 #include "SafeTensorWeights.h"
+#include "Sampler.h"
 #include "Session.h"
 
 #include <memory>
@@ -23,6 +24,7 @@ struct ModelConfig {
     std::string weightsPath;
     int32_t eosTokenId = -1;
     int32_t maxContextTokens = 0;
+    SamplingConfig sampling;
     LoggerConfig logging;
     SessionConfig session;
 };
@@ -38,7 +40,8 @@ public:
         const std::vector<int64_t>& inputIds,
         int32_t maxTokens,
         const std::vector<int64_t>& stopTokenIds,
-        RequestLogger* logger = nullptr);
+        RequestLogger* logger = nullptr,
+        const SamplingOverrides& samplingOverrides = {});
 
     const ModelConfig& config() const { return config_; }
     const std::string& backend() const { return backend_; }

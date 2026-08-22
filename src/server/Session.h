@@ -39,6 +39,7 @@ struct CacheGroupConfig {
 struct SessionConfig {
     std::vector<CacheGroupConfig> cacheGroups;
     int32_t prefillChunkTokens = kDefaultPrefillChunkTokens;
+    SamplingConfig sampling;
 };
 
 class Session {
@@ -76,7 +77,8 @@ private:
         size_t end,
         int64_t position);
     Result<std::pair<int64_t, float>> sampleOutputs(
-        std::vector<engine::RunOutput>& outputs);
+        std::vector<engine::RunOutput>& outputs,
+        bool useSampling = true);
     Result<std::vector<engine::RunOutput>> runValuesProfiled(
         const engine::CompiledKernelGraph& graph,
         std::span<const engine::RunInput> inputs,
@@ -84,13 +86,15 @@ private:
     Result<std::pair<int64_t, float>> evalToken(
         int64_t token,
         int64_t position,
-        const std::string& phase);
+        const std::string& phase,
+        bool useSampling = true);
     Result<std::pair<int64_t, float>> prefillChunk(
         const std::vector<int64_t>& inputIds,
         size_t begin,
         size_t end,
         int64_t position,
-        const std::string& phase);
+        const std::string& phase,
+        bool useSampling);
     bool shouldStop(int64_t token, const std::unordered_set<int64_t>& stopTokens) const;
     void destroyCaches();
 

@@ -18,6 +18,7 @@ target_link_libraries(sandy_grpc_worker
   SandyRTLib
   EngineLib
   WeightLib
+  nlohmann_json
   ${SANDY_GRPC_GRPCPP}
 )
 
