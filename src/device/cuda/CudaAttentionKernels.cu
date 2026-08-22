@@ -50,6 +50,14 @@ __device__ float warp_reduce_sum(float value) {
     return __shfl_sync(mask, value, 0);
 }
 
+__device__ uint64_t warp_broadcast_u64(uint64_t value, int sourceLane = 0) {
+    uint32_t low = static_cast<uint32_t>(value);
+    uint32_t high = static_cast<uint32_t>(value >> 32);
+    low = __shfl_sync(0xffffffffu, low, sourceLane);
+    high = __shfl_sync(0xffffffffu, high, sourceLane);
+    return static_cast<uint64_t>(low) | (static_cast<uint64_t>(high) << 32);
+}
+
 __device__ int64_t device_max_i64(int64_t lhs, int64_t rhs) {
     return lhs > rhs ? lhs : rhs;
 }
@@ -240,6 +248,216 @@ __global__ void flash_attention_prefill_kernel(DeviceAttentionProgram program) {
                 program.output,
                 q_linear_index(program, batch, qHead, query, dim),
                 output[frag] * invSum);
+        }
+    }
+}
+
+template <
+        int HeadDim,
+        int QueryHeadsPerKv,
+        int WarpsPerQueryHead,
+        int QueriesPerWarp,
+        int KeyValueTileSize>
+__global__ void flash_attention_prefill_gqa_kernel(DeviceAttentionProgram program) {
+    constexpr int kNumWarps = QueryHeadsPerKv * WarpsPerQueryHead;
+    constexpr int kQueriesPerHeadBlock = WarpsPerQueryHead * QueriesPerWarp;
+    constexpr int kLaneValues = (HeadDim + 31) / 32;
+    static_assert(kNumWarps <= 8);
+
+    extern __shared__ float shared[];
+    float* kTile = shared;
+    float* vTile = kTile + KeyValueTileSize * HeadDim;
+    float* probabilities = vTile + KeyValueTileSize * HeadDim;
+
+    int lane = threadIdx.x & 31;
+    int warp = threadIdx.x >> 5;
+    int queryHeadInGroup = warp / WarpsPerQueryHead;
+    int queryWarp = warp - queryHeadInGroup * WarpsPerQueryHead;
+
+    int64_t kvHead = blockIdx.y;
+    int64_t qHead = kvHead * QueryHeadsPerKv + queryHeadInGroup;
+    int64_t batch = blockIdx.z;
+    int64_t queryBlockStart = blockIdx.x * kQueriesPerHeadBlock;
+
+    int64_t basePosition = 0;
+    if (program.hasPositionOffsets)
+        basePosition = load_index(program.positionOffsets, program.rank == 4 ? batch : 0);
+
+    float runningMax[QueriesPerWarp];
+    float runningSum[QueriesPerWarp];
+    float qValues[QueriesPerWarp][kLaneValues];
+    float output[QueriesPerWarp][kLaneValues];
+    int64_t queries[QueriesPerWarp];
+
+    #pragma unroll
+    for (int row = 0; row < QueriesPerWarp; ++row) {
+        queries[row] = queryBlockStart + queryWarp * QueriesPerWarp + row;
+        runningMax[row] = -INFINITY;
+        runningSum[row] = 0.0f;
+        bool validQuery = queries[row] < program.tq;
+        #pragma unroll
+        for (int frag = 0; frag < kLaneValues; ++frag) {
+            int dim = lane + frag * 32;
+            qValues[row][frag] = validQuery && dim < HeadDim
+                ? cuda_kernel::load_float(
+                      program.q,
+                      q_linear_index(program, batch, qHead, queries[row], dim))
+                : 0.0f;
+            output[row][frag] = 0.0f;
+        }
+    }
+
+    int64_t blockLastQuery = device_min_i64(
+        queryBlockStart + kQueriesPerHeadBlock - 1,
+        program.tq - 1);
+    int64_t blockMinKey = program.window > 0
+        ? device_max_i64(0, basePosition + queryBlockStart + 1 - program.window)
+        : 0;
+    int64_t blockMaxKey = basePosition + blockLastQuery;
+    int64_t firstKeyTile = (blockMinKey / KeyValueTileSize) * KeyValueTileSize;
+
+    for (int64_t keyTileStart = firstKeyTile;
+         keyTileStart < program.tk && keyTileStart <= blockMaxKey;
+         keyTileStart += KeyValueTileSize) {
+        int tileKeys = static_cast<int>(device_min_i64(
+            KeyValueTileSize,
+            program.tk - keyTileStart));
+
+        for (int keyOffset = warp; keyOffset < tileKeys; keyOffset += kNumWarps) {
+            int64_t key = keyTileStart + keyOffset;
+            uint64_t kDataBits = 0;
+            uint64_t vDataBits = 0;
+            int64_t kStorageBase = 0;
+            int64_t vStorageBase = 0;
+            if (lane == 0) {
+                int64_t logicalBase =
+                    kv_linear_index(program, batch, kvHead, key, 0);
+                const void* kData = cuda_kernel::storage_data(
+                    program.k,
+                    logicalBase,
+                    &kStorageBase);
+                const void* vData = cuda_kernel::storage_data(
+                    program.v,
+                    logicalBase,
+                    &vStorageBase);
+                kDataBits = reinterpret_cast<uint64_t>(kData);
+                vDataBits = reinterpret_cast<uint64_t>(vData);
+            }
+
+            kDataBits = warp_broadcast_u64(kDataBits);
+            vDataBits = warp_broadcast_u64(vDataBits);
+            kStorageBase = static_cast<int64_t>(warp_broadcast_u64(
+                static_cast<uint64_t>(kStorageBase)));
+            vStorageBase = static_cast<int64_t>(warp_broadcast_u64(
+                static_cast<uint64_t>(vStorageBase)));
+
+            const void* kData = reinterpret_cast<const void*>(kDataBits);
+            const void* vData = reinterpret_cast<const void*>(vDataBits);
+            for (int dim = lane; dim < HeadDim; dim += 32) {
+                int tileIndex = keyOffset * HeadDim + dim;
+                kTile[tileIndex] = cuda_kernel::load_float_at_storage(
+                    kData,
+                    program.k.dtype,
+                    kStorageBase + dim);
+                vTile[tileIndex] = cuda_kernel::load_float_at_storage(
+                    vData,
+                    program.v.dtype,
+                    vStorageBase + dim);
+            }
+        }
+        __syncthreads();
+
+        #pragma unroll
+        for (int row = 0; row < QueriesPerWarp; ++row) {
+            int64_t query = queries[row];
+            if (query >= program.tq)
+                continue;
+
+            int64_t queryPosition = basePosition + query;
+            int64_t minKey = program.window > 0
+                ? device_max_i64(0, queryPosition + 1 - program.window)
+                : 0;
+            int64_t maxKey = queryPosition;
+            float tileMax = -INFINITY;
+            int probabilityBase =
+                (warp * QueriesPerWarp + row) * KeyValueTileSize;
+
+            for (int keyOffset = 0; keyOffset < tileKeys; ++keyOffset) {
+                int64_t key = keyTileStart + keyOffset;
+                float partial = 0.0f;
+                #pragma unroll
+                for (int frag = 0; frag < kLaneValues; ++frag) {
+                    int dim = lane + frag * 32;
+                    if (dim < HeadDim) {
+                        partial += qValues[row][frag] *
+                            kTile[keyOffset * HeadDim + dim];
+                    }
+                }
+
+                float score = warp_reduce_sum(partial) * program.scale;
+                if (key < minKey || key > maxKey)
+                    score = -INFINITY;
+                tileMax = fmaxf(tileMax, score);
+                if (lane == 0)
+                    probabilities[probabilityBase + keyOffset] = score;
+            }
+
+            if (isinf(tileMax) && tileMax < 0.0f)
+                continue;
+
+            float nextMax = fmaxf(runningMax[row], tileMax);
+            float oldScale = isinf(runningMax[row]) && runningMax[row] < 0.0f
+                ? 0.0f
+                : expf(runningMax[row] - nextMax);
+            float tileScale = expf(tileMax - nextMax);
+
+            __syncwarp();
+            float localTileSum = 0.0f;
+            for (int keyOffset = lane; keyOffset < tileKeys; keyOffset += 32) {
+                int index = probabilityBase + keyOffset;
+                float probability = expf(probabilities[index] - tileMax);
+                probabilities[index] = probability;
+                localTileSum += probability;
+            }
+            float tileSum = warp_reduce_sum(localTileSum);
+            __syncwarp();
+
+            #pragma unroll
+            for (int frag = 0; frag < kLaneValues; ++frag) {
+                int dim = lane + frag * 32;
+                if (dim >= HeadDim)
+                    continue;
+                float tileOutput = 0.0f;
+                for (int keyOffset = 0; keyOffset < tileKeys; ++keyOffset) {
+                    tileOutput += probabilities[probabilityBase + keyOffset] *
+                        vTile[keyOffset * HeadDim + dim];
+                }
+                output[row][frag] =
+                    oldScale * output[row][frag] + tileScale * tileOutput;
+            }
+
+            runningSum[row] = oldScale * runningSum[row] + tileScale * tileSum;
+            runningMax[row] = nextMax;
+        }
+
+        __syncthreads();
+    }
+
+    #pragma unroll
+    for (int row = 0; row < QueriesPerWarp; ++row) {
+        int64_t query = queries[row];
+        if (query >= program.tq)
+            continue;
+        float invSum = runningSum[row] == 0.0f ? 0.0f : 1.0f / runningSum[row];
+        #pragma unroll
+        for (int frag = 0; frag < kLaneValues; ++frag) {
+            int dim = lane + frag * 32;
+            if (dim < HeadDim) {
+                cuda_kernel::store_float(
+                    program.output,
+                    q_linear_index(program, batch, qHead, query, dim),
+                    output[row][frag] * invSum);
+            }
         }
     }
 }
@@ -441,6 +659,62 @@ Result<void> launch_attention_variant(
     flash_attention_prefill_kernel<HeadDim, QueriesPerBlock, KeyValueTileSize>
         <<<grid, block, sharedBytes, stream>>>(program);
     return cuda_check(cudaGetLastError(), "cuda attention launch");
+}
+
+template <
+        int HeadDim,
+        int QueryHeadsPerKv,
+        int WarpsPerQueryHead,
+        int QueriesPerWarp,
+        int KeyValueTileSize>
+Result<void> launch_attention_gqa_variant(
+        DeviceAttentionProgram program,
+        cudaStream_t stream,
+        const cudaDeviceProp& props) {
+    constexpr int threads = QueryHeadsPerKv * WarpsPerQueryHead * 32;
+    constexpr int queriesPerHeadBlock = WarpsPerQueryHead * QueriesPerWarp;
+    size_t sharedBytes =
+        static_cast<size_t>(2 * KeyValueTileSize * HeadDim) * sizeof(float) +
+        static_cast<size_t>(
+            QueryHeadsPerKv * WarpsPerQueryHead * QueriesPerWarp *
+            KeyValueTileSize) * sizeof(float);
+
+    size_t maxShared = static_cast<size_t>(props.sharedMemPerBlock);
+    if (props.sharedMemPerBlockOptin > 0)
+        maxShared = std::max(maxShared, static_cast<size_t>(props.sharedMemPerBlockOptin));
+    if (sharedBytes > maxShared)
+        return make_error("cuda GQA attention tile exceeds device shared memory");
+
+    if (sharedBytes > static_cast<size_t>(props.sharedMemPerBlock)) {
+        auto attr = cuda_check(
+            cudaFuncSetAttribute(
+                flash_attention_prefill_gqa_kernel<
+                    HeadDim,
+                    QueryHeadsPerKv,
+                    WarpsPerQueryHead,
+                    QueriesPerWarp,
+                    KeyValueTileSize>,
+                cudaFuncAttributeMaxDynamicSharedMemorySize,
+                static_cast<int>(sharedBytes)),
+            "cuda GQA attention shared memory opt-in");
+        if (!attr)
+            return make_error(attr.error());
+    }
+
+    dim3 grid(
+        static_cast<unsigned>(ceil_div_i64(program.tq, queriesPerHeadBlock)),
+        static_cast<unsigned>(program.kvHeads),
+        static_cast<unsigned>(program.batch));
+    dim3 block(threads);
+
+    flash_attention_prefill_gqa_kernel<
+        HeadDim,
+        QueryHeadsPerKv,
+        WarpsPerQueryHead,
+        QueriesPerWarp,
+        KeyValueTileSize>
+        <<<grid, block, sharedBytes, stream>>>(program);
+    return cuda_check(cudaGetLastError(), "cuda GQA attention launch");
 }
 
 template <int HeadDim, int QueriesPerBlock, int LargeTile, int SmallTile>
@@ -653,6 +927,15 @@ Result<DeviceAttentionProgram> pack_attention_program(
     packed.v = v.take();
     packed.output = output.take();
 
+    auto supportedKvAccess = [](cuda_kernel::AccessKind access) {
+        return access == cuda_kernel::AccessKind::Contiguous ||
+            access == cuda_kernel::AccessKind::Paged;
+    };
+    if (!supportedKvAccess(packed.k.access) ||
+        !supportedKvAccess(packed.v.access)) {
+        return make_error("cuda attention K/V must be contiguous or paged");
+    }
+
     if (context.inputs.size() == 4) {
         const auto& positionView = context.inputs[3];
         auto dtype = positionView.view.desc.dtype;
@@ -738,6 +1021,20 @@ Result<void> launch_cuda_attention(
             default:
                 return make_error("cuda attention unsupported head dimension");
         }
+    }
+
+    int64_t queryHeadsPerKv = launchProgram.qHeads / launchProgram.kvHeads;
+    if (launchProgram.headDim == 256 && queryHeadsPerKv == 2) {
+        return launch_attention_gqa_variant<256, 2, 4, 2, 32>(
+            launchProgram,
+            context.stream,
+            props);
+    }
+    if (launchProgram.headDim == 512 && queryHeadsPerKv == 8) {
+        return launch_attention_gqa_variant<512, 8, 1, 2, 16>(
+            launchProgram,
+            context.stream,
+            props);
     }
 
     switch (launchProgram.headDim) {
