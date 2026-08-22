@@ -93,7 +93,7 @@ TEST(Lexer, Operators) {
 }
 
 TEST(Lexer, Delimiters) {
-    auto tokens = lex("( ) { } [ ] ,");
+    auto tokens = lex("( ) { } [ ] , :");
     EXPECT_EQ(tokens[0].kind, TokenKind::LParen);
     EXPECT_EQ(tokens[1].kind, TokenKind::RParen);
     EXPECT_EQ(tokens[2].kind, TokenKind::LBrace);
@@ -101,6 +101,7 @@ TEST(Lexer, Delimiters) {
     EXPECT_EQ(tokens[4].kind, TokenKind::LBracket);
     EXPECT_EQ(tokens[5].kind, TokenKind::RBracket);
     EXPECT_EQ(tokens[6].kind, TokenKind::Comma);
+    EXPECT_EQ(tokens[7].kind, TokenKind::Colon);
 }
 
 TEST(Lexer, SemicolonInsertion) {

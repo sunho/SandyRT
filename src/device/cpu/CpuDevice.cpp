@@ -897,6 +897,8 @@ Result<void> CpuDevice::run(
                     return core::transpose(*x, *out);
                 case ir::kernel_ir::LayoutTransformKind::Permute:
                     return core::permute(*x, kernel.dims, *out);
+                case ir::kernel_ir::LayoutTransformKind::Slice:
+                    return make_error("slice layout aliases must not launch on CPU");
                 case ir::kernel_ir::LayoutTransformKind::Contiguous:
                     return core::reshape(*x, *out);
             }

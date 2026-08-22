@@ -49,11 +49,20 @@ std::vector<bool> excludedValues(const Graph& graph) {
     return excluded;
 }
 
-bool producesDenseAllocation(const Op& op) {
-    return op.kind() != OpKind::Input &&
-           op.kind() != OpKind::DeviceTransfer &&
-           op.kind() != OpKind::TensorTupleCreate &&
-           op.kind() != OpKind::PagedAppend;
+bool mayRequireDenseAllocation(const Op& op) {
+    if (op.kind() == OpKind::Input ||
+        op.kind() == OpKind::DeviceTransfer ||
+        op.kind() == OpKind::TensorTupleCreate ||
+        op.kind() == OpKind::PagedAppend)
+        return false;
+
+    if (op.kind() != OpKind::LayoutTransform)
+        return true;
+
+    auto transform =
+        static_cast<const ir::kernel_ir::LayoutTransformOp&>(op).transform();
+    return transform == ir::kernel_ir::LayoutTransformKind::Reshape ||
+           transform == ir::kernel_ir::LayoutTransformKind::Contiguous;
 }
 
 } // namespace
@@ -84,7 +93,7 @@ Result<RuntimeScratchPlan> planRuntimeScratch(
 
     for (const auto& opPtr : graph.ops()) {
         const auto& op = *opPtr;
-        if (producesDenseAllocation(op)) {
+        if (mayRequireDenseAllocation(op)) {
             auto opDevice = runtimeOpDevice(compiled, op);
             auto allocator = allocatorFor(opDevice);
             if (!allocator)

@@ -685,6 +685,7 @@ Result<void> lower_layout_transform(
 
     LayoutTransformKind kind = LayoutTransformKind::Contiguous;
     std::vector<int64_t> dims;
+    std::vector<int64_t> indices;
     switch (op.kind) {
         case mid_ir::OpKind::Reshape: {
             auto attr = find_attr(op, "shape", mid_ir::AttrValue::IntList);
@@ -705,6 +706,18 @@ Result<void> lower_layout_transform(
             dims = (*attr)->intListVal;
             break;
         }
+        case mid_ir::OpKind::Slice: {
+            auto kindsAttr = find_attr(op, "kinds", mid_ir::AttrValue::IntList);
+            if (!kindsAttr)
+                return make_error(kindsAttr.error());
+            auto indicesAttr = find_attr(op, "indices", mid_ir::AttrValue::IntList);
+            if (!indicesAttr)
+                return make_error(indicesAttr.error());
+            kind = LayoutTransformKind::Slice;
+            dims = (*kindsAttr)->intListVal;
+            indices = (*indicesAttr)->intListVal;
+            break;
+        }
         default:
             return make_error("unsupported layout transform");
     }
@@ -713,7 +726,8 @@ Result<void> lower_layout_transform(
         kind,
         input.take(),
         output.take(),
-        std::move(dims));
+        std::move(dims),
+        std::move(indices));
     return {};
 }
 
@@ -1374,6 +1388,7 @@ Result<void> lower_op(
         case mid_ir::OpKind::Transpose:
         case mid_ir::OpKind::Reshape:
         case mid_ir::OpKind::Permute:
+        case mid_ir::OpKind::Slice:
             return lower_layout_transform(graph, op, valueMap);
         case mid_ir::OpKind::PagedAppend:
             return lower_paged_append(graph, op, valueMap);

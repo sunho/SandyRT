@@ -88,7 +88,14 @@ Result<bool> Device::isDefaultView(const TensorViewDesc& view) const {
     auto strides = defaultStrides(view.desc.shape);
     if (!strides)
         return make_error(strides.error());
-    return view.strides == *strides;
+    if (view.strides.size() != strides->size())
+        return false;
+    for (size_t axis = 0; axis < view.strides.size(); ++axis) {
+        if (view.desc.shape.dim(static_cast<int>(axis)) != 1 &&
+            view.strides[axis] != (*strides)[axis])
+            return false;
+    }
+    return true;
 }
 
 } // namespace sandy::device

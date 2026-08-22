@@ -10,7 +10,7 @@ enum class TokenKind {
 
     Ident, IntLit, FloatLit, StringLit, WeightLit,
 
-    ColonAssign, Assign,
+    Colon, ColonAssign, Assign,
     Plus, Minus, Star, Slash, Percent,
     Eq, NotEq, Lt, Gt, LtEq, GtEq,
 

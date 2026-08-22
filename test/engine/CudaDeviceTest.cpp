@@ -1197,6 +1197,61 @@ TEST(CudaDeviceTest, RunMatMulF32) {
     expect_f32_output(device, *outputBuffer, {58.0f, 64.0f, 139.0f, 154.0f});
 }
 
+TEST(CudaDeviceTest, RunMatMulAcceptsOffsetSliceViewWithSingletonLeadingAxis) {
+    if (auto reason = cuda_device_skip_reason(); !reason.empty())
+        GTEST_SKIP() << reason;
+    namespace kir = sandy::ir::kernel_ir;
+
+    kir::Graph graph;
+    auto lhs = graph.addValue(tensor_type({1, 2}));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 0, ""}, lhs);
+    auto rhs = graph.addValue(tensor_type({2, 2}));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 1, ""}, rhs);
+    auto output = graph.addValue(tensor_type({1, 2}));
+    auto* op = graph.addOp<kir::MatMulKernelOp>(
+        lhs, rhs, output, false, false);
+    graph.setOutputs({output});
+
+    sandy::device::CudaDevice device;
+    auto compiled = device.compile(graph);
+    ASSERT_TRUE(compiled) << compiled.error();
+
+    auto lhsHost = make_f32_buffer(
+        "lhs", sandy::core::Shape({1, 3, 2}),
+        {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f});
+    auto rhsHost = make_f32_buffer(
+        "rhs", sandy::core::Shape({2, 2}),
+        {1.0f, 0.0f, 0.0f, 1.0f});
+    auto lhsBuffer = device.load(*lhsHost);
+    ASSERT_TRUE(lhsBuffer) << lhsBuffer.error();
+    auto rhsBuffer = device.load(*rhsHost);
+    ASSERT_TRUE(rhsBuffer) << rhsBuffer.error();
+    auto outputBuffer = device.alloc(
+        sandy::core::TensorDesc({1, 2}, sandy::core::DType::F32));
+    ASSERT_TRUE(outputBuffer) << outputBuffer.error();
+
+    sandy::device::TensorViewDesc slicedLhs;
+    slicedLhs.desc = sandy::core::TensorDesc({1, 2}, sandy::core::DType::F32);
+    slicedLhs.strides = {6, 1};
+    slicedLhs.storageOffset = 4;
+    std::vector<sandy::device::DeviceRunValue> inputs = {
+        sandy::device::DeviceTensorView{*lhsBuffer, std::move(slicedLhs)},
+        tensor_view(device, *rhsBuffer, rhsHost->desc()),
+    };
+    std::vector<sandy::device::DeviceRunValue> outputs = {
+        tensor_view(
+            device,
+            *outputBuffer,
+            sandy::core::TensorDesc({1, 2}, sandy::core::DType::F32)),
+    };
+    auto run = device.run(*compiled, op->id(), inputs, outputs);
+    ASSERT_TRUE(run) << run.error();
+
+    expect_f32_output(device, *outputBuffer, {5.0f, 6.0f});
+}
+
 TEST(CudaDeviceTest, RunMatMulRejectsPagedOperand) {
     if (auto reason = cuda_device_skip_reason(); !reason.empty())
         GTEST_SKIP() << reason;

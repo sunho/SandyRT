@@ -220,6 +220,23 @@ BuiltinLowering BuiltinLowering::createDefault() {
         return std::vector<Value*>{builder.createPermute(operands[0], attrs.at("dims").intListVal)};
     });
 
+    bl.add("slice", [](Builder& builder,
+                        const std::vector<Value*>& operands,
+                        const AttrMap& attrs,
+                        int numResults) -> Result<std::vector<Value*>> {
+        auto resultCount = expect_num_results("slice", numResults, 1);
+        if (!resultCount) return make_error(resultCount.error());
+        if (operands.size() != 1)
+            return make_error("slice expects one operand");
+        auto kinds = attrs.find("kinds");
+        auto indices = attrs.find("indices");
+        if (kinds == attrs.end() || kinds->second.kind != AttrValue::IntList ||
+            indices == attrs.end() || indices->second.kind != AttrValue::IntList)
+            return make_error("slice expects int-list kinds and indices attrs");
+        return std::vector<Value*>{builder.createSlice(
+            operands[0], kinds->second.intListVal, indices->second.intListVal)};
+    });
+
     bl.add("paged_append", [](Builder& builder,
                                const std::vector<Value*>& operands,
                                const AttrMap&,

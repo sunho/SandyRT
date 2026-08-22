@@ -480,11 +480,24 @@ ExprPtr Parser::parsePostfix() {
         } else if (match(TokenKind::LBracket)) {
             int idxLine = previous().line;
             int idxCol = previous().col;
-            ExprPtr index = parseExpr();
-            if (hasError_) return expr;
+            std::vector<IndexSelector> selectors;
+            while (true) {
+                if (match(TokenKind::Colon)) {
+                    selectors.push_back(IndexSelector::full());
+                } else {
+                    ExprPtr index = parseExpr();
+                    if (hasError_) return expr;
+                    selectors.push_back(IndexSelector::fixed(std::move(index)));
+                }
+                if (!match(TokenKind::Comma)) break;
+                if (check(TokenKind::RBracket)) {
+                    reportError("expected index selector after ','");
+                    return expr;
+                }
+            }
             expect(TokenKind::RBracket, "expected ']'");
             if (hasError_) return expr;
-            expr = makeIndex(std::move(expr), std::move(index), idxLine, idxCol);
+            expr = makeIndex(std::move(expr), std::move(selectors), idxLine, idxCol);
         } else {
             break;
         }

@@ -40,6 +40,20 @@ struct NamedArg {
     ExprPtr value;
 };
 
+struct IndexSelector {
+    enum Kind { Full, Fixed };
+    Kind kind = Full;
+    ExprPtr index;
+
+    static IndexSelector full() { return {}; }
+    static IndexSelector fixed(ExprPtr value) {
+        IndexSelector selector;
+        selector.kind = Fixed;
+        selector.index = std::move(value);
+        return selector;
+    }
+};
+
 struct Expr {
     enum Kind {
         Ident, IntLit, FloatLit, StringLit, WeightLit, IntListLit,
@@ -60,6 +74,7 @@ struct Expr {
     std::vector<ExprPtr> args;
     std::vector<NamedArg> namedArgs;
     std::vector<int64_t> intListVal;
+    std::vector<IndexSelector> indexSelectors;
 };
 
 struct Stmt {
@@ -206,12 +221,12 @@ inline ExprPtr makeCall(ExprPtr callee, std::vector<ExprPtr> args,
     return e;
 }
 
-inline ExprPtr makeIndex(ExprPtr target, ExprPtr index,
+inline ExprPtr makeIndex(ExprPtr target, std::vector<IndexSelector> selectors,
                          int line = 0, int col = 0) {
     auto e = std::make_unique<Expr>();
     e->kind = Expr::Index;
     e->left = std::move(target);
-    e->right = std::move(index);
+    e->indexSelectors = std::move(selectors);
     e->line = line;
     e->col = col;
     return e;

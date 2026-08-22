@@ -30,6 +30,7 @@ enum class OpKind {
     Transpose,
     Reshape,
     Permute,
+    Slice,
     PagedAppend,
     SlidingQueryKeyScore,
     Attention,
@@ -226,6 +227,7 @@ public:
     Value* createTranspose(Value* x);
     Value* createReshape(Value* x, std::vector<int64_t> shape);
     Value* createPermute(Value* x, std::vector<int64_t> dims);
+    Value* createSlice(Value* x, std::vector<int64_t> kinds, std::vector<int64_t> indices);
     void createPagedAppend(Value* cache, Value* chunk);
     Value* createSlidingQueryKeyScore(Value* q, Value* k, int64_t window = 0, float scale = -1.0f);
     Value* createSlidingQueryKeyScore(Value* q, Value* k, Value* positionIds, int64_t window = 0, float scale = -1.0f);

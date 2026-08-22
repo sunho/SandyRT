@@ -241,6 +241,26 @@ Result<core::TensorDesc> inferOutput(
                     dims = std::move(permuted);
                     break;
                 }
+                case LayoutTransformKind::Slice: {
+                    if (layout.dims().size() != dims.size() ||
+                        layout.indices().size() != dims.size())
+                        return make_error("slice selector count must match runtime input rank");
+                    std::vector<int64_t> sliced;
+                    sliced.reserve(dims.size());
+                    for (size_t axis = 0; axis < dims.size(); ++axis) {
+                        if (layout.dims()[axis] == 0) {
+                            sliced.push_back(dims[axis]);
+                            continue;
+                        }
+                        if (layout.dims()[axis] != 1)
+                            return make_error("invalid slice selector kind");
+                        int64_t index = layout.indices()[axis];
+                        if (index < -dims[axis] || index >= dims[axis])
+                            return make_error("slice index out of range for axis " + std::to_string(axis));
+                    }
+                    dims = std::move(sliced);
+                    break;
+                }
                 case LayoutTransformKind::Contiguous: break;
             }
             return checkedDesc(graph, output, core::Shape(std::move(dims)));

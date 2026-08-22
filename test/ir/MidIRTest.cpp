@@ -379,6 +379,19 @@ TEST_F(MidIRTest, PermuteTypeInference) {
     EXPECT_EQ(out->def->attrs.at("dims").intListVal[1], 2);
 }
 
+TEST_F(MidIRTest, SliceFixedIndexDropsDimension) {
+    sandy::ir::mid_ir::Graph graph;
+    sandy::ir::mid_ir::Builder builder(graph);
+
+    auto* x = builder.createInput(
+        0, sandy::core::Shape({1, -1, 2816}), sandy::core::DType::BF16);
+    auto* out = builder.createSlice(x, {0, 1, 0}, {0, -1, 0});
+
+    EXPECT_EQ(out->shape, sandy::core::Shape({1, 2816}));
+    EXPECT_EQ(out->dtype, sandy::core::DType::BF16);
+    EXPECT_EQ(out->def->kind, sandy::ir::mid_ir::OpKind::Slice);
+}
+
 TEST_F(MidIRTest, SlidingQueryKeyScoreTypeInferenceSupportsRank3AndRank4) {
     sandy::ir::mid_ir::Graph graph;
     sandy::ir::mid_ir::Builder builder(graph);

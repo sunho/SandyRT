@@ -420,6 +420,35 @@ TEST_F(EngineCompileTest, RunPermuteUsesDeviceTensorViewWithoutKernelLaunch) {
     EXPECT_EQ(fakePtr->deallocs, std::vector<sandy::device::DeviceBufferId>({200}));
 }
 
+TEST_F(EngineCompileTest, RunSliceAliasesInputWithoutAllocationOrKernelLaunch) {
+    sandy::ir::mid_ir::Graph graph;
+    sandy::ir::mid_ir::Builder builder(graph);
+    auto* x = builder.createInput(
+        0, sandy::core::Shape({1, 7, 4}), sandy::core::DType::F32);
+    auto* out = builder.createSlice(x, {0, 1, 0}, {0, -1, 0});
+    sandy::ir::mid_ir::Value* outputs[] = {out};
+    builder.setOutputs(outputs);
+
+    FakeDevice* fakePtr = nullptr;
+    auto engine = make_engine(&fakePtr);
+    auto compiledResult = engine.compile(graph);
+    ASSERT_TRUE(compiledResult) << compiledResult.error();
+    auto compiled = compiledResult.take();
+
+    std::vector<sandy::engine::TensorBufferPtr> inputs;
+    inputs.push_back(std::make_shared<FakeTensorBuffer>(
+        sandy::core::TensorDesc("x", sandy::core::Shape({1, 7, 4}), sandy::core::DType::F32)));
+
+    auto outputsResult = engine.run(
+        *compiled, inputs, sandy::device::TensorMap{});
+    ASSERT_TRUE(outputsResult) << outputsResult.error();
+    ASSERT_EQ(outputsResult->size(), 1u);
+    EXPECT_EQ((*outputsResult)[0]->desc().shape, sandy::core::Shape({1, 4}));
+    EXPECT_TRUE(fakePtr->allocDescs.empty());
+    EXPECT_TRUE(fakePtr->runs.empty());
+    EXPECT_EQ(fakePtr->reads, std::vector<sandy::device::DeviceBufferId>({200}));
+}
+
 TEST_F(EngineCompileTest, RunExecutesDeviceTransferThroughHost) {
     using namespace sandy::ir::kernel_ir;
 

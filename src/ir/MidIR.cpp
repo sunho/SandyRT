@@ -30,6 +30,7 @@ const char* op_kind_name(OpKind kind) {
         case OpKind::Transpose: return "transpose";
         case OpKind::Reshape:   return "reshape";
         case OpKind::Permute:   return "permute";
+        case OpKind::Slice:     return "slice";
         case OpKind::PagedAppend: return "paged_append";
         case OpKind::SlidingQueryKeyScore: return "sliding_query_key_score";
         case OpKind::Attention: return "attention";
@@ -451,6 +452,66 @@ public:
                 abort();
             }
             seen[index] = true;
+        }
+    }
+};
+
+class SliceOpDef : public OpDef {
+public:
+    OpKind kind() const override { return OpKind::Slice; }
+    const char* name() const override { return "slice"; }
+    std::vector<ValueType> infer_types(
+        std::span<Value* const> operands,
+        const AttrMap& attrs) const override
+    {
+        const auto& kinds = attrs.at("kinds").intListVal;
+        std::vector<int64_t> outDims;
+        outDims.reserve(kinds.size());
+        for (size_t axis = 0; axis < kinds.size(); ++axis) {
+            if (kinds[axis] == 0)
+                outDims.push_back(operands[0]->shape.dim(static_cast<int>(axis)));
+        }
+        return {{core::Shape(std::move(outDims)), operands[0]->dtype}};
+    }
+    void verify(
+        std::span<Value* const> operands,
+        const AttrMap& attrs) const override
+    {
+        if (operands.size() != 1) {
+            fprintf(stderr, "slice expects 1 operand, got %zu\n", operands.size());
+            abort();
+        }
+        if (operands[0]->kind != ValueKind::Tensor) {
+            fprintf(stderr, "slice input must be a dense tensor\n");
+            abort();
+        }
+        auto kindsIt = attrs.find("kinds");
+        auto indicesIt = attrs.find("indices");
+        if (kindsIt == attrs.end() || kindsIt->second.kind != AttrValue::IntList ||
+            indicesIt == attrs.end() || indicesIt->second.kind != AttrValue::IntList) {
+            fprintf(stderr, "slice kinds and indices attrs must be int lists\n");
+            abort();
+        }
+        const auto& kinds = kindsIt->second.intListVal;
+        const auto& indices = indicesIt->second.intListVal;
+        if (kinds.size() != indices.size() ||
+            static_cast<int>(kinds.size()) != operands[0]->shape.rank()) {
+            fprintf(stderr, "slice requires exactly one selector per input axis\n");
+            abort();
+        }
+        for (size_t axis = 0; axis < kinds.size(); ++axis) {
+            if (kinds[axis] != 0 && kinds[axis] != 1) {
+                fprintf(stderr, "slice selector kind must be full or fixed\n");
+                abort();
+            }
+            if (kinds[axis] == 0)
+                continue;
+            int64_t dim = operands[0]->shape.dim(static_cast<int>(axis));
+            int64_t index = indices[axis];
+            if (dim >= 0 && (index < -dim || index >= dim)) {
+                fprintf(stderr, "slice index out of range for axis %zu\n", axis);
+                abort();
+            }
         }
     }
 };
@@ -1349,6 +1410,7 @@ void register_all_ops() {
     static TransposeOpDef transpose_def;
     static ReshapeOpDef reshape_def;
     static PermuteOpDef permute_def;
+    static SliceOpDef slice_def;
     static PagedAppendOpDef paged_append_def;
     static SlidingQueryKeyScoreOpDef sliding_query_key_score_def;
     static AttentionOpDef attention_def;
@@ -1375,6 +1437,7 @@ void register_all_ops() {
     reg.add(&transpose_def);
     reg.add(&reshape_def);
     reg.add(&permute_def);
+    reg.add(&slice_def);
     reg.add(&paged_append_def);
     reg.add(&sliding_query_key_score_def);
     reg.add(&attention_def);
@@ -1796,6 +1859,17 @@ Value* Builder::createPermute(Value* x, std::vector<int64_t> dims) {
     AttrMap attrs;
     attrs["dims"] = AttrValue::make_int_list(std::move(dims));
     return createOp(OpKind::Permute, operands, attrs)[0];
+}
+
+Value* Builder::createSlice(
+        Value* x,
+        std::vector<int64_t> kinds,
+        std::vector<int64_t> indices) {
+    Value* operands[] = {x};
+    AttrMap attrs;
+    attrs["kinds"] = AttrValue::make_int_list(std::move(kinds));
+    attrs["indices"] = AttrValue::make_int_list(std::move(indices));
+    return createOp(OpKind::Slice, operands, attrs)[0];
 }
 
 void Builder::createPagedAppend(Value* cache, Value* chunk) {

@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <limits>
 #include <memory>
 #include <span>
 #include <string>
@@ -624,6 +625,51 @@ Result<bool> try_alias_layout_op(
     auto staticInput = verify_static_view_shape(*inputView, "layout transform input");
     if (!staticInput)
         return make_error(staticInput.error());
+
+    if (layout.transform() == LayoutTransformKind::Slice) {
+        if (layout.dims().size() != inputView->strides.size() ||
+            layout.indices().size() != inputView->strides.size())
+            return make_error("slice selector count must match runtime input rank");
+
+        TensorViewDesc outputView;
+        outputView.desc = state.tensorDescs.get(output);
+        outputView.storageOffset = inputView->storageOffset;
+        if (outputView.storageOffset < 0)
+            return make_error("slice input storage offset must be non-negative");
+        outputView.strides.reserve(outputView.desc.shape.rank());
+
+        const auto& inputShape = inputView->desc.shape;
+        for (size_t axis = 0; axis < layout.dims().size(); ++axis) {
+            if (layout.dims()[axis] == 0) {
+                outputView.strides.push_back(inputView->strides[axis]);
+                continue;
+            }
+            if (layout.dims()[axis] != 1)
+                return make_error("invalid slice selector kind");
+            int64_t dim = inputShape.dim(static_cast<int>(axis));
+            int64_t index = layout.indices()[axis];
+            if (index < 0)
+                index += dim;
+            if (index < 0 || index >= dim)
+                return make_error("slice index out of range for axis " + std::to_string(axis));
+            int64_t stride = inputView->strides[axis];
+            if (stride < 0)
+                return make_error("slice input stride must be non-negative");
+            if (index != 0 &&
+                stride > (std::numeric_limits<int64_t>::max() -
+                          outputView.storageOffset) / index)
+                return make_error("slice storage offset overflow");
+            outputView.storageOffset += index * stride;
+        }
+
+        state.addBuffer(
+            output,
+            inputBuffer.take(),
+            std::move(outputView),
+            opDevice,
+            false);
+        return true;
+    }
 
     if (layout.transform() == LayoutTransformKind::Reshape) {
         auto isDefault = device.isDefaultView(*inputView);

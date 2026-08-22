@@ -75,7 +75,13 @@ static void dumpExpr(const Expr& e, int depth) {
             std::cout << "Index\n";
             dumpExpr(*e.left, depth + 1);
             indent(depth + 1); std::cout << "[\n";
-            dumpExpr(*e.right, depth + 2);
+            for (const auto& selector : e.indexSelectors) {
+                if (selector.kind == IndexSelector::Full) {
+                    indent(depth + 2); std::cout << ":\n";
+                } else {
+                    dumpExpr(*selector.index, depth + 2);
+                }
+            }
             indent(depth + 1); std::cout << "]\n";
             break;
     }

@@ -256,7 +256,8 @@ __device__ inline void store_float(
 inline bool is_contiguous(const TensorViewDesc& view) {
     int64_t expected = 1;
     for (int d = view.desc.shape.rank() - 1; d >= 0; --d) {
-        if (view.strides[static_cast<size_t>(d)] != expected)
+        if (view.desc.shape.dim(d) != 1 &&
+            view.strides[static_cast<size_t>(d)] != expected)
             return false;
         expected *= view.desc.shape.dim(d);
     }

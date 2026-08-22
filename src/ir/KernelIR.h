@@ -269,6 +269,7 @@ enum class LayoutTransformKind {
     Reshape,
     Transpose,
     Permute,
+    Slice,
     Contiguous,
 };
 
@@ -281,9 +282,18 @@ public:
         ValueId output,
         std::vector<int64_t> dims,
         DeviceId device = 0);
+    LayoutTransformOp(
+        OpId id,
+        LayoutTransformKind transform,
+        ValueId input,
+        ValueId output,
+        std::vector<int64_t> dims,
+        std::vector<int64_t> indices,
+        DeviceId device = 0);
 
     LayoutTransformKind transform() const { return transform_; }
     const std::vector<int64_t>& dims() const { return dims_; }
+    const std::vector<int64_t>& indices() const { return indices_; }
 
     std::span<const ValueId> inputs() const override { return inputs_; }
     std::span<const ValueId> outputs() const override { return outputs_; }
@@ -296,6 +306,7 @@ private:
     std::array<ValueId, 1> inputs_;
     std::array<ValueId, 1> outputs_;
     std::vector<int64_t> dims_;
+    std::vector<int64_t> indices_;
 };
 
 enum class BroadcastMode {

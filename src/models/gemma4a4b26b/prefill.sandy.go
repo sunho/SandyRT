@@ -21,6 +21,7 @@ func main(input_id Tensor[[1, -1], i64], position_id Tensor[[1], i64], local_k_c
         }
 
         x = __rms_norm(x, @norm.weight)
+        x = x[:, -1, :]
         logits := __matmul(x, __transpose(@embed_tokens.weight))
         logits = __softcap(logits, 30.0)
         topk_values, topk_ids := __topk(logits, k=TOP_K, dim=-1)

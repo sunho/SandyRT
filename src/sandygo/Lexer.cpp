@@ -20,6 +20,7 @@ const char* tokenKindName(TokenKind kind) {
         case TokenKind::FloatLit: return "FLOAT";
         case TokenKind::StringLit: return "STRING";
         case TokenKind::WeightLit: return "WEIGHT";
+        case TokenKind::Colon: return ":";
         case TokenKind::ColonAssign: return ":=";
         case TokenKind::Assign: return "=";
         case TokenKind::Plus: return "+";
@@ -217,7 +218,7 @@ Token Lexer::scanToken() {
         case '%': return makeToken(TokenKind::Percent);
         case ':':
             if (match('=')) return makeToken(TokenKind::ColonAssign);
-            return errorToken("unexpected ':'");
+            return makeToken(TokenKind::Colon);
         case '=':
             if (match('=')) return makeToken(TokenKind::Eq);
             return makeToken(TokenKind::Assign);

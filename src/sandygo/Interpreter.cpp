@@ -304,12 +304,17 @@ RuntimeValue Interpreter::evalExpr(const Expr& expr) {
         case Expr::Call:    return evalCall(expr);
         case Expr::Index: {
             RuntimeValue target = evalExpr(*expr.left);
-            RuntimeValue index = evalExpr(*expr.right);
-            if (index.kind != RuntimeValue::Int)
-                error("tuple index must be a compile-time int");
-            if (index.intVal < 0)
-                error("tuple index must be non-negative");
+            if (expr.indexSelectors.empty())
+                error("index expression requires at least one selector");
             if (target.kind == RuntimeValue::TensorTuple) {
+                if (expr.indexSelectors.size() != 1 ||
+                    expr.indexSelectors[0].kind != IndexSelector::Fixed)
+                    error("tuple indexing requires one integer index");
+                RuntimeValue index = evalExpr(*expr.indexSelectors[0].index);
+                if (index.kind != RuntimeValue::Int)
+                    error("tuple index must be a compile-time int");
+                if (index.intVal < 0)
+                    error("tuple index must be non-negative");
                 if (static_cast<size_t>(index.intVal) >= target.tensorTupleVals.size())
                     error("tuple index out of range");
                 return RuntimeValue::makeNode(
@@ -318,12 +323,44 @@ RuntimeValue Interpreter::evalExpr(const Expr& expr) {
             if (target.kind == RuntimeValue::NodeVal &&
                 target.nodeVal &&
                 target.nodeVal->type == ir::high_ir::Type::TensorTuple) {
+                if (expr.indexSelectors.size() != 1 ||
+                    expr.indexSelectors[0].kind != IndexSelector::Fixed)
+                    error("tuple indexing requires one integer index");
+                RuntimeValue index = evalExpr(*expr.indexSelectors[0].index);
+                if (index.kind != RuntimeValue::Int)
+                    error("tuple index must be a compile-time int");
+                if (index.intVal < 0)
+                    error("tuple index must be non-negative");
                 if (static_cast<size_t>(index.intVal) >= target.nodeVal->tupleElements.size())
                     error("tuple index out of range");
                 return RuntimeValue::makeNode(
                     graph_.addTensorTupleGet(target.nodeVal, index.intVal));
             }
-            error("indexing requires []Tensor or [N]Tensor");
+            if (target.kind == RuntimeValue::NodeVal && target.nodeVal &&
+                target.nodeVal->type == ir::high_ir::Type::Tensor) {
+                std::vector<int64_t> kinds;
+                std::vector<int64_t> indices;
+                kinds.reserve(expr.indexSelectors.size());
+                indices.reserve(expr.indexSelectors.size());
+                for (const auto& selector : expr.indexSelectors) {
+                    if (selector.kind == IndexSelector::Full) {
+                        kinds.push_back(0);
+                        indices.push_back(0);
+                        continue;
+                    }
+                    RuntimeValue index = evalExpr(*selector.index);
+                    if (index.kind != RuntimeValue::Int)
+                        error("tensor index must be a compile-time int or ':'");
+                    kinds.push_back(1);
+                    indices.push_back(index.intVal);
+                }
+                std::vector<ir::high_ir::Attr> attrs;
+                attrs.push_back(ir::high_ir::Attr::fromIntList("kinds", std::move(kinds)));
+                attrs.push_back(ir::high_ir::Attr::fromIntList("indices", std::move(indices)));
+                return RuntimeValue::makeNode(
+                    graph_.addBuiltin("slice", {target.nodeVal}, attrs, 1)[0]);
+            }
+            error("indexing requires a Tensor, []Tensor, or [N]Tensor");
         }
     }
     error("unknown expression kind");

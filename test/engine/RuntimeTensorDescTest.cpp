@@ -62,6 +62,27 @@ TEST(RuntimeTensorDescTest, SimulatesPagedAppendBeforeExecution) {
     EXPECT_EQ(inferred->get(cache).shape, sandy::core::Shape({1, 2, 12, 4}));
 }
 
+TEST(RuntimeTensorDescTest, InfersDynamicNegativeIndexSlice) {
+    kir::Graph graph;
+    auto input = graph.addValue(tensorType({1, -1, 4}), "input");
+    auto output = graph.addValue(tensorType({1, 4}), "output");
+    graph.addOp<kir::InputOp>(argument(0), input);
+    graph.addOp<kir::LayoutTransformOp>(
+        kir::LayoutTransformKind::Slice,
+        input,
+        output,
+        std::vector<int64_t>{0, 1, 0},
+        std::vector<int64_t>{0, -1, 0});
+    graph.setOutputs({output});
+
+    sandy::engine::RuntimeTensorDescs inputs(graph.values().size());
+    ASSERT_TRUE(inputs.set(input, {{1, 7, 4}, sandy::core::DType::F32}));
+
+    auto inferred = sandy::engine::inferRuntimeTensorDescs(graph, std::move(inputs));
+    ASSERT_TRUE(inferred) << inferred.error();
+    EXPECT_EQ(inferred->get(output).shape, sandy::core::Shape({1, 4}));
+}
+
 TEST(RuntimeTensorDescTest, RejectsConcreteInputThatViolatesKernelIRContract) {
     kir::Graph graph;
     auto input = graph.addValue(tensorType({-1, 4}), "input");
@@ -76,4 +97,3 @@ TEST(RuntimeTensorDescTest, RejectsConcreteInputThatViolatesKernelIRContract) {
 }
 
 } // namespace
-

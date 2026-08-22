@@ -79,7 +79,9 @@ Result<void> validate_layout_transform(
 
 Result<void> launch_cuda_layout_transform(
         const CudaLaunchContext& context,
-        const CudaLayoutTransformProgram&) {
+        const CudaLayoutTransformProgram& program) {
+    if (program.transform == ir::kernel_ir::LayoutTransformKind::Slice)
+        return make_error("slice layout aliases must not launch on CUDA");
     auto valid = validate_context(context, 1, 1, "layout_transform");
     if (!valid)
         return make_error(valid.error());

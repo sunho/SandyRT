@@ -315,6 +315,7 @@ const char* layout_transform_name(LayoutTransformKind kind) {
         case LayoutTransformKind::Reshape: return "reshape";
         case LayoutTransformKind::Transpose: return "transpose";
         case LayoutTransformKind::Permute: return "permute";
+        case LayoutTransformKind::Slice: return "slice";
         case LayoutTransformKind::Contiguous: return "contiguous";
     }
     return "?";
@@ -353,7 +354,10 @@ std::string op_attr_string(const Op& op) {
         case OpKind::LayoutTransform: {
             const auto& layout = static_cast<const LayoutTransformOp&>(op);
             return " kind=" + std::string(layout_transform_name(layout.transform())) +
-                   " dims=" + int_list_string(layout.dims());
+                   " dims=" + int_list_string(layout.dims()) +
+                   (layout.indices().empty()
+                        ? std::string()
+                        : " indices=" + int_list_string(layout.indices()));
         }
         case OpKind::ElementwiseKernel: {
             const auto& elementwise = static_cast<const ElementwiseKernelOp&>(op);
@@ -774,11 +778,30 @@ LayoutTransformOp::LayoutTransformOp(
     ValueId output,
     std::vector<int64_t> dims,
     DeviceId device)
+    : LayoutTransformOp(
+          id,
+          transform,
+          input,
+          output,
+          std::move(dims),
+          {},
+          device)
+{}
+
+LayoutTransformOp::LayoutTransformOp(
+    OpId id,
+    LayoutTransformKind transform,
+    ValueId input,
+    ValueId output,
+    std::vector<int64_t> dims,
+    std::vector<int64_t> indices,
+    DeviceId device)
     : Op(id, OpKind::LayoutTransform, device),
       transform_(transform),
       inputs_{input},
       outputs_{output},
-      dims_(std::move(dims))
+      dims_(std::move(dims)),
+      indices_(std::move(indices))
 {}
 
 Result<void> LayoutTransformOp::verify(const Graph& graph) const {
@@ -791,6 +814,30 @@ Result<void> LayoutTransformOp::verify(const Graph& graph) const {
     }
     if (transform_ == LayoutTransformKind::Permute && dims_.empty()) {
         return make_error(op_ref(id()) + " permute transform requires dims");
+    }
+    if (transform_ == LayoutTransformKind::Slice) {
+        if (dims_.size() != indices_.size())
+            return make_error(op_ref(id()) + " slice kinds and indices size mismatch");
+        if (dims_.size() != static_cast<size_t>(inputValue.type.shape.rank()))
+            return make_error(op_ref(id()) + " slice selector count must match input rank");
+        std::vector<int64_t> expectedOutputDims;
+        expectedOutputDims.reserve(dims_.size());
+        for (size_t axis = 0; axis < dims_.size(); ++axis) {
+            auto kind = dims_[axis];
+            if (kind == 0) {
+                expectedOutputDims.push_back(inputValue.type.shape.dim(static_cast<int>(axis)));
+            } else if (kind != 1) {
+                return make_error(op_ref(id()) + " invalid slice selector kind");
+            } else {
+                int64_t dim = inputValue.type.shape.dim(static_cast<int>(axis));
+                int64_t index = indices_[axis];
+                if (dim >= 0 && (index < -dim || index >= dim))
+                    return make_error(op_ref(id()) + " slice index out of range");
+            }
+        }
+        if (core::Shape(std::move(expectedOutputDims)) !=
+            graph.value(outputs_[0]).type.shape)
+            return make_error(op_ref(id()) + " slice output shape mismatch");
     }
     return {};
 }

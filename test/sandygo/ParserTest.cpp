@@ -152,6 +152,22 @@ func f(xs []Tensor) Tensor {
     EXPECT_EQ(prog.funcs[0].params[0].type.name, "Tensor");
 }
 
+TEST(Parser, TensorSliceWithNegativeFixedIndex) {
+    auto prog = parseSource(R"(
+func f(x Tensor) Tensor {
+    return x[:, -1, :]
+}
+)");
+    const auto& value = prog.funcs[0].body[0]->values[0];
+    ASSERT_EQ(value->kind, Expr::Index);
+    ASSERT_EQ(value->indexSelectors.size(), 3u);
+    EXPECT_EQ(value->indexSelectors[0].kind, IndexSelector::Full);
+    EXPECT_EQ(value->indexSelectors[1].kind, IndexSelector::Fixed);
+    ASSERT_NE(value->indexSelectors[1].index, nullptr);
+    EXPECT_EQ(value->indexSelectors[1].index->kind, Expr::Unary);
+    EXPECT_EQ(value->indexSelectors[2].kind, IndexSelector::Full);
+}
+
 TEST(Parser, FixedTensorTupleParamWithExplicitElementType) {
     auto prog = parseSource(R"(
 func main(k [8]PagedTensor[[128], bf16, page_size=16]) []Tensor {
@@ -330,8 +346,11 @@ func f() {
     auto& val = prog.funcs[0].body[0]->value;
     EXPECT_EQ(val->kind, Expr::Index);
     EXPECT_EQ(val->left->sval, "kvs");
-    EXPECT_EQ(val->right->kind, Expr::Binary);
-    EXPECT_EQ(val->right->op, "-");
+    ASSERT_EQ(val->indexSelectors.size(), 1u);
+    ASSERT_EQ(val->indexSelectors[0].kind, IndexSelector::Fixed);
+    ASSERT_NE(val->indexSelectors[0].index, nullptr);
+    EXPECT_EQ(val->indexSelectors[0].index->kind, Expr::Binary);
+    EXPECT_EQ(val->indexSelectors[0].index->op, "-");
 }
 
 TEST(Parser, ArithmeticPrecedence) {
