@@ -38,13 +38,17 @@ std::vector<bool> excludedValues(const Graph& graph) {
             excluded[element] = true;
     }
 
-    // Layout transforms can alias their input. Protect the complete alias chain
-    // of every graph output from the shorter scratch-buffer lifetime.
-    for (auto op = graph.ops().rbegin(); op != graph.ops().rend(); ++op) {
-        if ((*op)->kind() != OpKind::LayoutTransform || (*op)->outputs().empty() ||
-            (*op)->inputs().empty() || !excluded[(*op)->outputs()[0]])
+    // Layout transforms may produce views that outlive their input value. The
+    // scratch planner tracks value lifetimes rather than backing-buffer alias
+    // lifetimes, so keep every possible alias chain on the regular ref-counted
+    // allocation path.
+    for (const auto& op : graph.ops()) {
+        if (op->kind() != OpKind::LayoutTransform)
             continue;
-        excluded[(*op)->inputs()[0]] = true;
+        for (auto input : op->inputs())
+            excluded[input] = true;
+        for (auto output : op->outputs())
+            excluded[output] = true;
     }
     return excluded;
 }

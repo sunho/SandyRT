@@ -4,6 +4,7 @@
 
 #include <cstddef>
 #include <unordered_map>
+#include <vector>
 
 namespace sandy::device {
 
@@ -25,6 +26,12 @@ private:
     struct Placement {
         core::TensorDesc desc;
         size_t byteOffset = 0;
+        size_t reservedBytes = 0;
+    };
+
+    struct FreeRange {
+        size_t byteOffset = 0;
+        size_t bytes = 0;
     };
 
     CudaDevice& device_;
@@ -32,7 +39,7 @@ private:
     bool finalized_ = false;
     std::unordered_map<ir::kernel_ir::ValueId, Placement> placements_;
     std::unordered_map<ir::kernel_ir::ValueId, bool> live_;
+    std::vector<FreeRange> freeRanges_;
 };
 
 } // namespace sandy::device
-

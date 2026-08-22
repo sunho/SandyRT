@@ -2,6 +2,7 @@
 
 #include "CudaDevice.h"
 
+#include <algorithm>
 #include <limits>
 #include <utility>
 
@@ -38,15 +39,36 @@ Result<void> CudaScratchAllocator::alloc(
         return make_error("CUDA scratch allocator is already finalized");
     if (placements_.contains(value))
         return make_error("CUDA scratch value was allocated more than once");
-    auto offset = alignUp(cursor_);
-    if (!offset) return make_error(offset.error());
     auto bytes = tensorBytes(desc);
     if (!bytes) return make_error(bytes.error());
-    if (*offset > std::numeric_limits<size_t>::max() - *bytes)
+    auto reservedBytes = alignUp(*bytes);
+    if (!reservedBytes) return make_error(reservedBytes.error());
+
+    auto best = freeRanges_.end();
+    for (auto it = freeRanges_.begin(); it != freeRanges_.end(); ++it) {
+        if (it->bytes < *reservedBytes)
+            continue;
+        if (best == freeRanges_.end() || it->bytes < best->bytes)
+            best = it;
+    }
+
+    size_t offset = 0;
+    if (best != freeRanges_.end()) {
+        offset = best->byteOffset;
+        best->byteOffset += *reservedBytes;
+        best->bytes -= *reservedBytes;
+        if (best->bytes == 0)
+            freeRanges_.erase(best);
+    } else {
+        auto alignedCursor = alignUp(cursor_);
+        if (!alignedCursor) return make_error(alignedCursor.error());
+        offset = *alignedCursor;
+    }
+    if (offset > std::numeric_limits<size_t>::max() - *reservedBytes)
         return make_error("CUDA scratch pool size overflow");
-    placements_[value] = Placement{std::move(desc), *offset};
+    placements_[value] = Placement{std::move(desc), offset, *reservedBytes};
     live_[value] = true;
-    cursor_ = *offset + *bytes;
+    cursor_ = std::max(cursor_, offset + *reservedBytes);
     return {};
 }
 
@@ -57,6 +79,26 @@ Result<void> CudaScratchAllocator::free(ir::kernel_ir::ValueId value) {
     if (live == live_.end() || !live->second)
         return make_error("CUDA scratch value is not live");
     live->second = false;
+
+    const auto& placement = placements_.at(value);
+    freeRanges_.push_back({placement.byteOffset, placement.reservedBytes});
+    std::sort(
+        freeRanges_.begin(),
+        freeRanges_.end(),
+        [](const FreeRange& lhs, const FreeRange& rhs) {
+            return lhs.byteOffset < rhs.byteOffset;
+        });
+    std::vector<FreeRange> merged;
+    merged.reserve(freeRanges_.size());
+    for (const auto& range : freeRanges_) {
+        if (!merged.empty() &&
+            merged.back().byteOffset + merged.back().bytes == range.byteOffset) {
+            merged.back().bytes += range.bytes;
+        } else {
+            merged.push_back(range);
+        }
+    }
+    freeRanges_ = std::move(merged);
     return {};
 }
 

@@ -531,7 +531,7 @@ TEST(CudaDeviceTest, ScratchAllocatorFinalizesOneBackingBufferWithValueViews) {
     EXPECT_EQ(allocation->views.at(7).buffer, allocation->buffer);
     EXPECT_EQ(allocation->views.at(11).buffer, allocation->buffer);
     EXPECT_EQ(allocation->views.at(7).view.storageOffset, 0);
-    EXPECT_EQ(allocation->views.at(11).view.storageOffset, 128);
+    EXPECT_EQ(allocation->views.at(11).view.storageOffset, 0);
     EXPECT_EQ(allocation->views.at(7).view.desc.shape,
               sandy::core::Shape({3}));
     EXPECT_EQ(allocation->views.at(11).view.desc.shape,

@@ -1,7 +1,6 @@
 #include "CudaRuntime.h"
 
 #include <cstdint>
-#include <limits>
 
 namespace sandy::device {
 
@@ -20,7 +19,9 @@ Result<void> cuda_configure_default_memory_pool(int cudaDevice) {
     if (!got)
         return make_error(got.error());
 
-    uint64_t threshold = std::numeric_limits<uint64_t>::max();
+    // Retain a modest amount for reuse, but return large request-time scratch
+    // allocations to the driver at stream synchronization points.
+    uint64_t threshold = 1ull << 30;
     return cuda_check(
         cudaMemPoolSetAttribute(
             pool,

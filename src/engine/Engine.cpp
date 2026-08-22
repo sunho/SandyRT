@@ -1049,6 +1049,25 @@ Result<void> dealloc_scratch_buffers(
     return {};
 }
 
+class ScratchBufferGuard {
+public:
+    ScratchBufferGuard(
+            std::vector<std::unique_ptr<Device>>& devices,
+            RuntimeState& state)
+        : devices_(devices), state_(state) {}
+
+    ~ScratchBufferGuard() {
+        (void)dealloc_scratch_buffers(devices_, state_);
+    }
+
+    ScratchBufferGuard(const ScratchBufferGuard&) = delete;
+    ScratchBufferGuard& operator=(const ScratchBufferGuard&) = delete;
+
+private:
+    std::vector<std::unique_ptr<Device>>& devices_;
+    RuntimeState& state_;
+};
+
 } // namespace
 
 Engine::Engine(
@@ -1306,6 +1325,7 @@ Result<std::vector<RunOutput>> Engine::runValuesImpl(
         return make_error(scratchPlan.error());
 
     auto state = initialize_runtime_state(tensorDescs.take(), scratchPlan.take());
+    ScratchBufferGuard scratchGuard(devices_, state);
 
     for (size_t opIndex = 0; opIndex < graph.ops().size(); opIndex++) {
         const auto& op = *graph.ops()[opIndex];
