@@ -17,6 +17,7 @@ public:
 
 private:
     ImportDecl parseImportDecl();
+    ConfigConstDecl parseConfigConstDecl();
     FuncDecl parseFuncDecl();
     std::vector<Param> parseParams();
     TypeExpr parseType();

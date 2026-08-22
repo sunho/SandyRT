@@ -47,7 +47,10 @@ struct RuntimeValue {
 
 class Interpreter {
 public:
-    Interpreter(const Program& program, ir::high_ir::Graph& graph);
+    Interpreter(
+        const Program& program,
+        ir::high_ir::Graph& graph,
+        const std::unordered_map<std::string, int64_t>& configConstants = {});
     void interpret();
 
 private:
@@ -55,6 +58,7 @@ private:
     ir::high_ir::Graph& graph_;
 
     std::unordered_map<std::string, const FuncDecl*> funcTable_;
+    std::unordered_map<std::string, RuntimeValue> configValues_;
 
     using Env = std::unordered_map<std::string, RuntimeValue>;
     std::vector<Env> envStack_;
@@ -69,6 +73,7 @@ private:
     RuntimeValue evalCall(const Expr& expr);
     RuntimeValue evalBinary(const Expr& expr);
     RuntimeValue evalUnary(const Expr& expr);
+    RuntimeValue evalConfigDefault(const Expr& expr);
 
     void execStmt(const Stmt& stmt);
     void execBlock(const std::vector<StmtPtr>& stmts);

@@ -87,6 +87,15 @@ private:
             loadInto(importPath, merged);
         }
 
+        for (auto& configConst : program.configConsts) {
+            auto [it, inserted] = configConstOrigins_.emplace(configConst.name, key);
+            if (!inserted) {
+                fatal("duplicate config constant '" + configConst.name + "' in " + key +
+                      " (already defined in " + it->second + ")");
+            }
+            merged.configConsts.push_back(std::move(configConst));
+        }
+
         for (auto& func : program.funcs) {
             auto [it, inserted] = funcOrigins_.emplace(func.name, key);
             if (!inserted) {
@@ -103,16 +112,19 @@ private:
     std::unordered_set<std::string> visiting_;
     std::unordered_set<std::string> loaded_;
     std::unordered_map<std::string, std::string> funcOrigins_;
+    std::unordered_map<std::string, std::string> configConstOrigins_;
 };
 
 } // namespace
 
-ir::high_ir::Graph Compiler::load_sandygo(const std::string& path) {
+ir::high_ir::Graph Compiler::load_sandygo(
+        const std::string& path,
+        const SandyGoCompileOptions& options) {
     SandyGoLoader loader;
     sandygo::Program program = loader.load(path);
 
     ir::high_ir::Graph graph;
-    sandygo::Interpreter interp(program, graph);
+    sandygo::Interpreter interp(program, graph, options.configConstants);
     interp.interpret();
     return graph;
 }

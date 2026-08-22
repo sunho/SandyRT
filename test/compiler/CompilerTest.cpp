@@ -2,6 +2,7 @@
 #include "HighIR.h"
 #include "TensorBuffer.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
@@ -104,6 +105,119 @@ func main(x Tensor) Tensor {
     ASSERT_NE(graph.outputs()[0]->def, nullptr);
     EXPECT_EQ(graph.outputs()[0]->def->kind, sandy::ir::high_ir::Op::Builtin);
     EXPECT_EQ(graph.outputs()[0]->def->name, "relu");
+
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
+TEST(CompilerTest, RequiredConfigConstOverridesBuiltinAttribute) {
+    fs::path dir = makeTempDir();
+    writeFile(dir / "main.sandy.go", R"(
+config const TOP_K int
+
+func main(x Tensor) (Tensor, Tensor) {
+    values, ids := __topk(x, k=TOP_K, dim=-1)
+    return values, ids
+}
+)");
+
+    sandy::SandyGoCompileOptions options;
+    options.configConstants["TOP_K"] = 3;
+    sandy::Compiler compiler;
+    auto graph = compiler.load_sandygo((dir / "main.sandy.go").string(), options);
+
+    ASSERT_EQ(graph.outputs().size(), 2u);
+    ASSERT_NE(graph.outputs()[0]->def, nullptr);
+    EXPECT_EQ(graph.outputs()[0]->def, graph.outputs()[1]->def);
+    const auto& attrs = graph.outputs()[0]->def->attrs;
+    auto k = std::find_if(attrs.begin(), attrs.end(), [](const auto& attr) {
+        return attr.name == "k";
+    });
+    ASSERT_NE(k, attrs.end());
+    EXPECT_EQ(k->type, sandy::ir::high_ir::Type::Int);
+    EXPECT_EQ(k->intVal, 3);
+
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
+TEST(CompilerTest, ConfigConstUsesDefaultWithoutOverride) {
+    fs::path dir = makeTempDir();
+    writeFile(dir / "main.sandy.go", R"(
+config const TOP_K int = 2
+
+func main(x Tensor) (Tensor, Tensor) {
+    values, ids := __topk(x, k=TOP_K, dim=-1)
+    return values, ids
+}
+)");
+
+    sandy::Compiler compiler;
+    auto graph = compiler.load_sandygo((dir / "main.sandy.go").string());
+    const auto& attrs = graph.outputs()[0]->def->attrs;
+    auto k = std::find_if(attrs.begin(), attrs.end(), [](const auto& attr) {
+        return attr.name == "k";
+    });
+    ASSERT_NE(k, attrs.end());
+    EXPECT_EQ(k->intVal, 2);
+
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
+TEST(CompilerTest, MissingRequiredConfigConstFails) {
+    fs::path dir = makeTempDir();
+    writeFile(dir / "main.sandy.go", R"(
+config const TOP_K int
+
+func main(x Tensor) Tensor {
+    return x
+}
+)");
+
+    sandy::Compiler compiler;
+    EXPECT_DEATH(
+        (void)compiler.load_sandygo((dir / "main.sandy.go").string()),
+        "missing required config constant 'TOP_K'");
+
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
+TEST(CompilerTest, UnknownConfigConstOverrideFails) {
+    fs::path dir = makeTempDir();
+    writeFile(dir / "main.sandy.go", R"(
+func main(x Tensor) Tensor {
+    return x
+}
+)");
+
+    sandy::SandyGoCompileOptions options;
+    options.configConstants["TOP_K"] = 1;
+    sandy::Compiler compiler;
+    EXPECT_DEATH(
+        (void)compiler.load_sandygo((dir / "main.sandy.go").string(), options),
+        "unknown config constant override 'TOP_K'");
+
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
+TEST(CompilerTest, ConfigConstCannotBeAssigned) {
+    fs::path dir = makeTempDir();
+    writeFile(dir / "main.sandy.go", R"(
+config const TOP_K int = 1
+
+func main(x Tensor) Tensor {
+    TOP_K = 2
+    return x
+}
+)");
+
+    sandy::Compiler compiler;
+    EXPECT_DEATH(
+        (void)compiler.load_sandygo((dir / "main.sandy.go").string()),
+        "cannot assign to config constant 'TOP_K'");
 
     std::error_code ec;
     fs::remove_all(dir, ec);

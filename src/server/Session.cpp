@@ -205,14 +205,21 @@ Result<std::vector<engine::RunInput>> Session::makePrefillInputs(
     return inputs;
 }
 
-Result<engine::TensorBufferPtr> Session::requireLogits(
+Result<std::pair<int64_t, float>> Session::sampleOutputs(
         std::vector<engine::RunOutput>& outputs) {
     if (outputs.empty())
         return make_error("eval-token graph produced no outputs");
-    auto* tensor = std::get_if<engine::TensorBufferPtr>(&outputs[0]);
-    if (!tensor || !*tensor)
-        return make_error("eval-token output 0 must be logits tensor");
-    return *tensor;
+    auto* first = std::get_if<engine::TensorBufferPtr>(&outputs[0]);
+    if (!first || !*first)
+        return make_error("eval-token output 0 must be a tensor");
+    if (outputs.size() == 1)
+        return sampler_.argmaxLast(*first);
+    if (outputs.size() != 2)
+        return make_error("eval-token graph must produce logits or topk values and indices");
+    auto* second = std::get_if<engine::TensorBufferPtr>(&outputs[1]);
+    if (!second || !*second)
+        return make_error("eval-token output 1 must be topk indices tensor");
+    return sampler_.topkLast(*first, *second);
 }
 
 Result<std::vector<engine::RunOutput>> Session::runValuesProfiled(
@@ -283,15 +290,9 @@ Result<std::pair<int64_t, float>> Session::evalToken(
     auto outputs = runValuesProfiled(compiled_, *inputs, phase);
     if (!outputs)
         return make_error(outputs.error());
-    auto logits = [&]() {
-        ServerStageScope logitsTimer(logger_, phase, "server.eval_token.require_logits");
-        return requireLogits(*outputs);
-    }();
-    if (!logits)
-        return make_error(logits.error());
     auto sampled = [&]() {
-        ServerStageScope sampleTimer(logger_, phase, "server.sampler.argmax");
-        return sampler_.argmaxLast(*logits);
+        ServerStageScope sampleTimer(logger_, phase, "server.sampler.sample");
+        return sampleOutputs(*outputs);
     }();
     if (!sampled)
         return make_error(sampled.error());
@@ -333,15 +334,9 @@ Result<std::pair<int64_t, float>> Session::prefillChunk(
     auto outputs = runValuesProfiled(*prefillCompiled_, *inputs, phase);
     if (!outputs)
         return make_error(outputs.error());
-    auto logits = [&]() {
-        ServerStageScope logitsTimer(logger_, phase, "server.prefill_chunk.require_logits");
-        return requireLogits(*outputs);
-    }();
-    if (!logits)
-        return make_error(logits.error());
     auto sampled = [&]() {
-        ServerStageScope sampleTimer(logger_, phase, "server.sampler.argmax");
-        return sampler_.argmaxLast(*logits);
+        ServerStageScope sampleTimer(logger_, phase, "server.sampler.sample");
+        return sampleOutputs(*outputs);
     }();
     if (!sampled)
         return make_error(sampled.error());

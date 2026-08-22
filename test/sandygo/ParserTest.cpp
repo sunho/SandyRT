@@ -44,6 +44,34 @@ func f() Tensor {
     EXPECT_EQ(prog.funcs[0].name, "f");
 }
 
+TEST(Parser, RequiredConfigConstDecl) {
+    auto prog = parseSource(R"(
+config const TOP_K int
+
+func main(x Tensor) Tensor {
+    return x
+}
+)");
+    ASSERT_EQ(prog.configConsts.size(), 1u);
+    EXPECT_EQ(prog.configConsts[0].name, "TOP_K");
+    EXPECT_EQ(prog.configConsts[0].type, "int");
+    EXPECT_EQ(prog.configConsts[0].defaultValue, nullptr);
+}
+
+TEST(Parser, DefaultedConfigConstDecl) {
+    auto prog = parseSource(R"(
+config const TOP_K int = 1
+
+func main(x Tensor) Tensor {
+    return x
+}
+)");
+    ASSERT_EQ(prog.configConsts.size(), 1u);
+    ASSERT_NE(prog.configConsts[0].defaultValue, nullptr);
+    EXPECT_EQ(prog.configConsts[0].defaultValue->kind, Expr::IntLit);
+    EXPECT_EQ(prog.configConsts[0].defaultValue->ival, 1);
+}
+
 TEST(Parser, FunctionWithParams) {
     auto prog = parseSource(R"(
 func f(x Tensor, i int, s string) Tensor {

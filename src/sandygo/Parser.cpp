@@ -57,6 +57,8 @@ Program Parser::parse() {
         if (check(TokenKind::Eof)) break;
         if (check(TokenKind::Import)) {
             prog.imports.push_back(parseImportDecl());
+        } else if (check(TokenKind::Config)) {
+            prog.configConsts.push_back(parseConfigConstDecl());
         } else {
             prog.funcs.push_back(parseFuncDecl());
         }
@@ -74,6 +76,28 @@ ImportDecl Parser::parseImportDecl() {
     Token path = expect(TokenKind::StringLit, "expected import path string");
     if (hasError_) return decl;
     decl.path = path.value;
+    return decl;
+}
+
+ConfigConstDecl Parser::parseConfigConstDecl() {
+    ConfigConstDecl decl;
+    decl.line = peek().line;
+
+    expect(TokenKind::Config, "expected 'config'");
+    if (hasError_) return decl;
+    expect(TokenKind::Const, "expected 'const' after 'config'");
+    if (hasError_) return decl;
+
+    Token name = expect(TokenKind::Ident, "expected config constant name");
+    if (hasError_) return decl;
+    decl.name = name.value;
+
+    Token type = expect(TokenKind::Ident, "expected config constant type");
+    if (hasError_) return decl;
+    decl.type = type.value;
+
+    if (match(TokenKind::Assign))
+        decl.defaultValue = parseExpr();
     return decl;
 }
 

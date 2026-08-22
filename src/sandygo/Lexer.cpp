@@ -13,6 +13,8 @@ const char* tokenKindName(TokenKind kind) {
         case TokenKind::Var: return "var";
         case TokenKind::Import: return "import";
         case TokenKind::WeightScope: return "weight_scope";
+        case TokenKind::Config: return "config";
+        case TokenKind::Const: return "const";
         case TokenKind::Ident: return "IDENT";
         case TokenKind::IntLit: return "INT";
         case TokenKind::FloatLit: return "FLOAT";
@@ -126,6 +128,8 @@ Token Lexer::scanIdent() {
     if (word == "var") return makeToken(TokenKind::Var, word);
     if (word == "import") return makeToken(TokenKind::Import, word);
     if (word == "weight_scope") return makeToken(TokenKind::WeightScope, word);
+    if (word == "config") return makeToken(TokenKind::Config, word);
+    if (word == "const") return makeToken(TokenKind::Const, word);
 
     return makeToken(TokenKind::Ident, word);
 }

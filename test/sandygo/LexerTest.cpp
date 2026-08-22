@@ -9,8 +9,8 @@ static std::vector<Token> lex(const std::string& src) {
 }
 
 TEST(Lexer, Keywords) {
-    auto tokens = lex("func return for if else var import weight_scope");
-    ASSERT_GE(tokens.size(), 8u);
+    auto tokens = lex("func return for if else var import weight_scope config const");
+    ASSERT_GE(tokens.size(), 10u);
     EXPECT_EQ(tokens[0].kind, TokenKind::Func);
     EXPECT_EQ(tokens[1].kind, TokenKind::Return);
     EXPECT_EQ(tokens[2].kind, TokenKind::For);
@@ -19,6 +19,8 @@ TEST(Lexer, Keywords) {
     EXPECT_EQ(tokens[5].kind, TokenKind::Var);
     EXPECT_EQ(tokens[6].kind, TokenKind::Import);
     EXPECT_EQ(tokens[7].kind, TokenKind::WeightScope);
+    EXPECT_EQ(tokens[8].kind, TokenKind::Config);
+    EXPECT_EQ(tokens[9].kind, TokenKind::Const);
 }
 
 TEST(Lexer, Identifiers) {

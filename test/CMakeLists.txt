@@ -176,6 +176,30 @@ set_target_properties(engine_tests PROPERTIES
 
 gtest_discover_tests(engine_tests)
 
+add_executable(server_sampler_tests
+  server/SamplerTest.cpp
+  ${PROJECT_SOURCE_DIR}/src/server/HostTensorBuffer.cpp
+  ${PROJECT_SOURCE_DIR}/src/server/Sampler.cpp
+)
+
+target_include_directories(server_sampler_tests
+  PRIVATE ${PROJECT_SOURCE_DIR}/src/server
+)
+
+target_link_libraries(server_sampler_tests
+  PRIVATE
+  SandyRTLib
+  EngineLib
+  GTest::gtest_main
+)
+
+set_target_properties(server_sampler_tests PROPERTIES
+  CXX_STANDARD 20
+  CXX_STANDARD_REQUIRED ON
+)
+
+gtest_discover_tests(server_sampler_tests)
+
 if(SANDY_ENABLE_CUDA)
   add_executable(cuda_device_tests
     engine/CudaDeviceTest.cpp

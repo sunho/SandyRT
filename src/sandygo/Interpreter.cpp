@@ -45,8 +45,37 @@ std::vector<ir::high_ir::TensorType> tupleElementsFromTypeExpr(const TypeExpr& t
 
 } // namespace
 
-Interpreter::Interpreter(const Program& program, ir::high_ir::Graph& graph)
+Interpreter::Interpreter(
+        const Program& program,
+        ir::high_ir::Graph& graph,
+        const std::unordered_map<std::string, int64_t>& configConstants)
     : program_(program), graph_(graph) {
+    std::unordered_map<std::string, const ConfigConstDecl*> declarations;
+    for (const auto& decl : program_.configConsts) {
+        auto [_, inserted] = declarations.emplace(decl.name, &decl);
+        if (!inserted)
+            error("duplicate config constant '" + decl.name + "'");
+        if (decl.type != "int")
+            error("config constant '" + decl.name + "' has unsupported type '" +
+                  decl.type + "'; only int is supported");
+    }
+    for (const auto& [name, _] : configConstants) {
+        if (!declarations.contains(name))
+            error("unknown config constant override '" + name + "'");
+    }
+    for (const auto& decl : program_.configConsts) {
+        auto overrideIt = configConstants.find(decl.name);
+        if (overrideIt != configConstants.end()) {
+            configValues_[decl.name] = RuntimeValue::makeInt(overrideIt->second);
+        } else if (decl.defaultValue) {
+            auto value = evalConfigDefault(*decl.defaultValue);
+            if (value.kind != RuntimeValue::Int)
+                error("default for config constant '" + decl.name + "' must be int");
+            configValues_[decl.name] = value;
+        } else {
+            error("missing required config constant '" + decl.name + "'");
+        }
+    }
     for (auto& func : program_.funcs) {
         auto [it, inserted] = funcTable_.emplace(func.name, &func);
         if (!inserted) {
@@ -445,16 +474,56 @@ RuntimeValue Interpreter::evalUnary(const Expr& expr) {
     error("unsupported unary '" + expr.op + "'");
 }
 
+RuntimeValue Interpreter::evalConfigDefault(const Expr& expr) {
+    switch (expr.kind) {
+        case Expr::Ident: {
+            auto it = configValues_.find(expr.sval);
+            if (it == configValues_.end())
+                error("config constant default references unresolved constant '" + expr.sval + "'");
+            return it->second;
+        }
+        case Expr::IntLit:
+            return RuntimeValue::makeInt(expr.ival);
+        case Expr::Unary: {
+            auto value = evalConfigDefault(*expr.left);
+            if (expr.op == "-" && value.kind == RuntimeValue::Int)
+                return RuntimeValue::makeInt(-value.intVal);
+            break;
+        }
+        case Expr::Binary: {
+            auto left = evalConfigDefault(*expr.left);
+            auto right = evalConfigDefault(*expr.right);
+            if (left.kind == RuntimeValue::Int && right.kind == RuntimeValue::Int) {
+                int64_t l = left.intVal;
+                int64_t r = right.intVal;
+                if (expr.op == "+") return RuntimeValue::makeInt(l + r);
+                if (expr.op == "-") return RuntimeValue::makeInt(l - r);
+                if (expr.op == "*") return RuntimeValue::makeInt(l * r);
+                if (expr.op == "/" && r != 0) return RuntimeValue::makeInt(l / r);
+                if (expr.op == "%" && r != 0) return RuntimeValue::makeInt(l % r);
+            }
+            break;
+        }
+        default:
+            break;
+    }
+    error("config constant default must be a compile-time int expression");
+}
+
 void Interpreter::pushEnv() { envStack_.emplace_back(); }
 void Interpreter::popEnv()  { envStack_.pop_back(); }
 
 void Interpreter::setVar(const std::string& name, const RuntimeValue& val) {
+    if (configValues_.contains(name))
+        error("cannot assign to config constant '" + name + "'");
     envStack_.back()[name] = val;
 }
 
 RuntimeValue Interpreter::getVar(const std::string& name) {
     auto it = envStack_.back().find(name);
     if (it != envStack_.back().end()) return it->second;
+    auto configIt = configValues_.find(name);
+    if (configIt != configValues_.end()) return configIt->second;
     error("undefined variable '" + name + "'");
 }
 

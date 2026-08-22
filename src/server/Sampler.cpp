@@ -32,6 +32,17 @@ float read_float_value(std::span<const uint8_t> data, sandy::core::DType dtype, 
     }
 }
 
+int64_t read_int_value(std::span<const uint8_t> data, sandy::core::DType dtype, size_t index) {
+    if (dtype == sandy::core::DType::I64) {
+        int64_t value = 0;
+        std::memcpy(&value, data.data() + index * sizeof(value), sizeof(value));
+        return value;
+    }
+    int32_t value = 0;
+    std::memcpy(&value, data.data() + index * sizeof(value), sizeof(value));
+    return value;
+}
+
 } // namespace
 
 Result<std::pair<int64_t, float>> Sampler::argmaxLast(engine::TensorBufferPtr logits) const {
@@ -69,6 +80,41 @@ Result<std::pair<int64_t, float>> Sampler::argmaxLast(engine::TensorBufferPtr lo
     }
 
     return std::pair<int64_t, float>{bestId, bestValue};
+}
+
+Result<std::pair<int64_t, float>> Sampler::topkLast(
+        engine::TensorBufferPtr values,
+        engine::TensorBufferPtr indices) const {
+    if (!values || !indices)
+        return make_error("sampler received null topk output");
+
+    auto valuesAccess = values->access();
+    if (!valuesAccess)
+        return make_error(valuesAccess.error());
+    auto indicesAccess = indices->access();
+    if (!indicesAccess)
+        return make_error(indicesAccess.error());
+
+    const auto& valuesDesc = valuesAccess->desc();
+    const auto& indicesDesc = indicesAccess->desc();
+    if (valuesDesc.dtype != core::DType::F32 && valuesDesc.dtype != core::DType::BF16)
+        return make_error("topk values must be F32 or BF16");
+    if (indicesDesc.dtype != core::DType::I32 && indicesDesc.dtype != core::DType::I64)
+        return make_error("topk indices must be I32 or I64");
+    if (valuesDesc.shape != indicesDesc.shape)
+        return make_error("topk values and indices shapes must match");
+    if (valuesDesc.shape.rank() < 1 ||
+        valuesDesc.shape.dim(valuesDesc.shape.rank() - 1) != 1) {
+        return make_error("topk outputs must have a final dimension of 1");
+    }
+
+    int64_t numel = valuesDesc.shape.numel();
+    if (numel <= 0)
+        return make_error("topk outputs must have a static non-empty shape");
+    auto last = static_cast<size_t>(numel - 1);
+    float value = read_float_value(valuesAccess->data(), valuesDesc.dtype, last);
+    int64_t index = read_int_value(indicesAccess->data(), indicesDesc.dtype, last);
+    return std::pair<int64_t, float>{index, value};
 }
 
 } // namespace sandy::server

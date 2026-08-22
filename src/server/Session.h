@@ -75,7 +75,8 @@ private:
         size_t begin,
         size_t end,
         int64_t position);
-    Result<engine::TensorBufferPtr> requireLogits(std::vector<engine::RunOutput>& outputs);
+    Result<std::pair<int64_t, float>> sampleOutputs(
+        std::vector<engine::RunOutput>& outputs);
     Result<std::vector<engine::RunOutput>> runValuesProfiled(
         const engine::CompiledKernelGraph& graph,
         std::span<const engine::RunInput> inputs,

@@ -44,9 +44,10 @@ Result<std::unique_ptr<engine::CompiledKernelGraph>> compile_model_graph(
         engine::Engine& engine,
         const std::string& path,
         const weight::Weights& weights,
+        const SandyGoCompileOptions& sandyGoOptions,
         const ir::mid_ir::MaterializeOptions& options,
         const engine::EngineCompileOptions& compileOptions) {
-    auto highGraph = compiler.load_sandygo(path);
+    auto highGraph = compiler.load_sandygo(path, sandyGoOptions);
     auto midResult = compiler.materialize_mid_ir(highGraph, weights, options);
     if (!midResult)
         return make_error(midResult.error());
@@ -164,6 +165,12 @@ Result<void> Model::initialize() {
 #endif
 
     Compiler compiler;
+    SandyGoCompileOptions sandyGoOptions;
+    if (config_.architecture == "gemma4a4b26b" ||
+        config_.architecture == "gemma4a4b" ||
+        config_.architecture == "gemma4moe") {
+        sandyGoOptions.configConstants["TOP_K"] = 1;
+    }
     ir::mid_ir::MaterializeOptions evalOptions;
     evalOptions.input_tensor_descs["input_id"] =
         core::TensorDesc("input_id", core::Shape({1, 1}), core::DType::I64);
@@ -175,6 +182,7 @@ Result<void> Model::initialize() {
         *engine_,
         config_.modelPath,
         *weights_,
+        sandyGoOptions,
         evalOptions,
         compileOptions);
     if (!compiled)
@@ -196,6 +204,7 @@ Result<void> Model::initialize() {
             *engine_,
             config_.prefillModelPath,
             *weights_,
+            sandyGoOptions,
             prefillOptions,
             compileOptions);
         if (!prefillCompiled)

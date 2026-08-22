@@ -103,8 +103,16 @@ struct ImportDecl {
     int line = 0;
 };
 
+struct ConfigConstDecl {
+    std::string name;
+    std::string type;
+    ExprPtr defaultValue;
+    int line = 0;
+};
+
 struct Program {
     std::vector<ImportDecl> imports;
+    std::vector<ConfigConstDecl> configConsts;
     std::vector<FuncDecl> funcs;
 };
 
