@@ -146,14 +146,13 @@ __global__ void flash_attention_prefill_kernel(DeviceAttentionProgram program) {
         : 0;
     int64_t blockMaxKey = basePosition + blockLastQuery;
 
-    for (int64_t keyTileStart = 0; keyTileStart < program.tk;
+    int64_t firstKeyTile = (blockMinKey / KeyValueTileSize) * KeyValueTileSize;
+    for (int64_t keyTileStart = firstKeyTile;
+         keyTileStart < program.tk && keyTileStart <= blockMaxKey;
          keyTileStart += KeyValueTileSize) {
         int tileKeys = static_cast<int>(device_min_i64(
             KeyValueTileSize,
             program.tk - keyTileStart));
-
-        if (keyTileStart > blockMaxKey || keyTileStart + tileKeys <= blockMinKey)
-            continue;
 
         for (int idx = threadIdx.x; idx < tileKeys * HeadDim; idx += blockDim.x) {
             int keyOffset = idx / HeadDim;
@@ -201,9 +200,12 @@ __global__ void flash_attention_prefill_kernel(DeviceAttentionProgram program) {
                 float localTileSum = 0.0f;
                 for (int keyOffset = lane; keyOffset < tileKeys; keyOffset += 32) {
                     float score = scores[warp * KeyValueTileSize + keyOffset];
-                    localTileSum += expf(score - tileMax);
+                    float probability = expf(score - tileMax);
+                    scores[warp * KeyValueTileSize + keyOffset] = probability;
+                    localTileSum += probability;
                 }
                 float tileSum = warp_reduce_sum(localTileSum);
+                __syncwarp();
 
                 #pragma unroll
                 for (int frag = 0; frag < kLaneValues; ++frag) {
@@ -212,8 +214,7 @@ __global__ void flash_attention_prefill_kernel(DeviceAttentionProgram program) {
                         continue;
                     float tileOutput = 0.0f;
                     for (int keyOffset = 0; keyOffset < tileKeys; ++keyOffset) {
-                        float score = scores[warp * KeyValueTileSize + keyOffset];
-                        float probability = expf(score - tileMax);
+                        float probability = scores[warp * KeyValueTileSize + keyOffset];
                         tileOutput +=
                             probability * vTile[keyOffset * HeadDim + dim];
                     }
@@ -751,12 +752,12 @@ Result<void> launch_cuda_attention(
                 context.stream,
                 props);
         case 256:
-            return launch_attention_best_tile<256, 4, 32, 16>(
+            return launch_attention_best_tile<256, 8, 32, 16>(
                 launchProgram,
                 context.stream,
                 props);
         case 512:
-            return launch_attention_best_tile<512, 4, 16, 8>(
+            return launch_attention_best_tile<512, 8, 16, 8>(
                 launchProgram,
                 context.stream,
                 props);
