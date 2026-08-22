@@ -22,7 +22,7 @@ struct ModelConfig {
     std::string modelPath;
     std::string prefillModelPath;
     std::string weightsPath;
-    int32_t eosTokenId = -1;
+    std::vector<int64_t> eosTokenIds;
     int32_t maxContextTokens = 0;
     SamplingConfig sampling;
     LoggerConfig logging;

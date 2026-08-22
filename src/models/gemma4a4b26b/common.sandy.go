@@ -27,8 +27,8 @@ func gemma_router_topk(x Tensor) (Tensor, Tensor) {
     return topk_ids, topk_weights
 }
 
-func gemma_moe(x Tensor) Tensor {
-    topk_ids, topk_weights := gemma_router_topk(x)
+func gemma_moe(x Tensor, router_x Tensor) Tensor {
+    topk_ids, topk_weights := gemma_router_topk(router_x)
 
     weight_scope "experts" {
         packed_x, packed_weights, token_ids, expert_offsets := __moe_gather(
@@ -56,7 +56,7 @@ func gemma_feed_forward(x Tensor) Tensor {
     dense = __rms_norm(dense, @post_feedforward_layernorm_1.weight)
 
     routed := __rms_norm(residual, @pre_feedforward_layernorm_2.weight)
-    routed = gemma_moe(routed)
+    routed = gemma_moe(routed, residual)
     routed = __rms_norm(routed, @post_feedforward_layernorm_2.weight)
 
     h := __add(dense, routed)

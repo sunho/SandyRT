@@ -46,8 +46,10 @@ class FakeCall:
 class FakeGrpcClient:
     def __init__(self, _target):
         self.call = None
+        self.stream_kwargs = None
 
-    def generate_stream(self, **_kwargs):
+    def generate_stream(self, **kwargs):
+        self.stream_kwargs = kwargs
         first = sandy_inference_pb2.GenerateStreamResponse(request_id="id")
         first.token.token_id = 10
         second = sandy_inference_pb2.GenerateStreamResponse(request_id="id")
@@ -71,6 +73,9 @@ class OpenAIStreamingTest(unittest.TestCase):
                 model_id="test-model",
                 tokenizer_path=Path("unused"),
                 grpc_target="unused",
+                eos_token_id=1,
+                end_of_turn_token_id=106,
+                tool_response_token_id=50,
             ))
 
         response = TestClient(app).post(
@@ -101,6 +106,7 @@ class OpenAIStreamingTest(unittest.TestCase):
         self.assertEqual(chunks[-2]["choices"][0]["finish_reason"], "stop")
         self.assertEqual(chunks[-1]["usage"]["total_tokens"], 5)
         self.assertTrue(fake_grpc.call.cancelled)
+        self.assertEqual(fake_grpc.stream_kwargs["stop_token_ids"], [1, 106, 50])
 
 
 if __name__ == "__main__":

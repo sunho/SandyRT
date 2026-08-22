@@ -101,8 +101,8 @@ Result<ModelConfig> applyModelPreset(ModelConfig config) {
     if (config.architecture == "gemma4e2b" || config.architecture == "gemma") {
         if (config.modelId.empty())
             config.modelId = "gemma4e2b";
-        if (config.eosTokenId < 0)
-            config.eosTokenId = 1;
+        if (config.eosTokenIds.empty())
+            config.eosTokenIds = {1};
         if (config.session.cacheGroups.empty()) {
             config.session.cacheGroups.push_back(cache_group(12, {1, 1, -1, 256}));
             config.session.cacheGroups.push_back(cache_group(12, {1, 1, -1, 256}));
@@ -115,8 +115,8 @@ Result<ModelConfig> applyModelPreset(ModelConfig config) {
     if (config.architecture == "gemma4e4b") {
         if (config.modelId.empty())
             config.modelId = "gemma4e4b";
-        if (config.eosTokenId < 0)
-            config.eosTokenId = 1;
+        if (config.eosTokenIds.empty())
+            config.eosTokenIds = {1};
         if (config.session.cacheGroups.empty()) {
             config.session.cacheGroups.push_back(cache_group(20, {1, 2, -1, 256}));
             config.session.cacheGroups.push_back(cache_group(20, {1, 2, -1, 256}));
@@ -131,8 +131,8 @@ Result<ModelConfig> applyModelPreset(ModelConfig config) {
         config.architecture == "gemma4moe") {
         if (config.modelId.empty())
             config.modelId = "gemma4a4b26b";
-        if (config.eosTokenId < 0)
-            config.eosTokenId = 1;
+        if (config.eosTokenIds.empty())
+            config.eosTokenIds = {1, 106, 50};
         if (config.session.cacheGroups.empty()) {
             config.session.cacheGroups.push_back(cache_group(25, {1, 8, -1, 256}));
             config.session.cacheGroups.push_back(cache_group(25, {1, 8, -1, 256}));
@@ -145,8 +145,8 @@ Result<ModelConfig> applyModelPreset(ModelConfig config) {
     if (config.architecture == "tinyllama") {
         if (config.modelId.empty())
             config.modelId = "tinyllama";
-        if (config.eosTokenId < 0)
-            config.eosTokenId = 2;
+        if (config.eosTokenIds.empty())
+            config.eosTokenIds = {2};
         if (config.maxContextTokens <= 0)
             config.maxContextTokens = 2048;
         if (config.session.cacheGroups.empty()) {
@@ -304,22 +304,22 @@ Result<GenerateResult> Model::generate(
         return make_error(sampling.error());
 
     std::vector<int64_t> effectiveStopTokens = stopTokenIds;
-    if (config_.eosTokenId >= 0) {
+    for (auto eosTokenId : config_.eosTokenIds) {
         bool found = false;
         for (auto token : effectiveStopTokens) {
-            if (token == config_.eosTokenId) {
+            if (token == eosTokenId) {
                 found = true;
                 break;
             }
         }
         if (!found)
-            effectiveStopTokens.push_back(config_.eosTokenId);
+            effectiveStopTokens.push_back(eosTokenId);
     }
     if (logger) {
         logger->logf(
-            "server.model.generate.effective_stop_tokens count=%zu eos_token_id=%d",
+            "server.model.generate.effective_stop_tokens count=%zu configured_eos_tokens=%zu",
             effectiveStopTokens.size(),
-            config_.eosTokenId);
+            config_.eosTokenIds.size());
     }
 
     auto sessionConfig = config_.session;

@@ -141,9 +141,7 @@ def create_app(config: ServerConfig) -> FastAPI:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-        stop_token_ids: list[int] = []
-        if config.eos_token_id is not None:
-            stop_token_ids.append(config.eos_token_id)
+        stop_token_ids = config.stop_token_ids()
 
         if request.stream:
             call = grpc_client.generate_stream(
@@ -321,6 +319,8 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", default=8000, type=int)
     parser.add_argument("--eos-token-id", default=1, type=int)
+    parser.add_argument("--end-of-turn-token-id", default=None, type=int)
+    parser.add_argument("--tool-response-token-id", default=None, type=int)
     parser.add_argument(
         "--auth-token",
         default=None,
@@ -341,6 +341,8 @@ def main() -> None:
         tokenizer_path=args.tokenizer,
         grpc_target=args.grpc,
         eos_token_id=args.eos_token_id,
+        end_of_turn_token_id=args.end_of_turn_token_id,
+        tool_response_token_id=args.tool_response_token_id,
         auth_token=auth_token,
     ))
     uvicorn.run(app, host=args.host, port=args.port)

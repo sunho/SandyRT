@@ -42,6 +42,8 @@ def model_defaults(root: pathlib.Path, architecture: str) -> dict[str, object]:
             "tokenizer": root / "experiments/tinyllama",
             "model_id": "tinyllama",
             "eos_token_id": 2,
+            "end_of_turn_token_id": None,
+            "tool_response_token_id": None,
             "max_context_tokens": 2048,
             "prefill_chunk_tokens": DEFAULT_PREFILL_CHUNK_TOKENS,
         }
@@ -53,6 +55,8 @@ def model_defaults(root: pathlib.Path, architecture: str) -> dict[str, object]:
             "tokenizer": root / "experiments/gemma4_e4b",
             "model_id": "gemma4e4b",
             "eos_token_id": 1,
+            "end_of_turn_token_id": 106,
+            "tool_response_token_id": 50,
             "max_context_tokens": 0,
             "prefill_chunk_tokens": DEFAULT_PREFILL_CHUNK_TOKENS,
         }
@@ -64,6 +68,8 @@ def model_defaults(root: pathlib.Path, architecture: str) -> dict[str, object]:
             "tokenizer": root / "experiments/gemma4_a4b26b",
             "model_id": "gemma4a4b26b",
             "eos_token_id": 1,
+            "end_of_turn_token_id": 106,
+            "tool_response_token_id": 50,
             "max_context_tokens": 0,
             "prefill_chunk_tokens": DEFAULT_PREFILL_CHUNK_TOKENS,
         }
@@ -74,6 +80,8 @@ def model_defaults(root: pathlib.Path, architecture: str) -> dict[str, object]:
         "tokenizer": root / "experiments/gemma4_e2b",
         "model_id": "gemma4e2b",
         "eos_token_id": 1,
+        "end_of_turn_token_id": 106,
+        "tool_response_token_id": 50,
         "max_context_tokens": 0,
         "prefill_chunk_tokens": DEFAULT_PREFILL_CHUNK_TOKENS,
     }
@@ -240,6 +248,8 @@ def main() -> int:
         help="Environment variable used to pass the bearer token to the HTTP server.",
     )
     parser.add_argument("--eos-token-id", default=None, type=int)
+    parser.add_argument("--end-of-turn-token-id", default=None, type=int)
+    parser.add_argument("--tool-response-token-id", default=None, type=int)
     parser.add_argument("--max-context-tokens", default=None, type=int)
     parser.add_argument("--prefill-chunk-tokens", default=None, type=int)
     parser.add_argument("--request-timeout-ms", default=300000, type=int)
@@ -276,6 +286,10 @@ def main() -> int:
         args.model_id = defaults["model_id"]
     if args.eos_token_id is None:
         args.eos_token_id = defaults["eos_token_id"]
+    if args.end_of_turn_token_id is None:
+        args.end_of_turn_token_id = defaults["end_of_turn_token_id"]
+    if args.tool_response_token_id is None:
+        args.tool_response_token_id = defaults["tool_response_token_id"]
     if args.max_context_tokens is None:
         args.max_context_tokens = defaults["max_context_tokens"]
     if args.prefill_chunk_tokens is None:
@@ -320,6 +334,10 @@ def main() -> int:
         "--eos-token-id", str(args.eos_token_id),
         "--request-timeout-ms", str(args.request_timeout_ms),
     ]
+    if args.end_of_turn_token_id is not None:
+        worker_cmd.extend(["--end-of-turn-token-id", str(args.end_of_turn_token_id)])
+    if args.tool_response_token_id is not None:
+        worker_cmd.extend(["--tool-response-token-id", str(args.tool_response_token_id)])
     if args.max_context_tokens > 0:
         worker_cmd.extend(["--max-context-tokens", str(args.max_context_tokens)])
     if args.prefill_chunk_tokens > 0:
@@ -347,6 +365,10 @@ def main() -> int:
         "--eos-token-id", str(args.eos_token_id),
         "--auth-token-env", args.auth_token_env,
     ]
+    if args.end_of_turn_token_id is not None:
+        http_cmd.extend(["--end-of-turn-token-id", str(args.end_of_turn_token_id)])
+    if args.tool_response_token_id is not None:
+        http_cmd.extend(["--tool-response-token-id", str(args.tool_response_token_id)])
     http_env = with_pythonpath(root)
     if args.auth_token is not None:
         http_env[args.auth_token_env] = args.auth_token

@@ -18,7 +18,7 @@ struct Args {
     std::string listen = "127.0.0.1:50051";
     std::string modelId;
     std::string architecture = "gemma4e2b";
-    int eosTokenId = -1;
+    std::vector<int64_t> eosTokenIds;
     int maxContextTokens = 0;
     int prefillChunkTokens = sandy::server::kDefaultPrefillChunkTokens;
     int requestTimeoutMs = 300000;
@@ -32,7 +32,8 @@ void usage(const char* argv0) {
         "usage: %s --model <eval_token.sandy.go> --weights <weights.safetensors> "
         "[--prefill-model <prefill.sandy.go>] [--prefill-chunk-tokens <n>] "
         "[--listen <addr>] [--model-id <id>] [--architecture <name>] "
-        "[--eos-token-id <id>] [--max-context-tokens <n>] "
+        "[--eos-token-id <id>] [--end-of-turn-token-id <id>] "
+        "[--tool-response-token-id <id>] [--max-context-tokens <n>] "
         "[--request-timeout-ms <n>] "
         "[--debug] [--profile] [--log-dir <dir>]\n",
         argv0);
@@ -79,9 +80,13 @@ bool parse_args(int argc, char* argv[], Args& args) {
             if (!require_value(args.modelId)) return false;
         } else if (arg == "--architecture") {
             if (!require_value(args.architecture)) return false;
-        } else if (arg == "--eos-token-id") {
+        } else if (arg == "--eos-token-id" ||
+                   arg == "--end-of-turn-token-id" ||
+                   arg == "--tool-response-token-id") {
             std::string value;
-            if (!require_value(value) || !parse_int(value, args.eosTokenId)) return false;
+            int tokenId = -1;
+            if (!require_value(value) || !parse_int(value, tokenId)) return false;
+            args.eosTokenIds.push_back(tokenId);
         } else if (arg == "--max-context-tokens") {
             std::string value;
             if (!require_value(value) || !parse_int(value, args.maxContextTokens)) return false;
@@ -121,7 +126,7 @@ int main(int argc, char* argv[]) {
     config.modelPath = args.modelPath;
     config.prefillModelPath = args.prefillModelPath;
     config.weightsPath = args.weightsPath;
-    config.eosTokenId = args.eosTokenId;
+    config.eosTokenIds = args.eosTokenIds;
     config.maxContextTokens = args.maxContextTokens;
     config.logging.debug = args.debug || args.profile;
     config.logging.profile = args.profile;
