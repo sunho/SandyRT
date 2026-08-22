@@ -88,6 +88,10 @@ AttrValue AttrValue::make_float(double v) {
     AttrValue a; a.kind = Float; a.floatVal = v; return a;
 }
 
+AttrValue AttrValue::make_dtype(core::DType v) {
+    AttrValue a; a.kind = DType; a.dtypeVal = v; return a;
+}
+
 AttrValue AttrValue::make_string(const std::string& v) {
     AttrValue a; a.kind = String; a.strVal = v; return a;
 }
@@ -124,24 +128,81 @@ bool attr_bool_or_false(const AttrMap& attrs, const char* name) {
     return it != attrs.end() && it->second.kind == AttrValue::Int && it->second.intVal != 0;
 }
 
+bool is_untyped_scalar(const Value* value) {
+    if (!value || value->shape.rank() != 0 || !value->def ||
+        value->def->kind != OpKind::Constant)
+        return false;
+    auto it = value->def->attrs.find("untyped");
+    return it != value->def->attrs.end() &&
+           it->second.kind == AttrValue::Int && it->second.intVal != 0;
+}
+
+void verify_result_dtype(
+        const char* opName,
+        std::span<Value* const> operands,
+        const AttrMap& attrs,
+        std::initializer_list<size_t> dataOperands) {
+    auto dtype = attrs.find("dtype");
+    if (dtype != attrs.end()) {
+        if (dtype->second.kind != AttrValue::DType) {
+            fprintf(stderr, "%s dtype attr must be a dtype\n", opName);
+            abort();
+        }
+        return;
+    }
+
+    bool found = false;
+    core::DType inferred = core::DType::F32;
+    for (size_t index : dataOperands) {
+        if (index >= operands.size() || is_untyped_scalar(operands[index]))
+            continue;
+        if (!found) {
+            inferred = operands[index]->dtype;
+            found = true;
+        } else if (operands[index]->dtype != inferred) {
+            fprintf(stderr, "%s mixed data operand dtypes require explicit dtype\n", opName);
+            abort();
+        }
+    }
+}
+
+core::DType infer_result_dtype(
+        std::span<Value* const> operands,
+        const AttrMap& attrs,
+        std::initializer_list<size_t> dataOperands) {
+    auto dtype = attrs.find("dtype");
+    if (dtype != attrs.end())
+        return dtype->second.dtypeVal;
+    for (size_t index : dataOperands) {
+        if (index < operands.size() && !is_untyped_scalar(operands[index]))
+            return operands[index]->dtype;
+    }
+    for (size_t index : dataOperands) {
+        if (index < operands.size())
+            return operands[index]->dtype;
+    }
+    return core::DType::F32;
+}
+
 class ReLUOpDef : public OpDef {
 public:
     OpKind kind() const override { return OpKind::ReLU; }
     const char* name() const override { return "relu"; }
     std::vector<ValueType> infer_types(
         std::span<Value* const> operands,
-        const AttrMap&) const override
+        const AttrMap& attrs) const override
     {
-        return {{operands[0]->shape, operands[0]->dtype}};
+        return {{operands[0]->shape, infer_result_dtype(operands, attrs, {0})}};
     }
     void verify(
         std::span<Value* const> operands,
-        const AttrMap&) const override
+        const AttrMap& attrs) const override
     {
         if (operands.size() != 1) {
             fprintf(stderr, "relu expects 1 operand, got %zu\n", operands.size());
             abort();
         }
+        verify_result_dtype(name(), operands, attrs, {0});
     }
 };
 
@@ -151,24 +212,25 @@ public:
     const char* name() const override { return "linear"; }
     std::vector<ValueType> infer_types(
         std::span<Value* const> operands,
-        const AttrMap&) const override
+        const AttrMap& attrs) const override
     {
         // y = x @ W^T + b
         // x: [..., in_features], weight: [out_features, in_features]
         // result: [..., out_features]
         auto dims = operands[0]->shape.dims();
         dims.back() = operands[1]->shape.dim(0);
-        return {{core::Shape(dims), operands[0]->dtype}};
+        return {{core::Shape(dims), infer_result_dtype(operands, attrs, {0, 1, 2})}};
     }
     void verify(
         std::span<Value* const> operands,
-        const AttrMap&) const override
+        const AttrMap& attrs) const override
     {
         if (operands.size() != 3) {
             fprintf(stderr, "linear expects 3 operands (x, weight, bias), got %zu\n",
                     operands.size());
             abort();
         }
+        verify_result_dtype(name(), operands, attrs, {0, 1, 2});
     }
 };
 
@@ -181,28 +243,25 @@ public:
     const char* name() const override { return name_; }
     std::vector<ValueType> infer_types(
         std::span<Value* const> operands,
-        const AttrMap&) const override
+        const AttrMap& attrs) const override
     {
         auto shape = core::broadcast_shape(operands[0]->shape, operands[1]->shape);
         if (!shape) {
             fprintf(stderr, "%s: %s\n", name_, shape.error().c_str());
             abort();
         }
-        return {{shape.take(), result_dtype(operands[0], operands[1])}};
+        return {{shape.take(), infer_result_dtype(operands, attrs, {0, 1})}};
     }
     void verify(
         std::span<Value* const> operands,
-        const AttrMap&) const override
+        const AttrMap& attrs) const override
     {
         if (operands.size() != 2) {
             fprintf(stderr, "%s expects 2 operands, got %zu\n",
                     name_, operands.size());
             abort();
         }
-        if (!dtypes_compatible(operands[0], operands[1])) {
-            fprintf(stderr, "%s operands must have the same dtype\n", name_);
-            abort();
-        }
+        verify_result_dtype(name(), operands, attrs, {0, 1});
         auto shape = core::broadcast_shape(operands[0]->shape, operands[1]->shape);
         if (!shape) {
             fprintf(stderr, "%s: %s\n", name_, shape.error().c_str());
@@ -211,22 +270,6 @@ public:
     }
 
 private:
-    static bool is_scalar(const Value* value) {
-        return value->shape.rank() == 0;
-    }
-
-    static bool dtypes_compatible(const Value* lhs, const Value* rhs) {
-        return lhs->dtype == rhs->dtype || is_scalar(lhs) || is_scalar(rhs);
-    }
-
-    static core::DType result_dtype(const Value* lhs, const Value* rhs) {
-        if (lhs->dtype == rhs->dtype)
-            return lhs->dtype;
-        if (is_scalar(lhs))
-            return rhs->dtype;
-        return lhs->dtype;
-    }
-
     OpKind kind_;
     const char* name_;
 };
@@ -240,13 +283,13 @@ public:
     const char* name() const override { return name_; }
     std::vector<ValueType> infer_types(
         std::span<Value* const> operands,
-        const AttrMap&) const override
+        const AttrMap& attrs) const override
     {
-        return {{operands[0]->shape, operands[0]->dtype}};
+        return {{operands[0]->shape, infer_result_dtype(operands, attrs, {0})}};
     }
     void verify(
         std::span<Value* const> operands,
-        const AttrMap&) const override
+        const AttrMap& attrs) const override
     {
         if (operands.size() != 1) {
             fprintf(stderr, "%s expects 1 operand, got %zu\n", name_, operands.size());
@@ -256,6 +299,7 @@ public:
             fprintf(stderr, "%s operand must be a supported floating dtype\n", name_);
             abort();
         }
+        verify_result_dtype(name(), operands, attrs, {0});
     }
 
 private:
@@ -287,7 +331,7 @@ public:
         auto outDims = batchShape.take().dims();
         outDims.push_back(lhsShape.dim(lhsShape.rank() - (transposeLhs ? 1 : 2)));
         outDims.push_back(rhsShape.dim(rhsShape.rank() - (transposeRhs ? 2 : 1)));
-        return {{core::Shape(outDims), operands[0]->dtype}};
+        return {{core::Shape(outDims), infer_result_dtype(operands, attrs, {0, 1})}};
     }
     void verify(
         std::span<Value* const> operands,
@@ -297,10 +341,7 @@ public:
             fprintf(stderr, "matmul expects 2 operands, got %zu\n", operands.size());
             abort();
         }
-        if (operands[0]->dtype != operands[1]->dtype) {
-            fprintf(stderr, "matmul operands must have the same dtype\n");
-            abort();
-        }
+        verify_result_dtype(name(), operands, attrs, {0, 1});
         if (operands[0]->shape.rank() < 2 || operands[1]->shape.rank() < 2) {
             fprintf(stderr, "matmul operands must have rank >= 2\n");
             abort();
@@ -522,7 +563,7 @@ public:
     const char* name() const override { return "sliding_query_key_score"; }
     std::vector<ValueType> infer_types(
         std::span<Value* const> operands,
-        const AttrMap&) const override
+        const AttrMap& attrs) const override
     {
         const auto& qShape = operands[0]->shape;
         const auto& kShape = operands[1]->shape;
@@ -533,7 +574,7 @@ public:
         outDims.push_back(qShape.dim(rank - 3));
         outDims.push_back(qShape.dim(rank - 2));
         outDims.push_back(kShape.dim(rank - 2));
-        return {{core::Shape(outDims), operands[0]->dtype}};
+        return {{core::Shape(outDims), infer_result_dtype(operands, attrs, {0, 1})}};
     }
     void verify(
         std::span<Value* const> operands,
@@ -549,10 +590,7 @@ public:
             fprintf(stderr, "sliding_query_key_score operands must be a supported floating dtype\n");
             abort();
         }
-        if (operands[0]->dtype != operands[1]->dtype) {
-            fprintf(stderr, "sliding_query_key_score operands must have the same dtype\n");
-            abort();
-        }
+        verify_result_dtype(name(), operands, attrs, {0, 1});
         if (operands.size() == 3 &&
             operands[2]->dtype != core::DType::I32 &&
             operands[2]->dtype != core::DType::I64) {
@@ -619,9 +657,9 @@ public:
     const char* name() const override { return "attention"; }
     std::vector<ValueType> infer_types(
         std::span<Value* const> operands,
-        const AttrMap&) const override
+        const AttrMap& attrs) const override
     {
-        return {{operands[0]->shape, operands[0]->dtype}};
+        return {{operands[0]->shape, infer_result_dtype(operands, attrs, {0, 1, 2})}};
     }
     void verify(
         std::span<Value* const> operands,
@@ -638,11 +676,7 @@ public:
             fprintf(stderr, "attention operands must be a supported floating dtype\n");
             abort();
         }
-        if (operands[0]->dtype != operands[1]->dtype ||
-            operands[0]->dtype != operands[2]->dtype) {
-            fprintf(stderr, "attention operands must have the same dtype\n");
-            abort();
-        }
+        verify_result_dtype(name(), operands, attrs, {0, 1, 2});
 
         const auto& qShape = operands[0]->shape;
         const auto& kShape = operands[1]->shape;
@@ -757,9 +791,9 @@ public:
     const char* name() const override { return "softmax"; }
     std::vector<ValueType> infer_types(
         std::span<Value* const> operands,
-        const AttrMap&) const override
+        const AttrMap& attrs) const override
     {
-        return {{operands[0]->shape, operands[0]->dtype}};
+        return {{operands[0]->shape, infer_result_dtype(operands, attrs, {0})}};
     }
     void verify(
         std::span<Value* const> operands,
@@ -773,6 +807,7 @@ public:
             fprintf(stderr, "softmax input must be a supported floating dtype\n");
             abort();
         }
+        verify_result_dtype(name(), operands, attrs, {0});
         int rank = operands[0]->shape.rank();
         if (rank < 1) {
             fprintf(stderr, "softmax input must have rank >= 1\n");
@@ -811,7 +846,7 @@ public:
         auto k = attrs.at("k").intVal;
         dims[static_cast<size_t>(dim)] = k;
         return {
-            ValueType::tensor(core::Shape(dims), operands[0]->dtype),
+            ValueType::tensor(core::Shape(dims), infer_result_dtype(operands, attrs, {0})),
             ValueType::tensor(core::Shape(std::move(dims)), core::DType::I64),
         };
     }
@@ -827,6 +862,7 @@ public:
             fprintf(stderr, "topk input must be a supported floating dtype\n");
             abort();
         }
+        verify_result_dtype(name(), operands, attrs, {0});
         int rank = operands[0]->shape.rank();
         if (rank < 1) {
             fprintf(stderr, "topk input must have rank >= 1\n");
@@ -878,7 +914,7 @@ public:
         } else {
             dims.erase(dims.begin() + dim);
         }
-        return {{core::Shape(std::move(dims)), operands[0]->dtype}};
+        return {{core::Shape(std::move(dims)), infer_result_dtype(operands, attrs, {0})}};
     }
     void verify(
         std::span<Value* const> operands,
@@ -892,6 +928,7 @@ public:
             fprintf(stderr, "sum input must be a supported floating dtype\n");
             abort();
         }
+        verify_result_dtype(name(), operands, attrs, {0});
         int rank = operands[0]->shape.rank();
         if (rank < 1) {
             fprintf(stderr, "sum input must have rank >= 1\n");
@@ -1007,9 +1044,10 @@ public:
         int64_t rows = operands[0]->shape.dim(xRank - 2);
         int64_t outFeatures = operands[2]->shape.dim(transposeRhs ? 1 : 2);
         if (xRank == 3) {
-            return {{core::Shape({operands[0]->shape.dim(0), rows, outFeatures}), operands[0]->dtype}};
+            return {{core::Shape({operands[0]->shape.dim(0), rows, outFeatures}),
+                     infer_result_dtype(operands, attrs, {0, 2})}};
         }
-        return {{core::Shape({rows, outFeatures}), operands[0]->dtype}};
+        return {{core::Shape({rows, outFeatures}), infer_result_dtype(operands, attrs, {0, 2})}};
     }
     void verify(
         std::span<Value* const> operands,
@@ -1027,10 +1065,11 @@ public:
             abort();
         }
         if (!is_float_compute_dtype(operands[0]->dtype) ||
-            operands[0]->dtype != operands[2]->dtype) {
-            fprintf(stderr, "moe_matmul x and weight must have the same floating dtype\n");
+            !is_float_compute_dtype(operands[2]->dtype)) {
+            fprintf(stderr, "moe_matmul x and weight must have floating dtypes\n");
             abort();
         }
+        verify_result_dtype(name(), operands, attrs, {0, 2});
         if (operands[1]->dtype != core::DType::I32 &&
             operands[1]->dtype != core::DType::I64) {
             fprintf(stderr, "moe_matmul expert_offsets must be i32 or i64\n");
@@ -1066,13 +1105,13 @@ public:
     const char* name() const override { return "moe_scatter_sum"; }
     std::vector<ValueType> infer_types(
         std::span<Value* const> operands,
-        const AttrMap&) const override
+        const AttrMap& attrs) const override
     {
-        return {{operands[3]->shape, operands[3]->dtype}};
+        return {{operands[3]->shape, infer_result_dtype(operands, attrs, {0, 1, 3})}};
     }
     void verify(
         std::span<Value* const> operands,
-        const AttrMap&) const override
+        const AttrMap& attrs) const override
     {
         if (operands.size() != 4) {
             fprintf(stderr, "moe_scatter_sum expects packed_out, packed_weights, token_ids, reference\n");
@@ -1091,12 +1130,13 @@ public:
             fprintf(stderr, "moe_scatter_sum packed and output rank mismatch\n");
             abort();
         }
-        if (operands[0]->dtype != operands[3]->dtype ||
-            operands[1]->dtype != operands[3]->dtype ||
-            !is_float_compute_dtype(operands[0]->dtype)) {
-            fprintf(stderr, "moe_scatter_sum floating dtype mismatch\n");
+        if (!is_float_compute_dtype(operands[0]->dtype) ||
+            !is_float_compute_dtype(operands[1]->dtype) ||
+            !is_float_compute_dtype(operands[3]->dtype)) {
+            fprintf(stderr, "moe_scatter_sum operands must have floating dtypes\n");
             abort();
         }
+        verify_result_dtype(name(), operands, attrs, {0, 1, 3});
         if (operands[2]->dtype != core::DType::I32 &&
             operands[2]->dtype != core::DType::I64) {
             fprintf(stderr, "moe_scatter_sum token_ids must be i32 or i64\n");
@@ -1192,16 +1232,16 @@ public:
     const char* name() const override { return "embedding"; }
     std::vector<ValueType> infer_types(
         std::span<Value* const> operands,
-        const AttrMap&) const override
+        const AttrMap& attrs) const override
     {
         auto dims = operands[0]->shape.dims();
         if (operands[1]->shape.rank() == 2)
             dims.push_back(operands[1]->shape.dim(1));
-        return {{core::Shape(dims), operands[1]->dtype}};
+        return {{core::Shape(dims), infer_result_dtype(operands, attrs, {1})}};
     }
     void verify(
         std::span<Value* const> operands,
-        const AttrMap&) const override
+        const AttrMap& attrs) const override
     {
         if (operands.size() != 2) {
             fprintf(stderr, "embedding expects 2 operands (ids, weight), got %zu\n",
@@ -1217,6 +1257,7 @@ public:
             fprintf(stderr, "embedding weight must be a supported floating dtype\n");
             abort();
         }
+        verify_result_dtype(name(), operands, attrs, {1});
         if (operands[1]->shape.rank() != 1 && operands[1]->shape.rank() != 2) {
             fprintf(stderr, "embedding weight must have rank 1 or rank 2\n");
             abort();
@@ -1230,9 +1271,9 @@ public:
     const char* name() const override { return "rope"; }
     std::vector<ValueType> infer_types(
         std::span<Value* const> operands,
-        const AttrMap&) const override
+        const AttrMap& attrs) const override
     {
-        return {{operands[0]->shape, operands[0]->dtype}};
+        return {{operands[0]->shape, infer_result_dtype(operands, attrs, {0})}};
     }
     void verify(
         std::span<Value* const> operands,
@@ -1252,6 +1293,7 @@ public:
             fprintf(stderr, "rope input must have rank >= 2\n");
             abort();
         }
+        verify_result_dtype(name(), operands, attrs, {0});
         if (operands.size() == 2 &&
             operands[1]->dtype != core::DType::I32 &&
             operands[1]->dtype != core::DType::I64) {
@@ -1303,9 +1345,9 @@ public:
     const char* name() const override { return "rms_norm"; }
     std::vector<ValueType> infer_types(
         std::span<Value* const> operands,
-        const AttrMap&) const override
+        const AttrMap& attrs) const override
     {
-        return {{operands[0]->shape, operands[0]->dtype}};
+        return {{operands[0]->shape, infer_result_dtype(operands, attrs, {0, 1})}};
     }
     void verify(
         std::span<Value* const> operands,
@@ -1325,6 +1367,7 @@ public:
             fprintf(stderr, "rms_norm input must have rank >= 1\n");
             abort();
         }
+        verify_result_dtype(name(), operands, attrs, {0, 1});
         if (operands.size() == 1)
             return;
         if (operands[1]->shape.rank() != 1) {
@@ -1346,9 +1389,9 @@ public:
     const char* name() const override { return "layer_norm"; }
     std::vector<ValueType> infer_types(
         std::span<Value* const> operands,
-        const AttrMap&) const override
+        const AttrMap& attrs) const override
     {
-        return {{operands[0]->shape, operands[0]->dtype}};
+        return {{operands[0]->shape, infer_result_dtype(operands, attrs, {0, 1, 2})}};
     }
     void verify(
         std::span<Value* const> operands,
@@ -1376,12 +1419,13 @@ public:
             fprintf(stderr, "layer_norm bias must have rank 1\n");
             abort();
         }
-        if (operands[0]->dtype != core::DType::F32 ||
-            operands[1]->dtype != core::DType::F32 ||
-            operands[2]->dtype != core::DType::F32) {
-            fprintf(stderr, "layer_norm operands must be f32\n");
+        if (!is_float_compute_dtype(operands[0]->dtype) ||
+            !is_float_compute_dtype(operands[1]->dtype) ||
+            !is_float_compute_dtype(operands[2]->dtype)) {
+            fprintf(stderr, "layer_norm operands must have floating dtypes\n");
             abort();
         }
+        verify_result_dtype(name(), operands, attrs, {0, 1, 2});
         int64_t hidden = operands[0]->shape.dim(operands[0]->shape.rank() - 1);
         int64_t weightDim = operands[1]->shape.dim(0);
         int64_t biasDim = operands[2]->shape.dim(0);
@@ -1559,6 +1603,7 @@ static void printAttrVal(const AttrValue& a) {
     switch (a.kind) {
         case AttrValue::Int:    std::cout << a.intVal; break;
         case AttrValue::Float:  std::cout << a.floatVal; break;
+        case AttrValue::DType:  std::cout << core::dtype_name(a.dtypeVal); break;
         case AttrValue::String: std::cout << "\"" << a.strVal << "\""; break;
         case AttrValue::IntList:
             std::cout << "[";
@@ -1795,6 +1840,12 @@ Value* Builder::createConstantF32(float value) {
 
     block_->ops.push_back(&op);
     return v;
+}
+
+Value* Builder::createUntypedConstantF32(float value) {
+    auto* valueResult = createConstantF32(value);
+    valueResult->def->attrs["untyped"] = AttrValue::make_int(1);
+    return valueResult;
 }
 
 Value* Builder::createLinear(Value* x, Value* weight, Value* bias) {

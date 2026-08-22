@@ -165,6 +165,66 @@ func main(x Tensor) (Tensor, Tensor) {
     fs::remove_all(dir, ec);
 }
 
+TEST(CompilerTest, RequiredDTypeConfigConstOverridesBuiltinAttribute) {
+    fs::path dir = makeTempDir();
+    writeFile(dir / "main.sandy.go", R"(
+config const OUTPUT_DTYPE dtype
+
+func main(x Tensor) Tensor {
+    return __sqrt(x, dtype=OUTPUT_DTYPE)
+}
+)");
+
+    sandy::SandyGoCompileOptions options;
+    options.configConstants["OUTPUT_DTYPE"] = sandy::core::DType::BF16;
+    sandy::Compiler compiler;
+    auto graph = compiler.load_sandygo((dir / "main.sandy.go").string(), options);
+
+    const auto& attrs = graph.outputs()[0]->def->attrs;
+    auto dtype = std::find_if(attrs.begin(), attrs.end(), [](const auto& attr) {
+        return attr.name == "dtype";
+    });
+    ASSERT_NE(dtype, attrs.end());
+    EXPECT_EQ(dtype->type, sandy::ir::high_ir::Type::DType);
+    EXPECT_EQ(dtype->dtypeVal, sandy::core::DType::BF16);
+
+    TestWeights weights;
+    sandy::ir::mid_ir::MaterializeOptions materializeOptions;
+    materializeOptions.input_tensor_descs["x"] = sandy::core::TensorDesc(
+        sandy::core::Shape({2, 3}), sandy::core::DType::F32);
+    auto result = compiler.materialize_mid_ir(graph, weights, materializeOptions);
+    ASSERT_TRUE(result) << result.error();
+    auto midGraph = result.take();
+    EXPECT_EQ(midGraph->outputs()[0]->shape, sandy::core::Shape({2, 3}));
+    EXPECT_EQ(midGraph->outputs()[0]->dtype, sandy::core::DType::BF16);
+
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
+TEST(CompilerTest, DTypeConfigConstUsesDefault) {
+    fs::path dir = makeTempDir();
+    writeFile(dir / "main.sandy.go", R"(
+config const OUTPUT_DTYPE dtype = f32
+
+func main(x Tensor) Tensor {
+    return __sqrt(x, dtype=OUTPUT_DTYPE)
+}
+)");
+
+    sandy::Compiler compiler;
+    auto graph = compiler.load_sandygo((dir / "main.sandy.go").string());
+    const auto& attrs = graph.outputs()[0]->def->attrs;
+    auto dtype = std::find_if(attrs.begin(), attrs.end(), [](const auto& attr) {
+        return attr.name == "dtype";
+    });
+    ASSERT_NE(dtype, attrs.end());
+    EXPECT_EQ(dtype->dtypeVal, sandy::core::DType::F32);
+
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
 TEST(CompilerTest, MissingRequiredConfigConstFails) {
     fs::path dir = makeTempDir();
     writeFile(dir / "main.sandy.go", R"(
@@ -218,6 +278,32 @@ func main(x Tensor) Tensor {
     EXPECT_DEATH(
         (void)compiler.load_sandygo((dir / "main.sandy.go").string()),
         "cannot assign to config constant 'TOP_K'");
+
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
+TEST(CompilerTest, SourceScalarLiteralInheritsTensorDType) {
+    fs::path dir = makeTempDir();
+    writeFile(dir / "main.sandy.go", R"(
+func main(x Tensor) Tensor {
+    return __mul(x, 2.0)
+}
+)");
+
+    sandy::Compiler compiler;
+    auto highGraph = compiler.load_sandygo((dir / "main.sandy.go").string());
+    TestWeights weights;
+    sandy::ir::mid_ir::MaterializeOptions options;
+    options.input_tensor_descs["x"] = sandy::core::TensorDesc(
+        sandy::core::Shape({2, 3}), sandy::core::DType::BF16);
+    auto result = compiler.materialize_mid_ir(highGraph, weights, options);
+    ASSERT_TRUE(result) << result.error();
+    auto midGraph = result.take();
+
+    ASSERT_EQ(midGraph->outputs().size(), 1u);
+    EXPECT_EQ(midGraph->outputs()[0]->shape, sandy::core::Shape({2, 3}));
+    EXPECT_EQ(midGraph->outputs()[0]->dtype, sandy::core::DType::BF16);
 
     std::error_code ec;
     fs::remove_all(dir, ec);

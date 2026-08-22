@@ -1,10 +1,21 @@
 #include "Interpreter.h"
 #include <cstdio>
 #include <cstdlib>
+#include <optional>
 
 namespace sandy::sandygo {
 
 namespace {
+
+std::optional<core::DType> dtypeFromName(const std::string& name) {
+    if (name == "f32") return core::DType::F32;
+    if (name == "f16") return core::DType::F16;
+    if (name == "bf16") return core::DType::BF16;
+    if (name == "i32") return core::DType::I32;
+    if (name == "i64") return core::DType::I64;
+    if (name == "u8") return core::DType::U8;
+    return std::nullopt;
+}
 
 bool isTensorType(const TypeExpr& type) {
     return type.kind == TypeExpr::Simple &&
@@ -48,16 +59,16 @@ std::vector<ir::high_ir::TensorType> tupleElementsFromTypeExpr(const TypeExpr& t
 Interpreter::Interpreter(
         const Program& program,
         ir::high_ir::Graph& graph,
-        const std::unordered_map<std::string, int64_t>& configConstants)
+        const std::unordered_map<std::string, ConfigValue>& configConstants)
     : program_(program), graph_(graph) {
     std::unordered_map<std::string, const ConfigConstDecl*> declarations;
     for (const auto& decl : program_.configConsts) {
         auto [_, inserted] = declarations.emplace(decl.name, &decl);
         if (!inserted)
             error("duplicate config constant '" + decl.name + "'");
-        if (decl.type != "int")
+        if (decl.type != "int" && decl.type != "dtype")
             error("config constant '" + decl.name + "' has unsupported type '" +
-                  decl.type + "'; only int is supported");
+                  decl.type + "'; supported types are int and dtype");
     }
     for (const auto& [name, _] : configConstants) {
         if (!declarations.contains(name))
@@ -66,11 +77,22 @@ Interpreter::Interpreter(
     for (const auto& decl : program_.configConsts) {
         auto overrideIt = configConstants.find(decl.name);
         if (overrideIt != configConstants.end()) {
-            configValues_[decl.name] = RuntimeValue::makeInt(overrideIt->second);
+            if (decl.type == "int") {
+                auto* value = std::get_if<int64_t>(&overrideIt->second);
+                if (!value)
+                    error("override for config constant '" + decl.name + "' must be int");
+                configValues_[decl.name] = RuntimeValue::makeInt(*value);
+            } else {
+                auto* value = std::get_if<core::DType>(&overrideIt->second);
+                if (!value)
+                    error("override for config constant '" + decl.name + "' must be dtype");
+                configValues_[decl.name] = RuntimeValue::makeDType(*value);
+            }
         } else if (decl.defaultValue) {
             auto value = evalConfigDefault(*decl.defaultValue);
-            if (value.kind != RuntimeValue::Int)
-                error("default for config constant '" + decl.name + "' must be int");
+            auto expected = decl.type == "int" ? RuntimeValue::Int : RuntimeValue::DType;
+            if (value.kind != expected)
+                error("default for config constant '" + decl.name + "' must be " + decl.type);
             configValues_[decl.name] = value;
         } else {
             error("missing required config constant '" + decl.name + "'");
@@ -290,7 +312,11 @@ void Interpreter::execWeightScope(const Stmt& stmt) {
 
 RuntimeValue Interpreter::evalExpr(const Expr& expr) {
     switch (expr.kind) {
-        case Expr::Ident:     return getVar(expr.sval);
+        case Expr::Ident: {
+            if (auto dtype = dtypeFromName(expr.sval))
+                return RuntimeValue::makeDType(*dtype);
+            return getVar(expr.sval);
+        }
         case Expr::IntLit:    return RuntimeValue::makeInt(expr.ival);
         case Expr::FloatLit:  return RuntimeValue::makeFloat(expr.fval);
         case Expr::StringLit: return RuntimeValue::makeString(expr.sval);
@@ -414,6 +440,9 @@ RuntimeValue Interpreter::evalCall(const Expr& expr) {
                 case RuntimeValue::Float:
                     attrs.push_back(ir::high_ir::Attr::fromFloat(na.name, val.floatVal));
                     break;
+                case RuntimeValue::DType:
+                    attrs.push_back(ir::high_ir::Attr::fromDType(na.name, val.dtypeVal));
+                    break;
                 case RuntimeValue::String:
                     attrs.push_back(ir::high_ir::Attr::fromString(na.name, val.strVal));
                     break;
@@ -514,6 +543,8 @@ RuntimeValue Interpreter::evalUnary(const Expr& expr) {
 RuntimeValue Interpreter::evalConfigDefault(const Expr& expr) {
     switch (expr.kind) {
         case Expr::Ident: {
+            if (auto dtype = dtypeFromName(expr.sval))
+                return RuntimeValue::makeDType(*dtype);
             auto it = configValues_.find(expr.sval);
             if (it == configValues_.end())
                 error("config constant default references unresolved constant '" + expr.sval + "'");
@@ -544,7 +575,7 @@ RuntimeValue Interpreter::evalConfigDefault(const Expr& expr) {
         default:
             break;
     }
-    error("config constant default must be a compile-time int expression");
+    error("config constant default must be a compile-time int or dtype expression");
 }
 
 void Interpreter::pushEnv() { envStack_.emplace_back(); }

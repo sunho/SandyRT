@@ -1,6 +1,7 @@
 #pragma once
 
 #include "AST.h"
+#include "ConfigValue.h"
 #include "HighIR.h"
 
 #include <string>
@@ -11,10 +12,11 @@
 namespace sandy::sandygo {
 
 struct RuntimeValue {
-    enum Kind { Void, Int, Float, String, IntList, NodeVal, TensorTuple, Tuple };
+    enum Kind { Void, Int, Float, DType, String, IntList, NodeVal, TensorTuple, Tuple };
     Kind kind = Void;
     int64_t intVal = 0;
     double floatVal = 0.0;
+    core::DType dtypeVal = core::DType::F32;
     std::string strVal;
     std::vector<int64_t> intListVal;
     ir::high_ir::Value* nodeVal = nullptr;
@@ -26,6 +28,9 @@ struct RuntimeValue {
     }
     static RuntimeValue makeFloat(double v) {
         RuntimeValue rv; rv.kind = Float; rv.floatVal = v; return rv;
+    }
+    static RuntimeValue makeDType(core::DType v) {
+        RuntimeValue rv; rv.kind = DType; rv.dtypeVal = v; return rv;
     }
     static RuntimeValue makeString(const std::string& v) {
         RuntimeValue rv; rv.kind = String; rv.strVal = v; return rv;
@@ -50,7 +55,7 @@ public:
     Interpreter(
         const Program& program,
         ir::high_ir::Graph& graph,
-        const std::unordered_map<std::string, int64_t>& configConstants = {});
+        const std::unordered_map<std::string, ConfigValue>& configConstants = {});
     void interpret();
 
 private:

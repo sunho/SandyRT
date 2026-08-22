@@ -238,6 +238,9 @@ Result<std::unique_ptr<Graph>> MidIRMaterializer::materialize(
                         case high_ir::Type::Float:
                             attrs[a.name] = AttrValue::make_float(a.floatVal);
                             break;
+                        case high_ir::Type::DType:
+                            attrs[a.name] = AttrValue::make_dtype(a.dtypeVal);
+                            break;
                         case high_ir::Type::String:
                             attrs[a.name] = AttrValue::make_string(a.strVal);
                             break;
@@ -266,12 +269,12 @@ Result<std::unique_ptr<Graph>> MidIRMaterializer::materialize(
                 break;
             }
             case high_ir::Op::IntConst: {
-                auto* v = builder.createConstantF32(static_cast<float>(op.intVal));
+                auto* v = builder.createUntypedConstantF32(static_cast<float>(op.intVal));
                 value_map[op.results[0]->id] = v;
                 break;
             }
             case high_ir::Op::FloatConst: {
-                auto* v = builder.createConstantF32(static_cast<float>(op.floatVal));
+                auto* v = builder.createUntypedConstantF32(static_cast<float>(op.floatVal));
                 value_map[op.results[0]->id] = v;
                 break;
             }

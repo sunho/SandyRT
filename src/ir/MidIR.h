@@ -53,15 +53,17 @@ const char* op_kind_name(OpKind kind);
 // === Attrs ===
 
 struct AttrValue {
-    enum Kind { Int, Float, String, IntList };
+    enum Kind { Int, Float, DType, String, IntList };
     Kind kind;
     int64_t intVal = 0;
     double floatVal = 0.0;
+    core::DType dtypeVal = core::DType::F32;
     std::string strVal;
     std::vector<int64_t> intListVal;
 
     static AttrValue make_int(int64_t v);
     static AttrValue make_float(double v);
+    static AttrValue make_dtype(core::DType v);
     static AttrValue make_string(const std::string& v);
     static AttrValue make_int_list(std::vector<int64_t> v);
 };
@@ -215,6 +217,7 @@ public:
     Value* createTensorTupleCreate(std::span<Value* const> elements);
     Value* createWeight(const std::string& name, core::Shape shape, core::DType dtype);
     Value* createConstantF32(float value);
+    Value* createUntypedConstantF32(float value);
 
     Value* createLinear(Value* x, Value* weight, Value* bias);
     Value* createReLU(Value* x);

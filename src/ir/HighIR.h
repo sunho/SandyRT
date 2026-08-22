@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Tensor.h"
+
 #include <cstdint>
 #include <deque>
 #include <string>
@@ -7,7 +9,7 @@
 
 namespace sandy::ir::high_ir {
 
-enum class Type { Tensor, TensorTuple, Int, Float, String, IntList };
+enum class Type { Tensor, TensorTuple, Int, Float, DType, String, IntList };
 
 const char* typeName(Type type);
 
@@ -44,11 +46,13 @@ struct Attr {
     Type type;
     int64_t intVal = 0;
     double floatVal = 0.0;
+    core::DType dtypeVal = core::DType::F32;
     std::string strVal;
     std::vector<int64_t> intListVal;
 
     static Attr fromInt(const std::string& name, int64_t v);
     static Attr fromFloat(const std::string& name, double v);
+    static Attr fromDType(const std::string& name, core::DType v);
     static Attr fromString(const std::string& name, const std::string& v);
     static Attr fromIntList(const std::string& name, std::vector<int64_t> v);
 };

@@ -50,67 +50,67 @@ BuiltinLowering BuiltinLowering::createDefault() {
 
     bl.add("linear", [](Builder& builder,
                          const std::vector<Value*>& operands,
-                         const AttrMap&,
+                         const AttrMap& attrs,
                          int numResults) -> Result<std::vector<Value*>> {
         auto resultCount = expect_num_results("linear", numResults, 1);
         if (!resultCount) return make_error(resultCount.error());
-        return std::vector<Value*>{builder.createLinear(operands[0], operands[1], operands[2])};
+        return builder.createOp(OpKind::Linear, operands, attrs);
     });
 
     bl.add("relu", [](Builder& builder,
                        const std::vector<Value*>& operands,
-                       const AttrMap&,
+                       const AttrMap& attrs,
                        int numResults) -> Result<std::vector<Value*>> {
         auto resultCount = expect_num_results("relu", numResults, 1);
         if (!resultCount) return make_error(resultCount.error());
-        return std::vector<Value*>{builder.createReLU(operands[0])};
+        return builder.createOp(OpKind::ReLU, operands, attrs);
     });
 
     bl.add("add", [](Builder& builder,
                       const std::vector<Value*>& operands,
-                      const AttrMap&,
+                      const AttrMap& attrs,
                       int numResults) -> Result<std::vector<Value*>> {
         auto resultCount = expect_num_results("add", numResults, 1);
         if (!resultCount) return make_error(resultCount.error());
-        return std::vector<Value*>{builder.createAdd(operands[0], operands[1])};
+        return builder.createOp(OpKind::Add, operands, attrs);
     });
 
     bl.add("mul", [](Builder& builder,
                       const std::vector<Value*>& operands,
-                      const AttrMap&,
+                      const AttrMap& attrs,
                       int numResults) -> Result<std::vector<Value*>> {
         auto resultCount = expect_num_results("mul", numResults, 1);
         if (!resultCount) return make_error(resultCount.error());
-        return std::vector<Value*>{builder.createMul(operands[0], operands[1])};
+        return builder.createOp(OpKind::Mul, operands, attrs);
     });
 
     bl.add("div", [](Builder& builder,
                       const std::vector<Value*>& operands,
-                      const AttrMap&,
+                      const AttrMap& attrs,
                       int numResults) -> Result<std::vector<Value*>> {
         auto resultCount = expect_num_results("div", numResults, 1);
         if (!resultCount) return make_error(resultCount.error());
-        return std::vector<Value*>{builder.createDiv(operands[0], operands[1])};
+        return builder.createOp(OpKind::Div, operands, attrs);
     });
 
     bl.add("sqrt", [](Builder& builder,
                        const std::vector<Value*>& operands,
-                       const AttrMap&,
+                       const AttrMap& attrs,
                        int numResults) -> Result<std::vector<Value*>> {
         auto resultCount = expect_num_results("sqrt", numResults, 1);
         if (!resultCount) return make_error(resultCount.error());
-        return std::vector<Value*>{builder.createSqrt(operands[0])};
+        return builder.createOp(OpKind::Sqrt, operands, attrs);
     });
 
     bl.add("tanh", [](Builder& builder,
                        const std::vector<Value*>& operands,
-                       const AttrMap&,
+                       const AttrMap& attrs,
                        int numResults) -> Result<std::vector<Value*>> {
         auto resultCount = expect_num_results("tanh", numResults, 1);
         if (!resultCount) return make_error(resultCount.error());
         if (operands.size() != 1)
             return make_error("tanh expects one operand");
-        return std::vector<Value*>{builder.createTanh(operands[0])};
+        return builder.createOp(OpKind::Tanh, operands, attrs);
     });
 
     bl.add("gelu", [](Builder& builder,
@@ -123,10 +123,10 @@ BuiltinLowering BuiltinLowering::createDefault() {
             return make_error("gelu expects one operand");
 
         auto* x = operands[0];
-        auto* half = builder.createConstantF32(0.5f);
-        auto* one = builder.createConstantF32(1.0f);
-        auto* cubicCoeff = builder.createConstantF32(0.044715f);
-        auto* sqrtTwoOverPi = builder.createConstantF32(0.7978845608028654f);
+        auto* half = builder.createUntypedConstantF32(0.5f);
+        auto* one = builder.createUntypedConstantF32(1.0f);
+        auto* cubicCoeff = builder.createUntypedConstantF32(0.044715f);
+        auto* sqrtTwoOverPi = builder.createUntypedConstantF32(0.7978845608028654f);
 
         auto* x2 = builder.createMul(x, x);
         auto* x3 = builder.createMul(x2, x);
@@ -149,8 +149,8 @@ BuiltinLowering BuiltinLowering::createDefault() {
             return make_error("silu expects one operand");
 
         auto* x = operands[0];
-        auto* half = builder.createConstantF32(0.5f);
-        auto* one = builder.createConstantF32(1.0f);
+        auto* half = builder.createUntypedConstantF32(0.5f);
+        auto* one = builder.createUntypedConstantF32(1.0f);
         auto* halfX = builder.createMul(half, x);
         auto* tanh = builder.createTanh(halfX);
         auto* onePlusTanh = builder.createAdd(one, tanh);
@@ -177,8 +177,8 @@ BuiltinLowering BuiltinLowering::createDefault() {
         if (cap <= 0.0f)
             return make_error("softcap cap must be > 0");
 
-        auto* capConst = builder.createConstantF32(cap);
-        auto* invCap = builder.createConstantF32(1.0f / cap);
+        auto* capConst = builder.createUntypedConstantF32(cap);
+        auto* invCap = builder.createUntypedConstantF32(1.0f / cap);
         auto* scaled = builder.createMul(operands[0], invCap);
         auto* capped = builder.createTanh(scaled);
         return std::vector<Value*>{builder.createMul(capped, capConst)};
@@ -186,11 +186,11 @@ BuiltinLowering BuiltinLowering::createDefault() {
 
     bl.add("matmul", [](Builder& builder,
                          const std::vector<Value*>& operands,
-                         const AttrMap&,
+                         const AttrMap& attrs,
                          int numResults) -> Result<std::vector<Value*>> {
         auto resultCount = expect_num_results("matmul", numResults, 1);
         if (!resultCount) return make_error(resultCount.error());
-        return std::vector<Value*>{builder.createMatMul(operands[0], operands[1])};
+        return builder.createOp(OpKind::MatMul, operands, attrs);
     });
 
     bl.add("transpose", [](Builder& builder,
@@ -255,22 +255,7 @@ BuiltinLowering BuiltinLowering::createDefault() {
                                           int numResults) -> Result<std::vector<Value*>> {
         auto resultCount = expect_num_results("sliding_query_key_score", numResults, 1);
         if (!resultCount) return make_error(resultCount.error());
-        int64_t window = 0;
-        auto it = attrs.find("window");
-        if (it != attrs.end() && it->second.kind == AttrValue::Int)
-            window = it->second.intVal;
-        float scale = -1.0f;
-        auto scaleIt = attrs.find("scale");
-        if (scaleIt != attrs.end()) {
-            if (scaleIt->second.kind != AttrValue::Float)
-                return make_error("sliding_query_key_score scale attr must be float");
-            scale = static_cast<float>(scaleIt->second.floatVal);
-        }
-        if (operands.size() == 2)
-            return std::vector<Value*>{builder.createSlidingQueryKeyScore(operands[0], operands[1], window, scale)};
-        if (operands.size() == 3)
-            return std::vector<Value*>{builder.createSlidingQueryKeyScore(operands[0], operands[1], operands[2], window, scale)};
-        return make_error("sliding_query_key_score expects 2 or 3 operands");
+        return builder.createOp(OpKind::SlidingQueryKeyScore, operands, attrs);
     });
 
     bl.add("softmax", [](Builder& builder,
@@ -279,11 +264,7 @@ BuiltinLowering BuiltinLowering::createDefault() {
                           int numResults) -> Result<std::vector<Value*>> {
         auto resultCount = expect_num_results("softmax", numResults, 1);
         if (!resultCount) return make_error(resultCount.error());
-        int64_t dim = -1;
-        auto it = attrs.find("dim");
-        if (it != attrs.end() && it->second.kind == AttrValue::Int)
-            dim = it->second.intVal;
-        return std::vector<Value*>{builder.createSoftmax(operands[0], dim)};
+        return builder.createOp(OpKind::Softmax, operands, attrs);
     });
 
     bl.add("topk", [](Builder& builder,
@@ -294,11 +275,7 @@ BuiltinLowering BuiltinLowering::createDefault() {
         if (!resultCount) return make_error(resultCount.error());
         if (operands.size() != 1)
             return make_error("topk expects one operand");
-        int64_t k = get_int_attr_or(attrs, "k", 0);
-        if (k <= 0)
-            return make_error("topk k attr must be > 0");
-        int64_t dim = get_int_attr_or(attrs, "dim", -1);
-        return builder.createTopK(operands[0], k, dim);
+        return builder.createOp(OpKind::TopK, operands, attrs, 2);
     });
 
     bl.add("sum", [](Builder& builder,
@@ -309,17 +286,7 @@ BuiltinLowering BuiltinLowering::createDefault() {
         if (!resultCount) return make_error(resultCount.error());
         if (operands.size() != 1)
             return make_error("sum expects one operand");
-        int64_t dim = get_int_attr_or(attrs, "dim", -1);
-        bool keepDims = false;
-        auto keepDim = attrs.find("keepdim");
-        if (keepDim == attrs.end())
-            keepDim = attrs.find("keepdims");
-        if (keepDim != attrs.end()) {
-            if (keepDim->second.kind != AttrValue::Int)
-                return make_error("sum keepdim attr must be int");
-            keepDims = keepDim->second.intVal != 0;
-        }
-        return std::vector<Value*>{builder.createSum(operands[0], dim, keepDims)};
+        return builder.createOp(OpKind::Sum, operands, attrs);
     });
 
     bl.add("attention", [](Builder& builder,
@@ -330,20 +297,16 @@ BuiltinLowering BuiltinLowering::createDefault() {
         if (!resultCount) return make_error(resultCount.error());
         if (operands.size() != 3 && operands.size() != 4)
             return make_error("attention expects operands (q, k, v[, position_offsets])");
-        int64_t window = get_int_attr_or(attrs, "window", 0);
-        float scale = get_float_attr_or(attrs, "scale", -1.0f);
-        if (operands.size() == 4)
-            return std::vector<Value*>{builder.createAttention(operands[0], operands[1], operands[2], operands[3], window, scale)};
-        return std::vector<Value*>{builder.createAttention(operands[0], operands[1], operands[2], window, scale)};
+        return builder.createOp(OpKind::Attention, operands, attrs);
     });
 
     bl.add("embedding", [](Builder& builder,
                             const std::vector<Value*>& operands,
-                            const AttrMap&,
+                            const AttrMap& attrs,
                             int numResults) -> Result<std::vector<Value*>> {
         auto resultCount = expect_num_results("embedding", numResults, 1);
         if (!resultCount) return make_error(resultCount.error());
-        return std::vector<Value*>{builder.createEmbedding(operands[0], operands[1])};
+        return builder.createOp(OpKind::Embedding, operands, attrs);
     });
 
     bl.add("moe_gather", [](Builder& builder,
@@ -369,25 +332,18 @@ BuiltinLowering BuiltinLowering::createDefault() {
         if (!resultCount) return make_error(resultCount.error());
         if (operands.size() != 3)
             return make_error("moe_matmul expects x, expert_offsets, weight");
-        bool transposeRhs = false;
-        auto transposeIt = attrs.find("transpose_rhs");
-        if (transposeIt != attrs.end()) {
-            if (transposeIt->second.kind != AttrValue::Int)
-                return make_error("moe_matmul transpose_rhs attr must be int");
-            transposeRhs = transposeIt->second.intVal != 0;
-        }
-        return std::vector<Value*>{builder.createMoeMatMul(operands[0], operands[1], operands[2], transposeRhs)};
+        return builder.createOp(OpKind::MoeMatMul, operands, attrs);
     });
 
     bl.add("moe_scatter_sum", [](Builder& builder,
                                   const std::vector<Value*>& operands,
-                                  const AttrMap&,
+                                  const AttrMap& attrs,
                                   int numResults) -> Result<std::vector<Value*>> {
         auto resultCount = expect_num_results("moe_scatter_sum", numResults, 1);
         if (!resultCount) return make_error(resultCount.error());
         if (operands.size() != 4)
             return make_error("moe_scatter_sum expects packed_out, packed_weights, token_ids, reference");
-        return std::vector<Value*>{builder.createMoeScatterSum(operands[0], operands[1], operands[2], operands[3])};
+        return builder.createOp(OpKind::MoeScatterSum, operands, attrs);
     });
 
     bl.add("rope", [](Builder& builder,
@@ -398,29 +354,13 @@ BuiltinLowering BuiltinLowering::createDefault() {
         if (!resultCount) return make_error(resultCount.error());
         if (operands.size() != 1 && operands.size() != 2)
             return make_error("rope expects one or two operands");
-        float theta = 10000.0f;
+        AttrMap normalizedAttrs = attrs;
         auto it = attrs.find("theta");
-        if (it == attrs.end())
-            it = attrs.find("rope_theta");
-        if (it != attrs.end() && it->second.kind == AttrValue::Float)
-            theta = static_cast<float>(it->second.floatVal);
-        int64_t rotaryDim = -1;
-        auto rotaryIt = attrs.find("rotary_dim");
-        if (rotaryIt != attrs.end()) {
-            if (rotaryIt->second.kind != AttrValue::Int)
-                return make_error("rope rotary_dim attr must be int");
-            rotaryDim = rotaryIt->second.intVal;
+        if (it != attrs.end()) {
+            normalizedAttrs["rope_theta"] = it->second;
+            normalizedAttrs.erase("theta");
         }
-        bool splitHalf = false;
-        auto splitIt = attrs.find("split_half");
-        if (splitIt != attrs.end()) {
-            if (splitIt->second.kind != AttrValue::Int)
-                return make_error("rope split_half attr must be int");
-            splitHalf = splitIt->second.intVal != 0;
-        }
-        if (operands.size() == 2)
-            return std::vector<Value*>{builder.createRoPE(operands[0], operands[1], theta, rotaryDim, splitHalf)};
-        return std::vector<Value*>{builder.createRoPE(operands[0], theta, rotaryDim, splitHalf)};
+        return builder.createOp(OpKind::RoPE, operands, normalizedAttrs);
     });
 
     bl.add("rms_norm", [](Builder& builder,
@@ -429,16 +369,7 @@ BuiltinLowering BuiltinLowering::createDefault() {
                            int numResults) -> Result<std::vector<Value*>> {
         auto resultCount = expect_num_results("rms_norm", numResults, 1);
         if (!resultCount) return make_error(resultCount.error());
-        float epsilon = 1.0e-6f;
-        auto it = attrs.find("epsilon");
-        if (it != attrs.end() && it->second.kind == AttrValue::Float) {
-            epsilon = static_cast<float>(it->second.floatVal);
-        }
-        if (operands.size() == 1)
-            return std::vector<Value*>{builder.createRMSNorm(operands[0], epsilon)};
-        if (operands.size() == 2)
-            return std::vector<Value*>{builder.createRMSNorm(operands[0], operands[1], epsilon)};
-        return make_error("rms_norm expects operands (x[, weight])");
+        return builder.createOp(OpKind::RMSNorm, operands, attrs);
     });
 
     bl.add("layer_norm", [](Builder& builder,
@@ -449,13 +380,7 @@ BuiltinLowering BuiltinLowering::createDefault() {
         if (!resultCount) return make_error(resultCount.error());
         if (operands.size() != 3)
             return make_error("layer_norm expects operands (x, weight, bias)");
-        float epsilon = 1.0e-5f;
-        auto it = attrs.find("epsilon");
-        if (it != attrs.end() && it->second.kind == AttrValue::Float) {
-            epsilon = static_cast<float>(it->second.floatVal);
-        }
-        return std::vector<Value*>{builder.createLayerNorm(
-            operands[0], operands[1], operands[2], epsilon)};
+        return builder.createOp(OpKind::LayerNorm, operands, attrs);
     });
 
     return bl;

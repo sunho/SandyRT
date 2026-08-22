@@ -3,6 +3,7 @@
 #include "HighIR.h"
 #include "MidIRMaterializer.h"
 #include "Result.h"
+#include "ConfigValue.h"
 #include "Weight.h"
 
 #include <cstdint>
@@ -13,7 +14,7 @@
 namespace sandy {
 
 struct SandyGoCompileOptions {
-    std::unordered_map<std::string, int64_t> configConstants;
+    std::unordered_map<std::string, sandygo::ConfigValue> configConstants;
 };
 
 class Compiler {

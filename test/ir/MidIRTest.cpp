@@ -58,16 +58,41 @@ TEST_F(MidIRTest, ReLUTypeInference) {
     EXPECT_EQ(out->dtype, x->dtype);
 }
 
-TEST_F(MidIRTest, BinaryElementwiseAllowsScalarDTypeMismatch) {
+TEST_F(MidIRTest, BinaryElementwiseAllowsUntypedScalarLiteral) {
     sandy::ir::mid_ir::Graph graph;
     sandy::ir::mid_ir::Builder builder(graph);
 
     auto* x = builder.createInput(0, sandy::core::Shape({4, 128}), sandy::core::DType::BF16);
-    auto* scale = builder.createConstantF32(0.5f);
+    auto* scale = builder.createUntypedConstantF32(0.5f);
     auto* out = builder.createMul(x, scale);
 
     EXPECT_EQ(out->shape, x->shape);
     EXPECT_EQ(out->dtype, sandy::core::DType::BF16);
+}
+
+TEST_F(MidIRTest, ExplicitDTypeControlsStorageWithoutChangingShape) {
+    sandy::ir::mid_ir::Graph graph;
+    sandy::ir::mid_ir::Builder builder(graph);
+
+    auto* lhs = builder.createInput(0, sandy::core::Shape({2, 4}), sandy::core::DType::BF16);
+    auto* rhs = builder.createWeight("w", sandy::core::Shape({4, 3}), sandy::core::DType::F32);
+    sandy::ir::mid_ir::Value* operands[] = {lhs, rhs};
+    sandy::ir::mid_ir::AttrMap attrs;
+    attrs["dtype"] = sandy::ir::mid_ir::AttrValue::make_dtype(sandy::core::DType::BF16);
+    auto* out = builder.createOp(sandy::ir::mid_ir::OpKind::MatMul, operands, attrs)[0];
+
+    EXPECT_EQ(out->shape, sandy::core::Shape({2, 3}));
+    EXPECT_EQ(out->dtype, sandy::core::DType::BF16);
+}
+
+TEST_F(MidIRTest, TypedScalarMismatchRequiresExplicitDType) {
+    EXPECT_DEATH({
+        sandy::ir::mid_ir::Graph graph;
+        sandy::ir::mid_ir::Builder builder(graph);
+        auto* x = builder.createInput(0, sandy::core::Shape({4}), sandy::core::DType::BF16);
+        auto* typedScalar = builder.createConstantF32(0.5f);
+        (void)builder.createMul(x, typedScalar);
+    }, "mixed data operand dtypes require explicit dtype");
 }
 
 TEST_F(MidIRTest, RMSNormTypeInference) {

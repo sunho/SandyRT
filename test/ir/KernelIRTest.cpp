@@ -376,7 +376,7 @@ TEST_F(MidIRToKernelIRTest, LowersConstantAndScalarBroadcastMul) {
 
     auto* input = builder.createInput(
         0, sandy::core::Shape({2, 3}), sandy::core::DType::BF16);
-    auto* scale = builder.createConstantF32(0.5f);
+    auto* scale = builder.createUntypedConstantF32(0.5f);
     auto* mul = builder.createMul(input, scale);
     mid_ir::Value* outputs[] = {mul};
     builder.setOutputs(outputs);
@@ -446,7 +446,7 @@ TEST_F(MidIRToKernelIRTest, ElementwiseFusorInlinesScalarConstant) {
 
     auto* input = builder.createInput(
         0, sandy::core::Shape({2, 3}), sandy::core::DType::BF16);
-    auto* scale = builder.createConstantF32(0.5f);
+    auto* scale = builder.createUntypedConstantF32(0.5f);
     auto* mul = builder.createMul(input, scale);
     auto* tanh = builder.createTanh(mul);
     mid_ir::Value* outputs[] = {tanh};

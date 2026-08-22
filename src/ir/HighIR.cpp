@@ -10,6 +10,7 @@ const char* typeName(Type type) {
         case Type::TensorTuple: return "tensor_tuple";
         case Type::Int: return "int";
         case Type::Float: return "float";
+        case Type::DType: return "dtype";
         case Type::String: return "string";
         case Type::IntList: return "int_list";
     }
@@ -22,6 +23,10 @@ Attr Attr::fromInt(const std::string& name, int64_t v) {
 
 Attr Attr::fromFloat(const std::string& name, double v) {
     Attr a; a.name = name; a.type = Type::Float; a.floatVal = v; return a;
+}
+
+Attr Attr::fromDType(const std::string& name, core::DType v) {
+    Attr a; a.name = name; a.type = Type::DType; a.dtypeVal = v; return a;
 }
 
 Attr Attr::fromString(const std::string& name, const std::string& v) {
@@ -227,6 +232,7 @@ static void printAttrVal(const Attr& a) {
     switch (a.type) {
         case Type::Int: std::cout << a.intVal; break;
         case Type::Float: std::cout << a.floatVal; break;
+        case Type::DType: std::cout << core::dtype_name(a.dtypeVal); break;
         case Type::String: std::cout << "\"" << a.strVal << "\""; break;
         case Type::IntList:
             std::cout << "[";
