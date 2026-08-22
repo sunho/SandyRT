@@ -10,6 +10,8 @@ namespace sandy::device {
 namespace {
 
 constexpr size_t kScratchAlignment = 256;
+constexpr size_t kVectorLoadAlignment = 16;
+static_assert(kScratchAlignment % kVectorLoadAlignment == 0);
 
 Result<size_t> tensorBytes(const core::TensorDesc& desc) {
     auto numel = desc.shape.numel();
@@ -80,6 +82,11 @@ Result<DeviceScratchAllocation> CudaScratchAllocator::finalize() {
             return make_error(view.error());
         }
         auto elementBytes = core::dtype_size(placement.desc.dtype);
+        if (placement.byteOffset % kVectorLoadAlignment != 0) {
+            auto deallocated = device_.dealloc(result.buffer);
+            if (!deallocated) return make_error(deallocated.error());
+            return make_error("CUDA scratch placement is not vector-load aligned");
+        }
         if (placement.byteOffset % elementBytes != 0) {
             auto deallocated = device_.dealloc(result.buffer);
             if (!deallocated) return make_error(deallocated.error());
@@ -93,4 +100,3 @@ Result<DeviceScratchAllocation> CudaScratchAllocator::finalize() {
 }
 
 } // namespace sandy::device
-

@@ -353,16 +353,53 @@ __global__ void flash_attention_prefill_gqa_kernel(DeviceAttentionProgram progra
 
             const void* kData = reinterpret_cast<const void*>(kDataBits);
             const void* vData = reinterpret_cast<const void*>(vDataBits);
-            for (int dim = lane; dim < HeadDim; dim += 32) {
-                int tileIndex = keyOffset * HeadDim + dim;
-                kTile[tileIndex] = cuda_kernel::load_float_at_storage(
-                    kData,
-                    program.k.dtype,
-                    kStorageBase + dim);
-                vTile[tileIndex] = cuda_kernel::load_float_at_storage(
-                    vData,
-                    program.v.dtype,
-                    vStorageBase + dim);
+            const uint16_t* kBf16Row = static_cast<const uint16_t*>(kData) +
+                kStorageBase;
+            const uint16_t* vBf16Row = static_cast<const uint16_t*>(vData) +
+                vStorageBase;
+            bool vectorBf16 = program.k.dtype == core::DType::BF16 &&
+                program.v.dtype == core::DType::BF16 &&
+                (reinterpret_cast<uintptr_t>(kBf16Row) & 15u) == 0 &&
+                (reinterpret_cast<uintptr_t>(vBf16Row) & 15u) == 0;
+            if (vectorBf16) {
+                constexpr int kBf16PerVector = sizeof(uint4) / sizeof(uint16_t);
+                const uint4* kVectors = reinterpret_cast<const uint4*>(kBf16Row);
+                const uint4* vVectors = reinterpret_cast<const uint4*>(vBf16Row);
+                #pragma unroll
+                for (int vectorIndex = lane;
+                     vectorIndex < HeadDim / kBf16PerVector;
+                     vectorIndex += 32) {
+                    uint4 kPacked = kVectors[vectorIndex];
+                    uint4 vPacked = vVectors[vectorIndex];
+                    int firstDim = vectorIndex * kBf16PerVector;
+                    #pragma unroll
+                    for (int word = 0; word < 4; ++word) {
+                        uint32_t kBits = reinterpret_cast<uint32_t*>(&kPacked)[word];
+                        uint32_t vBits = reinterpret_cast<uint32_t*>(&vPacked)[word];
+                        int dim = firstDim + word * 2;
+                        int tileIndex = keyOffset * HeadDim + dim;
+                        kTile[tileIndex] = cuda_kernel::bf16_bits_to_float(
+                            static_cast<uint16_t>(kBits));
+                        kTile[tileIndex + 1] = cuda_kernel::bf16_bits_to_float(
+                            static_cast<uint16_t>(kBits >> 16));
+                        vTile[tileIndex] = cuda_kernel::bf16_bits_to_float(
+                            static_cast<uint16_t>(vBits));
+                        vTile[tileIndex + 1] = cuda_kernel::bf16_bits_to_float(
+                            static_cast<uint16_t>(vBits >> 16));
+                    }
+                }
+            } else {
+                for (int dim = lane; dim < HeadDim; dim += 32) {
+                    int tileIndex = keyOffset * HeadDim + dim;
+                    kTile[tileIndex] = cuda_kernel::load_float_at_storage(
+                        kData,
+                        program.k.dtype,
+                        kStorageBase + dim);
+                    vTile[tileIndex] = cuda_kernel::load_float_at_storage(
+                        vData,
+                        program.v.dtype,
+                        vStorageBase + dim);
+                }
             }
         }
         __syncthreads();

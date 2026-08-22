@@ -3,11 +3,18 @@
 #include "CudaRuntime.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <cstring>
 #include <limits>
 #include <utility>
 
 namespace sandy::device {
+
+namespace {
+
+constexpr uintptr_t kPagedVectorLoadAlignment = 16;
+
+} // namespace
 
 namespace {
 
@@ -253,6 +260,13 @@ Result<uint32_t> CudaPagedTensorPool::allocate_page(cudaStream_t stream) {
         "cudaMallocAsync paged pool page");
     if (!allocated)
         return make_error(allocated.error());
+    if ((reinterpret_cast<uintptr_t>(data) & (kPagedVectorLoadAlignment - 1)) != 0) {
+        (void)cuda_free_stream_ordered(
+            data,
+            stream,
+            "cudaFreeAsync misaligned paged pool page");
+        return make_error("CUDA paged pool page is not vector-load aligned");
+    }
     pages_.push_back(Page{data});
     return static_cast<uint32_t>(pages_.size() - 1);
 }
