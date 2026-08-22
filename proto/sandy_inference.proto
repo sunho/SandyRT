@@ -6,6 +6,7 @@ service SandyInference {
   rpc Health(HealthRequest) returns (HealthResponse);
   rpc ModelInfo(ModelInfoRequest) returns (ModelInfoResponse);
   rpc Generate(GenerateRequest) returns (GenerateResponse);
+  rpc GenerateStream(GenerateRequest) returns (stream GenerateStreamResponse);
 }
 
 message HealthRequest {}
@@ -39,4 +40,27 @@ message GenerateResponse {
   int32 prompt_tokens = 4;
   int32 completion_tokens = 5;
   string error = 6;
+}
+
+message GenerateStreamResponse {
+  string request_id = 1;
+  oneof event {
+    GenerateToken token = 2;
+    GenerateDone done = 3;
+    GenerateError error = 4;
+  }
+}
+
+message GenerateToken {
+  int64 token_id = 1;
+}
+
+message GenerateDone {
+  string finish_reason = 1;
+  int32 prompt_tokens = 2;
+  int32 completion_tokens = 3;
+}
+
+message GenerateError {
+  string message = 1;
 }

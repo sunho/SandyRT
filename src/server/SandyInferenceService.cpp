@@ -1,13 +1,60 @@
 #include "SandyInferenceService.h"
 
+#include <chrono>
 #include <cstdint>
+#include <optional>
 #include <utility>
 #include <vector>
 
 namespace sandy::server {
 
-SandyInferenceService::SandyInferenceService(std::shared_ptr<Model> model)
-    : model_(std::move(model)) {}
+namespace {
+
+RequestControl make_request_control(
+        grpc::ServerContext* context,
+        std::chrono::milliseconds timeout) {
+    RequestControl control;
+    control.submittedAt = RequestControl::Clock::now();
+    if (timeout.count() > 0)
+        control.deadline = control.submittedAt + timeout;
+    control.clientCancelled = [context]() { return context->IsCancelled(); };
+    return control;
+}
+
+SamplingOverrides sampling_overrides(const GenerateRequest& request) {
+    return SamplingOverrides{
+        request.has_top_p() ? std::optional<float>(request.top_p()) : std::nullopt,
+        request.has_temperature()
+            ? std::optional<float>(request.temperature())
+            : std::nullopt};
+}
+
+std::vector<int64_t> copy_input_ids(const GenerateRequest& request) {
+    return {request.input_ids().begin(), request.input_ids().end()};
+}
+
+std::vector<int64_t> copy_stop_token_ids(const GenerateRequest& request) {
+    return {request.stop_token_ids().begin(), request.stop_token_ids().end()};
+}
+
+grpc::Status stopped_status(RequestStopReason reason) {
+    if (reason == RequestStopReason::DeadlineExceeded) {
+        return grpc::Status(
+            grpc::StatusCode::DEADLINE_EXCEEDED,
+            requestStopMessage(reason));
+    }
+    return grpc::Status(
+        grpc::StatusCode::CANCELLED,
+        requestStopMessage(RequestStopReason::ClientCancelled));
+}
+
+} // namespace
+
+SandyInferenceService::SandyInferenceService(
+        std::shared_ptr<Model> model,
+        std::chrono::milliseconds requestTimeout)
+    : model_(std::move(model)),
+      requestTimeout_(requestTimeout) {}
 
 grpc::Status SandyInferenceService::Health(
         grpc::ServerContext*,
@@ -33,9 +80,10 @@ grpc::Status SandyInferenceService::ModelInfo(
 }
 
 grpc::Status SandyInferenceService::Generate(
-        grpc::ServerContext*,
+        grpc::ServerContext* context,
         const GenerateRequest* request,
         GenerateResponse* response) {
+    auto control = make_request_control(context, requestTimeout_);
     auto logger = model_
         ? RequestLogger::create(model_->config().logging, request->request_id())
         : nullptr;
@@ -91,12 +139,12 @@ grpc::Status SandyInferenceService::Generate(
         request->max_tokens(),
         stopTokenIds,
         logger.get(),
-        SamplingOverrides{
-            request->has_top_p() ? std::optional<float>(request->top_p()) : std::nullopt,
-            request->has_temperature()
-                ? std::optional<float>(request->temperature())
-                : std::nullopt});
+        sampling_overrides(*request),
+        &control);
     if (!generated) {
+        auto reason = control.stopReason();
+        if (reason != RequestStopReason::None)
+            return stopped_status(reason);
         response->set_error(generated.error());
         if (logger) {
             logger->logf(
@@ -107,6 +155,9 @@ grpc::Status SandyInferenceService::Generate(
     }
 
     auto result = generated.take();
+    auto reason = control.stopReason();
+    if (reason != RequestStopReason::None)
+        return stopped_status(reason);
     {
         ServerStageScope responseTimer(
             logger.get(),
@@ -126,6 +177,70 @@ grpc::Status SandyInferenceService::Generate(
             result.promptTokens,
             result.completionTokens);
     }
+    return grpc::Status::OK;
+}
+
+grpc::Status SandyInferenceService::GenerateStream(
+        grpc::ServerContext* context,
+        const GenerateRequest* request,
+        grpc::ServerWriter<GenerateStreamResponse>* writer) {
+    auto control = make_request_control(context, requestTimeout_);
+    auto logger = model_
+        ? RequestLogger::create(model_->config().logging, request->request_id())
+        : nullptr;
+    if (!model_)
+        return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "model not loaded");
+
+    bool writeFailed = false;
+    auto onToken = [&](int64_t tokenId) {
+        if (control.stopReason() != RequestStopReason::None)
+            return false;
+        GenerateStreamResponse event;
+        event.set_request_id(request->request_id());
+        event.mutable_token()->set_token_id(tokenId);
+        if (!writer->Write(event)) {
+            writeFailed = true;
+            return false;
+        }
+        return true;
+    };
+
+    auto generated = model_->generate(
+        request->request_id(),
+        copy_input_ids(*request),
+        request->max_tokens(),
+        copy_stop_token_ids(*request),
+        logger.get(),
+        sampling_overrides(*request),
+        &control,
+        onToken);
+    if (!generated) {
+        auto reason = control.stopReason();
+        if (reason != RequestStopReason::None)
+            return stopped_status(reason);
+        if (writeFailed)
+            return stopped_status(RequestStopReason::ClientCancelled);
+
+        GenerateStreamResponse event;
+        event.set_request_id(request->request_id());
+        event.mutable_error()->set_message(generated.error());
+        if (!writer->Write(event))
+            return stopped_status(RequestStopReason::ClientCancelled);
+        return grpc::Status::OK;
+    }
+
+    auto reason = control.stopReason();
+    if (reason != RequestStopReason::None)
+        return stopped_status(reason);
+
+    GenerateStreamResponse event;
+    event.set_request_id(request->request_id());
+    auto* done = event.mutable_done();
+    done->set_finish_reason(generated->finishReason);
+    done->set_prompt_tokens(generated->promptTokens);
+    done->set_completion_tokens(generated->completionTokens);
+    if (!writer->Write(event))
+        return stopped_status(RequestStopReason::ClientCancelled);
     return grpc::Status::OK;
 }
 

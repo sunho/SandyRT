@@ -49,6 +49,11 @@ class SandyInferenceStub:
                 request_serializer=sandy__inference__pb2.GenerateRequest.SerializeToString,
                 response_deserializer=sandy__inference__pb2.GenerateResponse.FromString,
                 _registered_method=True)
+        self.GenerateStream = channel.unary_stream(
+                '/sandy.server.SandyInference/GenerateStream',
+                request_serializer=sandy__inference__pb2.GenerateRequest.SerializeToString,
+                response_deserializer=sandy__inference__pb2.GenerateStreamResponse.FromString,
+                _registered_method=True)
 
 
 class SandyInferenceServicer:
@@ -72,6 +77,12 @@ class SandyInferenceServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def GenerateStream(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_SandyInferenceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -89,6 +100,11 @@ def add_SandyInferenceServicer_to_server(servicer, server):
                     servicer.Generate,
                     request_deserializer=sandy__inference__pb2.GenerateRequest.FromString,
                     response_serializer=sandy__inference__pb2.GenerateResponse.SerializeToString,
+            ),
+            'GenerateStream': grpc.unary_stream_rpc_method_handler(
+                    servicer.GenerateStream,
+                    request_deserializer=sandy__inference__pb2.GenerateRequest.FromString,
+                    response_serializer=sandy__inference__pb2.GenerateStreamResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -172,6 +188,33 @@ class SandyInference:
             '/sandy.server.SandyInference/Generate',
             sandy__inference__pb2.GenerateRequest.SerializeToString,
             sandy__inference__pb2.GenerateResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GenerateStream(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_stream(
+            request,
+            target,
+            '/sandy.server.SandyInference/GenerateStream',
+            sandy__inference__pb2.GenerateRequest.SerializeToString,
+            sandy__inference__pb2.GenerateStreamResponse.FromString,
             options,
             channel_credentials,
             insecure,

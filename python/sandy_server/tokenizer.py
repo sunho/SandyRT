@@ -69,4 +69,35 @@ def _fallback_chat_prompt(tokenizer, messages: list[dict[str, str]]) -> str:
 
 
 def decode_tokens(tokenizer, ids: list[int]) -> str:
-    return tokenizer.decode(ids, skip_special_tokens=True)
+    return tokenizer.decode(
+        ids,
+        skip_special_tokens=True,
+        clean_up_tokenization_spaces=False,
+    )
+
+
+class IncrementalTokenDecoder:
+    def __init__(self, tokenizer):
+        self._tokenizer = tokenizer
+        self._ids: list[int] = []
+        self._emitted = ""
+
+    def push(self, token_id: int) -> str:
+        self._ids.append(token_id)
+        decoded = decode_tokens(self._tokenizer, self._ids)
+        if not decoded.startswith(self._emitted):
+            return ""
+        delta = decoded[len(self._emitted):]
+        replacement = delta.find("\ufffd")
+        if replacement >= 0:
+            delta = delta[:replacement]
+        self._emitted += delta
+        return delta
+
+    def finish(self) -> str:
+        decoded = decode_tokens(self._tokenizer, self._ids)
+        if not decoded.startswith(self._emitted):
+            return ""
+        delta = decoded[len(self._emitted):]
+        self._emitted = decoded
+        return delta

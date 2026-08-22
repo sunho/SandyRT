@@ -1,4 +1,5 @@
 add_executable(sandy_grpc_worker
+  GenerationGate.cpp
   HostTensorBuffer.cpp
   Logger.cpp
   Model.cpp

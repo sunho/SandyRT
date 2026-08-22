@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 import uuid
+import json
 from typing import Any
 
 
@@ -51,3 +52,33 @@ def chat_completion_response(
             "total_tokens": prompt_tokens + completion_tokens,
         },
     }
+
+
+def chat_completion_chunk(
+        completion_id: str,
+        model_id: str,
+        created: int,
+        delta: dict[str, Any] | None = None,
+        finish_reason: str | None = None,
+        usage: dict[str, int] | None = None) -> dict[str, Any]:
+    choices: list[dict[str, Any]] = []
+    if delta is not None or finish_reason is not None:
+        choices.append({
+            "index": 0,
+            "delta": delta or {},
+            "finish_reason": finish_reason,
+        })
+    return {
+        "id": completion_id,
+        "object": "chat.completion.chunk",
+        "created": created,
+        "model": model_id,
+        "choices": choices,
+        "usage": usage,
+    }
+
+
+def sse_data(payload: dict[str, Any] | str) -> str:
+    if isinstance(payload, str):
+        return f"data: {payload}\n\n"
+    return "data: " + json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n\n"

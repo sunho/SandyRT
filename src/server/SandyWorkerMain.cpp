@@ -3,6 +3,7 @@
 
 #include <grpcpp/grpcpp.h>
 
+#include <chrono>
 #include <cstdio>
 #include <memory>
 #include <string>
@@ -20,6 +21,7 @@ struct Args {
     int eosTokenId = -1;
     int maxContextTokens = 0;
     int prefillChunkTokens = sandy::server::kDefaultPrefillChunkTokens;
+    int requestTimeoutMs = 300000;
     bool debug = false;
     bool profile = false;
     std::string logDir = "logs/requests";
@@ -31,6 +33,7 @@ void usage(const char* argv0) {
         "[--prefill-model <prefill.sandy.go>] [--prefill-chunk-tokens <n>] "
         "[--listen <addr>] [--model-id <id>] [--architecture <name>] "
         "[--eos-token-id <id>] [--max-context-tokens <n>] "
+        "[--request-timeout-ms <n>] "
         "[--debug] [--profile] [--log-dir <dir>]\n",
         argv0);
 }
@@ -82,6 +85,11 @@ bool parse_args(int argc, char* argv[], Args& args) {
         } else if (arg == "--max-context-tokens") {
             std::string value;
             if (!require_value(value) || !parse_int(value, args.maxContextTokens)) return false;
+        } else if (arg == "--request-timeout-ms") {
+            std::string value;
+            if (!require_value(value) || !parse_int(value, args.requestTimeoutMs)) return false;
+            if (args.requestTimeoutMs < 0)
+                return false;
         } else if (arg == "--debug") {
             args.debug = true;
         } else if (arg == "--profile") {
@@ -127,7 +135,9 @@ int main(int argc, char* argv[]) {
     }
 
     auto model = std::shared_ptr<sandy::server::Model>(modelResult.take().release());
-    sandy::server::SandyInferenceService service(model);
+    sandy::server::SandyInferenceService service(
+        model,
+        std::chrono::milliseconds(args.requestTimeoutMs));
 
     grpc::ServerBuilder builder;
     int selectedPort = 0;
@@ -152,6 +162,9 @@ int main(int argc, char* argv[]) {
         args.debug || args.profile ? 1 : 0,
         args.profile ? 1 : 0,
         args.logDir.c_str());
+    std::fprintf(stderr,
+        "sandy_grpc_worker request_timeout_ms=%d\n",
+        args.requestTimeoutMs);
     server->Wait();
     return 0;
 }

@@ -4,17 +4,21 @@
 #include "Engine.h"
 #include "EngineTypes.h"
 #include "Logger.h"
+#include "RequestControl.h"
 #include "Result.h"
 #include "Sampler.h"
 #include "Tensor.h"
 
 #include <cstdint>
+#include <functional>
 #include <span>
 #include <string>
 #include <unordered_set>
 #include <vector>
 
 namespace sandy::server {
+
+using TokenCallback = std::function<bool(int64_t)>;
 
 inline constexpr int32_t kDefaultPrefillChunkTokens = 2048;
 
@@ -60,7 +64,9 @@ public:
     Result<GenerateResult> generate(
         const std::vector<int64_t>& inputIds,
         int32_t maxTokens,
-        const std::vector<int64_t>& stopTokenIds);
+        const std::vector<int64_t>& stopTokenIds,
+        const RequestControl* control = nullptr,
+        TokenCallback onToken = {});
 
 private:
     struct CacheGroup {
@@ -96,6 +102,7 @@ private:
         const std::string& phase,
         bool useSampling);
     bool shouldStop(int64_t token, const std::unordered_set<int64_t>& stopTokens) const;
+    Result<void> checkRequest(const RequestControl* control) const;
     void destroyCaches();
 
     device::Device& device_;

@@ -177,7 +177,9 @@ set_target_properties(engine_tests PROPERTIES
 gtest_discover_tests(engine_tests)
 
 add_executable(server_sampler_tests
+  server/GenerationGateTest.cpp
   server/SamplerTest.cpp
+  ${PROJECT_SOURCE_DIR}/src/server/GenerationGate.cpp
   ${PROJECT_SOURCE_DIR}/src/server/HostTensorBuffer.cpp
   ${PROJECT_SOURCE_DIR}/src/server/Sampler.cpp
 )

@@ -2574,6 +2574,104 @@ TEST(CudaDeviceTest, RunTopKBF16LastDim) {
     expect_i64_output(device, *indicesBuffer, {1, 2});
 }
 
+TEST(CudaDeviceTest, RunTopKF32LargeLastDimKRange) {
+    if (auto reason = cuda_device_skip_reason(); !reason.empty())
+        GTEST_SKIP() << reason;
+    namespace kir = sandy::ir::kernel_ir;
+
+    constexpr int64_t rows = 2;
+    constexpr int64_t axis = 8193;
+    std::vector<float> input(static_cast<size_t>(rows * axis));
+    for (int64_t row = 0; row < rows; ++row) {
+        for (int64_t column = 0; column < axis; ++column) {
+            // Deliberate ties exercise the token-index tie-break across tiles.
+            input[static_cast<size_t>(row * axis + column)] =
+                static_cast<float>((column * 7919 + row * 17) % 997);
+        }
+    }
+
+    for (int64_t k : {2, 32, 33, 64}) {
+        SCOPED_TRACE("k=" + std::to_string(k));
+
+        kir::Graph graph;
+        auto x = graph.addValue(tensor_type({rows, axis}));
+        graph.addOp<kir::InputOp>(
+            kir::InputSource{kir::InputSourceKind::Argument, 0, ""},
+            x);
+        auto values = graph.addValue(tensor_type({rows, k}));
+        auto indices = graph.addValue(tensor_type({rows, k}, sandy::core::DType::I64));
+        auto* op = graph.addOp<kir::TopKKernelOp>(x, values, indices, k, -1);
+        graph.setOutputs({values, indices});
+
+        sandy::device::CudaDevice device;
+        auto compiled = device.compile(graph);
+        ASSERT_TRUE(compiled) << compiled.error();
+        auto xHost = make_f32_buffer("x", sandy::core::Shape({rows, axis}), input);
+        auto xBuffer = device.load(*xHost);
+        ASSERT_TRUE(xBuffer) << xBuffer.error();
+        auto valuesBuffer = device.alloc(
+            sandy::core::TensorDesc({rows, k}, sandy::core::DType::F32));
+        ASSERT_TRUE(valuesBuffer) << valuesBuffer.error();
+        auto indicesBuffer = device.alloc(
+            sandy::core::TensorDesc({rows, k}, sandy::core::DType::I64));
+        ASSERT_TRUE(indicesBuffer) << indicesBuffer.error();
+
+        std::vector<sandy::device::DeviceRunValue> inputs = {
+            tensor_view(device, *xBuffer, xHost->desc()),
+        };
+        std::vector<sandy::device::DeviceRunValue> outputs = {
+            tensor_view(
+                device,
+                *valuesBuffer,
+                sandy::core::TensorDesc({rows, k}, sandy::core::DType::F32)),
+            tensor_view(
+                device,
+                *indicesBuffer,
+                sandy::core::TensorDesc({rows, k}, sandy::core::DType::I64)),
+        };
+        auto run = device.run(*compiled, op->id(), inputs, outputs);
+        ASSERT_TRUE(run) << run.error();
+
+        auto actualValues = device.read(*valuesBuffer);
+        ASSERT_TRUE(actualValues) << actualValues.error();
+        auto actualIndices = device.read(*indicesBuffer);
+        ASSERT_TRUE(actualIndices) << actualIndices.error();
+        auto valueAccess = (*actualValues)->access();
+        ASSERT_TRUE(valueAccess) << valueAccess.error();
+        auto indexAccess = (*actualIndices)->access();
+        ASSERT_TRUE(indexAccess) << indexAccess.error();
+
+        for (int64_t row = 0; row < rows; ++row) {
+            std::vector<std::pair<float, int64_t>> reference;
+            reference.reserve(static_cast<size_t>(axis));
+            for (int64_t column = 0; column < axis; ++column) {
+                reference.emplace_back(
+                    input[static_cast<size_t>(row * axis + column)],
+                    column);
+            }
+            std::sort(
+                reference.begin(),
+                reference.end(),
+                [](const auto& lhs, const auto& rhs) {
+                    if (lhs.first != rhs.first)
+                        return lhs.first > rhs.first;
+                    return lhs.second < rhs.second;
+                });
+            for (int64_t rank = 0; rank < k; ++rank) {
+                size_t outputIndex = static_cast<size_t>(row * k + rank);
+                EXPECT_FLOAT_EQ(
+                    read_f32((*valueAccess).data(), outputIndex),
+                    reference[static_cast<size_t>(rank)].first)
+                    << "row=" << row << " rank=" << rank;
+                EXPECT_EQ(
+                    read_i64((*indexAccess).data(), outputIndex),
+                    reference[static_cast<size_t>(rank)].second)
+                    << "row=" << row << " rank=" << rank;
+            }
+        }
+    }
+}
+
 TEST(CudaDeviceTest, RunTopKRejectsNonLastDim) {
     if (auto reason = cuda_device_skip_reason(); !reason.empty())
         GTEST_SKIP() << reason;

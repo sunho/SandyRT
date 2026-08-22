@@ -242,6 +242,7 @@ def main() -> int:
     parser.add_argument("--eos-token-id", default=None, type=int)
     parser.add_argument("--max-context-tokens", default=None, type=int)
     parser.add_argument("--prefill-chunk-tokens", default=None, type=int)
+    parser.add_argument("--request-timeout-ms", default=300000, type=int)
     parser.add_argument(
         "--debug",
         action="store_true",
@@ -293,6 +294,9 @@ def main() -> int:
     if args.prefill_chunk_tokens < 0:
         print("--prefill-chunk-tokens must be >= 0", file=sys.stderr)
         return 1
+    if args.request_timeout_ms < 0:
+        print("--request-timeout-ms must be >= 0", file=sys.stderr)
+        return 1
     if args.prefill_chunk_tokens > 0 and not args.prefill_model.exists():
         print(f"missing prefill model: {args.prefill_model}", file=sys.stderr)
         return 1
@@ -314,6 +318,7 @@ def main() -> int:
         "--model-id", args.model_id,
         "--architecture", args.architecture,
         "--eos-token-id", str(args.eos_token_id),
+        "--request-timeout-ms", str(args.request_timeout_ms),
     ]
     if args.max_context_tokens > 0:
         worker_cmd.extend(["--max-context-tokens", str(args.max_context_tokens)])

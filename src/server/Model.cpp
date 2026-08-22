@@ -12,7 +12,6 @@
 #include <filesystem>
 #include <fstream>
 #include <memory>
-#include <mutex>
 #include <utility>
 #include <vector>
 
@@ -268,7 +267,9 @@ Result<GenerateResult> Model::generate(
         int32_t maxTokens,
         const std::vector<int64_t>& stopTokenIds,
         RequestLogger* logger,
-        const SamplingOverrides& samplingOverrides) {
+        const SamplingOverrides& samplingOverrides,
+        const RequestControl* control,
+        TokenCallback onToken) {
     std::unique_ptr<RequestLogger> ownedLogger;
     if (!logger) {
         ownedLogger = RequestLogger::create(config_.logging, requestId);
@@ -288,7 +289,9 @@ Result<GenerateResult> Model::generate(
     }
 
     auto lockStart = Clock::now();
-    std::unique_lock<std::mutex> lock(generateMutex_);
+    auto lease = generateGate_.acquire(control);
+    if (!lease)
+        return make_error(lease.error());
     if (logger)
         logger->logServerStage("request", "server.model.generate.queue_wait", elapsed_ms(lockStart));
     ServerStageScope totalTimer(logger, "request", "server.model.generate.total");
@@ -329,7 +332,12 @@ Result<GenerateResult> Model::generate(
         *deviceWeights_,
         std::move(sessionConfig),
         logger);
-    auto generated = session.generate(inputIds, maxTokens, effectiveStopTokens);
+    auto generated = session.generate(
+        inputIds,
+        maxTokens,
+        effectiveStopTokens,
+        control,
+        std::move(onToken));
     if (!generated) {
         if (logger) {
             logger->logf(

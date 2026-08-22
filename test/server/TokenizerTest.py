@@ -5,7 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "python"))
 
-from sandy_server.tokenizer import encode_messages
+from sandy_server.tokenizer import IncrementalTokenDecoder, encode_messages
 
 
 class FakeTokenizer:
@@ -41,6 +41,16 @@ class TokenizerTest(unittest.TestCase):
                 [{"role": "user", "content": "hello"}],
                 {"tokenize": False},
             )
+
+    def test_incremental_decoder_holds_incomplete_unicode(self):
+        class UnicodeTokenizer:
+            def decode(self, ids, **_kwargs):
+                return "\ufffd" if ids == [1] else "é"
+
+        decoder = IncrementalTokenDecoder(UnicodeTokenizer())
+        self.assertEqual(decoder.push(1), "")
+        self.assertEqual(decoder.push(2), "é")
+        self.assertEqual(decoder.finish(), "")
 
 
 if __name__ == "__main__":

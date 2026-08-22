@@ -3,13 +3,16 @@
 #include "Model.h"
 #include "sandy_inference.grpc.pb.h"
 
+#include <chrono>
 #include <memory>
 
 namespace sandy::server {
 
 class SandyInferenceService final : public sandy::server::SandyInference::Service {
 public:
-    explicit SandyInferenceService(std::shared_ptr<Model> model);
+    SandyInferenceService(
+        std::shared_ptr<Model> model,
+        std::chrono::milliseconds requestTimeout);
 
     grpc::Status Health(
         grpc::ServerContext* context,
@@ -26,8 +29,14 @@ public:
         const GenerateRequest* request,
         GenerateResponse* response) override;
 
+    grpc::Status GenerateStream(
+        grpc::ServerContext* context,
+        const GenerateRequest* request,
+        grpc::ServerWriter<GenerateStreamResponse>* writer) override;
+
 private:
     std::shared_ptr<Model> model_;
+    std::chrono::milliseconds requestTimeout_;
 };
 
 } // namespace sandy::server

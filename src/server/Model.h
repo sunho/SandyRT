@@ -3,6 +3,7 @@
 #include "Device.h"
 #include "Engine.h"
 #include "EngineTypes.h"
+#include "GenerationGate.h"
 #include "Logger.h"
 #include "Result.h"
 #include "SafeTensorWeights.h"
@@ -10,7 +11,6 @@
 #include "Session.h"
 
 #include <memory>
-#include <mutex>
 #include <string>
 #include <vector>
 
@@ -41,7 +41,9 @@ public:
         int32_t maxTokens,
         const std::vector<int64_t>& stopTokenIds,
         RequestLogger* logger = nullptr,
-        const SamplingOverrides& samplingOverrides = {});
+        const SamplingOverrides& samplingOverrides = {},
+        const RequestControl* control = nullptr,
+        TokenCallback onToken = {});
 
     const ModelConfig& config() const { return config_; }
     const std::string& backend() const { return backend_; }
@@ -60,7 +62,7 @@ private:
     std::unique_ptr<engine::Engine> engine_;
     device::Device* device_ = nullptr;
     std::string backend_ = "cpu";
-    std::mutex generateMutex_;
+    GenerationGate generateGate_;
 };
 
 } // namespace sandy::server

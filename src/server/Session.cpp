@@ -362,10 +362,19 @@ bool Session::shouldStop(
     return stopTokens.find(token) != stopTokens.end();
 }
 
+Result<void> Session::checkRequest(const RequestControl* control) const {
+    auto reason = control ? control->stopReason() : RequestStopReason::None;
+    if (reason != RequestStopReason::None)
+        return make_error(requestStopMessage(reason));
+    return {};
+}
+
 Result<GenerateResult> Session::generate(
         const std::vector<int64_t>& inputIds,
         int32_t maxTokens,
-        const std::vector<int64_t>& stopTokenIds) {
+        const std::vector<int64_t>& stopTokenIds,
+        const RequestControl* control,
+        TokenCallback onToken) {
     ServerStageScope totalTimer(logger_, "request", "server.generate.total");
     if (logger_) {
         logger_->logf(
@@ -377,15 +386,21 @@ Result<GenerateResult> Session::generate(
             prefillCompiled_ ? 1 : 0,
             config_.prefillChunkTokens);
     }
+    if (inputIds.empty())
+        return make_error("GenerateRequest.input_ids must not be empty");
+    if (maxTokens < 0)
+        return make_error("GenerateRequest.max_tokens must be >= 0");
+    auto requestReady = checkRequest(control);
+    if (!requestReady)
+        return make_error(requestReady.error());
     if (!initialized_) {
         auto init = initialize();
         if (!init)
             return make_error(init.error());
     }
-    if (inputIds.empty())
-        return make_error("GenerateRequest.input_ids must not be empty");
-    if (maxTokens < 0)
-        return make_error("GenerateRequest.max_tokens must be >= 0");
+    requestReady = checkRequest(control);
+    if (!requestReady)
+        return make_error(requestReady.error());
 
     GenerateResult result;
     result.promptTokens = static_cast<int32_t>(inputIds.size());
@@ -410,6 +425,9 @@ Result<GenerateResult> Session::generate(
         size_t begin = 0;
         auto chunkTokens = static_cast<size_t>(config_.prefillChunkTokens);
         while (begin < inputIds.size()) {
+            requestReady = checkRequest(control);
+            if (!requestReady)
+                return make_error(requestReady.error());
             auto end = std::min(inputIds.size(), begin + chunkTokens);
             auto phase = "prefill_" + std::to_string(begin) + "_" + std::to_string(end);
             auto next = prefillChunk(
@@ -421,6 +439,9 @@ Result<GenerateResult> Session::generate(
                 end == inputIds.size());
             if (!next)
                 return make_error(next.error());
+            requestReady = checkRequest(control);
+            if (!requestReady)
+                return make_error(requestReady.error());
             if (end == inputIds.size())
                 nextToken = next->first;
             begin = end;
@@ -428,6 +449,9 @@ Result<GenerateResult> Session::generate(
     } else {
         ServerStageScope promptTimer(logger_, "prompt", "server.prompt.eval_tokens");
         for (size_t i = 0; i < inputIds.size(); i++) {
+            requestReady = checkRequest(control);
+            if (!requestReady)
+                return make_error(requestReady.error());
             auto phase = "prompt_token_" + std::to_string(i);
             auto next = evalToken(
                 inputIds[i],
@@ -436,6 +460,9 @@ Result<GenerateResult> Session::generate(
                 i + 1 == inputIds.size());
             if (!next)
                 return make_error(next.error());
+            requestReady = checkRequest(control);
+            if (!requestReady)
+                return make_error(requestReady.error());
             if (i + 1 == inputIds.size())
                 nextToken = next->first;
         }
@@ -448,6 +475,9 @@ Result<GenerateResult> Session::generate(
     ServerStageScope decodeTimer(logger_, "decode", "server.decode.total");
     auto decodeStart = Clock::now();
     for (int32_t step = 0; step < maxTokens; step++) {
+        requestReady = checkRequest(control);
+        if (!requestReady)
+            return make_error(requestReady.error());
         result.outputIds.push_back(nextToken);
         result.completionTokens = static_cast<int32_t>(result.outputIds.size());
         if (logger_) {
@@ -457,6 +487,9 @@ Result<GenerateResult> Session::generate(
                 static_cast<long long>(nextToken),
                 result.completionTokens);
         }
+
+        if (onToken && !onToken(nextToken))
+            return make_error("request cancelled");
 
         if (shouldStop(nextToken, stopTokens)) {
             result.finishReason = "stop";
@@ -474,6 +507,9 @@ Result<GenerateResult> Session::generate(
             phase);
         if (!next)
             return make_error(next.error());
+        requestReady = checkRequest(control);
+        if (!requestReady)
+            return make_error(requestReady.error());
         nextToken = next->first;
     }
 
