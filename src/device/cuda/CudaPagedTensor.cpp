@@ -705,38 +705,39 @@ Result<void> CudaDevice::appendPaged(
         return make_error(reserved.error());
 
     auto* source = static_cast<const uint8_t*>(sourceBuffer->data) + sourceByteOffset;
-    for (int64_t prefix = 0; prefix < layout->prefixCount; prefix++) {
-        int64_t chunkGrow = 0;
-        while (chunkGrow < layout->chunkGrowLength) {
-            auto dstGrow = oldGrowLength + chunkGrow;
-            auto dstPageOrdinal = dstGrow / pool.desc().pageSize;
-            auto dstGrowInPage = dstGrow % pool.desc().pageSize;
-            auto copyGrowLength = std::min(
-                layout->chunkGrowLength - chunkGrow,
-                pool.desc().pageSize - dstGrowInPage);
-            auto pageIndex = tensor.page_indices()[static_cast<size_t>(dstPageOrdinal)];
-            auto pageData = pool.page_data(pageIndex);
-            if (!pageData)
-                return make_error(pageData.error());
+    auto sourcePitch = static_cast<size_t>(layout->chunkGrowLength) * layout->trailingBytes;
+    auto destinationPitch = static_cast<size_t>(pool.desc().pageSize) * layout->trailingBytes;
+    int64_t chunkGrow = 0;
+    while (chunkGrow < layout->chunkGrowLength) {
+        auto dstGrow = oldGrowLength + chunkGrow;
+        auto dstPageOrdinal = dstGrow / pool.desc().pageSize;
+        auto dstGrowInPage = dstGrow % pool.desc().pageSize;
+        auto copyGrowLength = std::min(
+            layout->chunkGrowLength - chunkGrow,
+            pool.desc().pageSize - dstGrowInPage);
+        auto pageIndex = tensor.page_indices()[static_cast<size_t>(dstPageOrdinal)];
+        auto pageData = pool.page_data(pageIndex);
+        if (!pageData)
+            return make_error(pageData.error());
 
-            auto sourceElement =
-                (prefix * layout->chunkGrowLength + chunkGrow) * layout->trailingCount;
-            auto dstElement =
-                (prefix * pool.desc().pageSize + dstGrowInPage) * layout->trailingCount;
-            auto copyBytes = static_cast<size_t>(copyGrowLength) * layout->trailingBytes;
-            auto copied = cuda_check(
-                cudaMemcpyAsync(
-                    static_cast<uint8_t*>(*pageData) +
-                        static_cast<size_t>(dstElement) * layout->elementSize,
-                    source + static_cast<size_t>(sourceElement) * layout->elementSize,
-                    copyBytes,
-                    cudaMemcpyDeviceToDevice,
-                    stream_),
-                "cudaMemcpyAsync paged append device to device");
-            if (!copied)
-                return make_error(copied.error());
-            chunkGrow += copyGrowLength;
-        }
+        auto sourceOffset = static_cast<size_t>(chunkGrow) * layout->trailingBytes;
+        auto destinationOffset =
+            static_cast<size_t>(dstGrowInPage) * layout->trailingBytes;
+        auto copyWidth = static_cast<size_t>(copyGrowLength) * layout->trailingBytes;
+        auto copied = cuda_check(
+            cudaMemcpy2DAsync(
+                static_cast<uint8_t*>(*pageData) + destinationOffset,
+                destinationPitch,
+                source + sourceOffset,
+                sourcePitch,
+                copyWidth,
+                static_cast<size_t>(layout->prefixCount),
+                cudaMemcpyDeviceToDevice,
+                stream_),
+            "cudaMemcpy2DAsync paged append device to device");
+        if (!copied)
+            return make_error(copied.error());
+        chunkGrow += copyGrowLength;
     }
 
     tensor.set_grow_length(layout->newGrowLength);
