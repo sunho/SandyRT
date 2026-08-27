@@ -45,11 +45,27 @@ std::string scalar_name(ir::kernel_ir::ScalarId id) {
     return "s" + std::to_string(id);
 }
 
+Result<std::string> jit_float_dtype(core::DType dtype) {
+    switch (dtype) {
+        case core::DType::F32:
+            return std::string("SANDY_JIT_F32");
+        case core::DType::BF16:
+            return std::string("SANDY_JIT_BF16");
+        default:
+            return make_error("CUDA elementwise JIT unsupported compute dtype");
+    }
+}
+
 Result<std::string> scalar_expression(const ScalarNode& node) {
     auto operand = [&](size_t index) { return scalar_name(node.operands[index]); };
     switch (node.op) {
-        case ScalarOp::Load:
-            return "loader.load(" + std::to_string(node.inputIndex) + ")";
+        case ScalarOp::Load: {
+            auto dtype = jit_float_dtype(node.dtype);
+            if (!dtype)
+                return make_error(dtype.error());
+            return "loader.template load<" + dtype.take() + ">(" +
+                std::to_string(node.inputIndex) + ")";
+        }
         case ScalarOp::Constant: {
             float value = static_cast<float>(node.constant);
             uint32_t bits = std::bit_cast<uint32_t>(value);
@@ -96,10 +112,24 @@ core::CacheKey scalar_dag_key(const CudaElementwiseProgram& program) {
 
 Result<CudaElementwiseJitSource> emitCudaElementwiseJitSource(
         const CudaElementwiseProgram& program) {
+    const ScalarNode* resultNode = nullptr;
+    for (const auto& node : program.scalars) {
+        if (node.id == program.result) {
+            resultNode = &node;
+            break;
+        }
+    }
+    if (!resultNode)
+        return make_error("CUDA elementwise JIT result references missing scalar");
+    auto outputDtype = jit_float_dtype(resultNode->dtype);
+    if (!outputDtype)
+        return make_error(outputDtype.error());
+
     std::unordered_set<ir::kernel_ir::ScalarId> seen;
     std::ostringstream source;
     source << "#pragma once\n\n"
            << "struct GeneratedElementwiseEvaluator {\n"
+           << "    static constexpr int kOutputDType = " << *outputDtype << ";\n\n"
            << "    template <typename Loader>\n"
            << "    __device__ __forceinline__ static float eval(const Loader& loader) {\n";
 
@@ -121,8 +151,6 @@ Result<CudaElementwiseJitSource> emitCudaElementwiseJitSource(
         source << "        const float " << scalar_name(node.id)
                << " = " << *expression << ";\n";
     }
-    if (!seen.contains(program.result))
-        return make_error("CUDA elementwise JIT result references missing scalar");
     source << "        return " << scalar_name(program.result) << ";\n"
            << "    }\n"
            << "};\n";

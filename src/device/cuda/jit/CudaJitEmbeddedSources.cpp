@@ -4,6 +4,8 @@
 #include "CudaJitElementwiseKernelSource.generated.h"
 #include "CudaJitElementwiseTemplateSource.generated.h"
 #include "CudaJitEvaluatorStubSource.generated.h"
+#include "CudaJitLayoutTransformAbiSource.generated.h"
+#include "CudaJitLayoutTransformKernelSource.generated.h"
 #include "CudaJitReductionAbiSource.generated.h"
 #include "CudaJitReductionKernelSource.generated.h"
 #include "CudaJitTensorAccessSource.generated.h"
@@ -32,6 +34,18 @@ std::vector<CudaJitHeader> embeddedReductionHeaders() {
         {"CudaJitAbi.cuh", cuda_jit_embedded::kAbi},
         {"CudaJitTensorAccess.cuh", cuda_jit_embedded::kTensorAccess},
         {"CudaJitReductionAbi.cuh", cuda_jit_embedded::kReductionAbi},
+    };
+}
+
+std::string_view embeddedLayoutTransformKernelSource() {
+    return cuda_jit_embedded::kLayoutTransformKernel;
+}
+
+std::vector<CudaJitHeader> embeddedLayoutTransformHeaders() {
+    return {
+        {"CudaJitAbi.cuh", cuda_jit_embedded::kAbi},
+        {"CudaJitTensorAccess.cuh", cuda_jit_embedded::kTensorAccess},
+        {"CudaJitLayoutTransformAbi.cuh", cuda_jit_embedded::kLayoutTransformAbi},
     };
 }
 

@@ -593,7 +593,8 @@ TEST(CudaDeviceTest, ElementwiseJitEmitterProducesStraightLineExpressions) {
     };
     auto emitted = sandy::device::emitCudaElementwiseJitSource(program);
     ASSERT_TRUE(emitted) << emitted.error();
-    EXPECT_NE(emitted->evaluatorSource.find("const float s0 = loader.load(0);"),
+    EXPECT_NE(emitted->evaluatorSource.find(
+                  "const float s0 = loader.template load<SANDY_JIT_F32>(0);"),
               std::string::npos);
     EXPECT_NE(emitted->evaluatorSource.find("const float s2 = s0 * s1;"),
               std::string::npos);
@@ -1094,6 +1095,63 @@ TEST(CudaDeviceTest, RunLayoutTransformMaterializesStridedF32View) {
         device,
         *outputBuffer,
         {1.0f, 4.0f, 2.0f, 5.0f, 3.0f, 6.0f});
+}
+
+TEST(CudaDeviceTest, RunLayoutTransformJitCopiesStridedI64AndReusesSource) {
+    if (auto reason = cuda_device_skip_reason(); !reason.empty())
+        GTEST_SKIP() << reason;
+    namespace kir = sandy::ir::kernel_ir;
+
+    kir::Graph graph;
+    auto input = graph.addValue(tensor_type({3, 2}, sandy::core::DType::I64));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 0, ""},
+        input);
+    auto output = graph.addValue(tensor_type({3, 2}, sandy::core::DType::I64));
+    auto* op = graph.addOp<kir::LayoutTransformOp>(
+        kir::LayoutTransformKind::Contiguous,
+        input,
+        output,
+        std::vector<int64_t>{});
+    graph.setOutputs({output});
+
+    sandy::device::CudaDevice device;
+    auto compiled = device.compile(graph);
+    ASSERT_TRUE(compiled) << compiled.error();
+    auto compiledAgain = device.compile(graph);
+    ASSERT_TRUE(compiledAgain) << compiledAgain.error();
+    auto stats = device.jitCacheStats();
+    EXPECT_EQ(stats.misses, 1u);
+    EXPECT_EQ(stats.hits, 1u);
+    EXPECT_EQ(stats.entries, 1u);
+
+    auto host = make_i64_buffer(
+        "x",
+        sandy::core::Shape({2, 3}),
+        {11, 22, 33, 44, 55, 66});
+    auto inputBuffer = device.load(*host);
+    ASSERT_TRUE(inputBuffer) << inputBuffer.error();
+    auto outputBuffer = device.alloc(
+        sandy::core::TensorDesc({3, 2}, sandy::core::DType::I64));
+    ASSERT_TRUE(outputBuffer) << outputBuffer.error();
+
+    sandy::device::TensorViewDesc transposed;
+    transposed.desc =
+        sandy::core::TensorDesc({3, 2}, sandy::core::DType::I64);
+    transposed.strides = {1, 3};
+    std::vector<sandy::device::DeviceRunValue> inputs = {
+        sandy::device::DeviceTensorView{*inputBuffer, transposed},
+    };
+    std::vector<sandy::device::DeviceRunValue> outputs = {
+        tensor_view(
+            device,
+            *outputBuffer,
+            sandy::core::TensorDesc({3, 2}, sandy::core::DType::I64)),
+    };
+    auto run = device.run(*compiled, op->id(), inputs, outputs);
+    ASSERT_TRUE(run) << run.error();
+
+    expect_i64_output(device, *outputBuffer, {11, 44, 22, 55, 33, 66});
 }
 
 TEST(CudaDeviceTest, CompileAcceptsPagedTensorKernelInput) {

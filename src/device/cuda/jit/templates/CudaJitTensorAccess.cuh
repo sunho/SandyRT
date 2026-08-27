@@ -48,6 +48,7 @@ __device__ __forceinline__ void* sandy_storage_data(
     return static_cast<void**>(tensor.data)[pageOrdinal];
 }
 
+template <int DType>
 __device__ __forceinline__ float sandy_runtime_load(
         const SandyJitTensorArg& tensor,
         int64_t linear) {
@@ -55,11 +56,13 @@ __device__ __forceinline__ float sandy_runtime_load(
     const void* data = sandy_storage_data(tensor, linear, &storage);
     if (!data || storage < 0)
         return 0.0f;
-    if (tensor.dtype == SANDY_JIT_F32)
+    if constexpr (DType == SANDY_JIT_F32)
         return static_cast<const float*>(data)[storage];
-    return sandy_bf16_to_float(static_cast<const uint16_t*>(data)[storage]);
+    else
+        return sandy_bf16_to_float(static_cast<const uint16_t*>(data)[storage]);
 }
 
+template <int DType>
 __device__ __forceinline__ void sandy_runtime_store(
         const SandyJitTensorArg& tensor,
         int64_t linear,
@@ -68,31 +71,47 @@ __device__ __forceinline__ void sandy_runtime_store(
     void* data = sandy_storage_data(tensor, linear, &storage);
     if (!data || storage < 0)
         return;
-    if (tensor.dtype == SANDY_JIT_F32)
+    if constexpr (DType == SANDY_JIT_F32)
         static_cast<float*>(data)[storage] = value;
     else
         static_cast<uint16_t*>(data)[storage] = sandy_float_to_bf16(value);
+}
+
+template <typename Element>
+__device__ __forceinline__ void sandy_runtime_copy_element(
+        const SandyJitTensorArg& input,
+        const SandyJitTensorArg& output,
+        int64_t linear) {
+    int64_t inputStorage = -1;
+    int64_t outputStorage = -1;
+    const void* inputData = sandy_storage_data(input, linear, &inputStorage);
+    void* outputData = sandy_storage_data(output, linear, &outputStorage);
+    if (!inputData || !outputData || inputStorage < 0 || outputStorage < 0)
+        return;
+    static_cast<Element*>(outputData)[outputStorage] =
+        static_cast<const Element*>(inputData)[inputStorage];
 }
 
 struct SandyRuntimeLoader {
     const SandyElementwiseParams& params;
     int64_t linear;
 
+    template <int DType>
     __device__ __forceinline__ float load(int inputIndex) const {
         const auto& input = params.inputs[inputIndex];
         int64_t inputLinear = linear;
         if (params.broadcasts[inputIndex] == SANDY_JIT_BROADCAST_RIGHT_ALIGNED)
             inputLinear = input.numel == 0 ? 0 : linear % input.numel;
-        return sandy_runtime_load(input, inputLinear);
+        return sandy_runtime_load<DType>(input, inputLinear);
     }
 };
 
 struct SandyRuntimeStorer {
+    template <int DType>
     __device__ __forceinline__ static void store(
             const SandyJitTensorArg& output,
             int64_t linear,
             float value) {
-        sandy_runtime_store(output, linear, value);
+        sandy_runtime_store<DType>(output, linear, value);
     }
 };
-

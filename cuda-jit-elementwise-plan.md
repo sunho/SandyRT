@@ -20,7 +20,9 @@ Each item gets focused correctness/cache coverage and a separate commit.
 
 1. Reduction (complete: focused JIT/fallback tests pass; full suite 64/65 with
    only the pre-existing asynchronous gather bounds failure)
-2. Layout transform
+2. Layout transform (complete: dtype-specialized raw copies with no runtime
+   size switch; focused JIT/fallback tests pass; full suite 65/66 with only the
+   pre-existing asynchronous gather bounds failure)
 3. Gather
 4. Softmax
 5. Norm

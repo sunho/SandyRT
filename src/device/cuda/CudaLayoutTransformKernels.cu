@@ -1,6 +1,8 @@
 #include "CudaKernels.h"
 #include "CudaKernelLaunchUtils.cuh"
 #include "CudaKernelUtils.cuh"
+#include "jit/CudaJitLaunchUtils.cuh"
+#include "jit/templates/CudaJitLayoutTransformAbi.cuh"
 
 namespace sandy::device {
 
@@ -105,6 +107,22 @@ Result<void> launch_cuda_layout_transform(
     int blocks = static_cast<int>(
         (outputArg.numel + cuda_kernel::kBlockSize - 1) /
         cuda_kernel::kBlockSize);
+    if (program.jitKernel) {
+        auto jitInput = pack_jit_tensor_arg(inputArg);
+        if (!jitInput)
+            return make_error(jitInput.error());
+        auto jitOutput = pack_jit_tensor_arg(outputArg);
+        if (!jitOutput)
+            return make_error(jitOutput.error());
+        SandyLayoutTransformParams params{jitInput.take(), jitOutput.take()};
+        void* arguments[] = {&params};
+        return program.jitKernel->launch(
+            dim3(static_cast<unsigned>(blocks)),
+            dim3(cuda_kernel::kBlockSize),
+            0,
+            context.stream,
+            arguments);
+    }
     layout_transform_kernel<<<blocks, cuda_kernel::kBlockSize, 0, context.stream>>>(
         inputArg,
         outputArg);

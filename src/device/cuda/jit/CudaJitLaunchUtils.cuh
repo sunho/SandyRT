@@ -30,11 +30,21 @@ inline Result<SandyJitTensorArg> pack_jit_tensor_arg(
         case core::DType::F32:
             target.dtype = SANDY_JIT_F32;
             break;
+        case core::DType::F16:
+            target.dtype = SANDY_JIT_F16;
+            break;
         case core::DType::BF16:
             target.dtype = SANDY_JIT_BF16;
             break;
-        default:
-            return make_error("CUDA JIT tensor access unsupported dtype");
+        case core::DType::I32:
+            target.dtype = SANDY_JIT_I32;
+            break;
+        case core::DType::I64:
+            target.dtype = SANDY_JIT_I64;
+            break;
+        case core::DType::U8:
+            target.dtype = SANDY_JIT_U8;
+            break;
     }
     switch (source.access) {
         case cuda_kernel::AccessKind::Contiguous:

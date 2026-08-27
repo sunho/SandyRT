@@ -1,8 +1,10 @@
 #pragma once
 #ifdef __CUDACC_RTC__
 using int32_t = int;
+using uint8_t = unsigned char;
 using uint16_t = unsigned short;
 using uint32_t = unsigned int;
+using uint64_t = unsigned long long;
 using int64_t = long long;
 #else
 #include <cstdint>
@@ -12,7 +14,14 @@ constexpr int SANDY_JIT_ABI_VERSION = 1;
 constexpr int SANDY_JIT_MAX_RANK = 8;
 constexpr int SANDY_JIT_MAX_INPUTS = 8;
 
-enum SandyJitDType : int32_t { SANDY_JIT_F32 = 0, SANDY_JIT_BF16 = 1 };
+enum SandyJitDType : int32_t {
+    SANDY_JIT_F32 = 0,
+    SANDY_JIT_F16 = 1,
+    SANDY_JIT_BF16 = 2,
+    SANDY_JIT_I32 = 3,
+    SANDY_JIT_I64 = 4,
+    SANDY_JIT_U8 = 5,
+};
 enum SandyJitAccess : int32_t {
     SANDY_JIT_CONTIGUOUS = 0,
     SANDY_JIT_STRIDED = 1,

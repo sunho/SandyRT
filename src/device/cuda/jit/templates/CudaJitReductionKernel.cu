@@ -1,4 +1,5 @@
 #include "CudaJitReductionAbi.cuh"
+#include "CudaJitReductionConfig.cuh"
 #include "CudaJitTensorAccess.cuh"
 
 extern "C" __global__ void sandy_jit_reduction_sum_keepdims(
@@ -24,6 +25,7 @@ extern "C" __global__ void sandy_jit_reduction_sum_keepdims(
 
     float sum = 0.0f;
     for (int64_t index = 0; index < params.reduceDim; ++index)
-        sum += sandy_runtime_load(params.input, inputLinear + index * axisStride);
-    sandy_runtime_store(params.output, outputLinear, sum);
+        sum += sandy_runtime_load<SandyReductionDType>(
+            params.input, inputLinear + index * axisStride);
+    sandy_runtime_store<SandyReductionDType>(params.output, outputLinear, sum);
 }

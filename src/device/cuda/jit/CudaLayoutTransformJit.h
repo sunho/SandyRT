@@ -5,7 +5,7 @@
 
 namespace sandy::device {
 
-Result<CudaJitCache::KernelPtr> compileCudaReductionJit(
+Result<CudaJitCache::KernelPtr> compileCudaLayoutTransformJit(
     int cudaDevice,
     CudaJitCache& cache,
     core::DType dtype);

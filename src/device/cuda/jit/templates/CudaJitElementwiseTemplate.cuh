@@ -9,6 +9,6 @@ __device__ __forceinline__ void sandy_run_elementwise(
         int64_t linear) {
     Loader loader{params, linear};
     float value = Evaluator::eval(loader);
-    Storer::store(params.output, linear, value);
+    Storer::template store<Evaluator::kOutputDType>(
+        params.output, linear, value);
 }
-

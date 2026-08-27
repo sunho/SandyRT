@@ -57,6 +57,7 @@ struct CudaLayoutTransformProgram {
     ir::kernel_ir::LayoutTransformKind transform =
         ir::kernel_ir::LayoutTransformKind::Contiguous;
     std::vector<int64_t> dims;
+    CudaJitCache::KernelPtr jitKernel;
 };
 
 struct CudaMatMulProgram {

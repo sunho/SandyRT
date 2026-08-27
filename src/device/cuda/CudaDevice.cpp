@@ -1,6 +1,7 @@
 #include "CudaDevice.h"
 #include "CudaScratchAllocator.h"
 #include "CudaElementwiseJit.h"
+#include "CudaLayoutTransformJit.h"
 #include "CudaReductionJit.h"
 
 #include <cstdio>
@@ -204,10 +205,25 @@ Result<DeviceCompiledGraphId> CudaDevice::compile(const ir::kernel_ir::Graph& gr
         switch (op.kind()) {
             case ir::kernel_ir::OpKind::LayoutTransform: {
                 const auto& layout = static_cast<const ir::kernel_ir::LayoutTransformOp&>(op);
-                kernel.program = CudaLayoutTransformProgram{
+                CudaLayoutTransformProgram program{
                     layout.transform(),
                     layout.dims(),
                 };
+                if (environment_flag("SANDY_CUDA_LAYOUT_TRANSFORM_JIT", true)) {
+                    auto jit = compileCudaLayoutTransformJit(
+                        cudaDevice_,
+                        jitCache_,
+                        graph.value(op.inputs()[0]).type.dtype);
+                    if (!jit) {
+                        if (!environment_flag(
+                                "SANDY_CUDA_LAYOUT_TRANSFORM_JIT_FALLBACK", false))
+                            return make_error(
+                                "CUDA layout transform JIT compile failed: " + jit.error());
+                    } else {
+                        program.jitKernel = jit.take();
+                    }
+                }
+                kernel.program = std::move(program);
                 break;
             }
             case ir::kernel_ir::OpKind::ElementwiseKernel: {
@@ -240,7 +256,10 @@ Result<DeviceCompiledGraphId> CudaDevice::compile(const ir::kernel_ir::Graph& gr
                     reduction.keepDims(),
                 };
                 if (environment_flag("SANDY_CUDA_REDUCTION_JIT", true)) {
-                    auto jit = compileCudaReductionJit(cudaDevice_, jitCache_);
+                    auto jit = compileCudaReductionJit(
+                        cudaDevice_,
+                        jitCache_,
+                        graph.value(op.inputs()[0]).type.dtype);
                     if (!jit) {
                         if (!environment_flag("SANDY_CUDA_REDUCTION_JIT_FALLBACK", false))
                             return make_error("CUDA reduction JIT compile failed: " + jit.error());
