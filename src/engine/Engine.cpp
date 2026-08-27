@@ -1,6 +1,7 @@
 #include "Engine.h"
 
 #include "DeviceWiseCopier.h"
+#include "InvocationCacheKey.h"
 #include "MidIRToKernelIR.h"
 #include "RuntimeScratchPlan.h"
 #include "RuntimeTensorDesc.h"
@@ -339,7 +340,7 @@ Result<core::TensorDesc> argument_input_desc(
     return make_error("input arg " + std::to_string(index) + " must be a tensor");
 }
 
-Result<RuntimeTensorDescs> infer_invocation_tensor_descs(
+Result<RuntimeTensorDescs> collect_invocation_input_descs(
         const Graph& graph,
         std::span<const RunInput> inputs,
         const TensorMap* hostWeights,
@@ -376,7 +377,7 @@ Result<RuntimeTensorDescs> infer_invocation_tensor_descs(
         if (!set)
             return make_error(set.error());
     }
-    return inferRuntimeTensorDescs(graph, std::move(inputDescs));
+    return inputDescs;
 }
 
 Result<void> bind_input_op(
@@ -1303,24 +1304,50 @@ Result<std::vector<RunOutput>> Engine::runValuesImpl(
     const auto& graph = *compiled.graph;
 
     auto inferDescsStart = Clock::now();
-    auto tensorDescs = infer_invocation_tensor_descs(
+    auto inputDescs = collect_invocation_input_descs(
         graph,
         inputs,
         hostWeights,
         deviceWeights,
         graphDefaultDevice);
-    auto inferDescsEnd = Clock::now();
+    if (!inputDescs)
+        return make_error(inputDescs.error());
+    auto cacheKey = buildInvocationCacheKey(
+        "runtime-invocation-v1",
+        compiled.programId,
+        graph,
+        *inputDescs);
+    if (!cacheKey)
+        return make_error(cacheKey.error());
+
+    Clock::time_point inferDescsEnd;
+    Clock::time_point scratchPlanStart;
+    Clock::time_point scratchPlanEnd;
+    auto cachedPlan = runtimePlanCache_.getOrCreate(*cacheKey, [&]() -> Result<CachedInvocationPlan> {
+        auto tensorDescs = inferRuntimeTensorDescs(graph, std::move(*inputDescs));
+        inferDescsEnd = Clock::now();
+        if (!tensorDescs)
+            return make_error(tensorDescs.error());
+        scratchPlanStart = Clock::now();
+        auto scratchLayout = planRuntimeScratchLayout(compiled, *tensorDescs, devices_);
+        scratchPlanEnd = Clock::now();
+        if (!scratchLayout)
+            return make_error(scratchLayout.error());
+        return CachedInvocationPlan{tensorDescs.take(), scratchLayout.take()};
+    });
+    if (inferDescsEnd == Clock::time_point{})
+        inferDescsEnd = Clock::now();
     profile_stage(
         options,
         "run_values.infer_tensor_descs",
         inferDescsStart,
         inferDescsEnd);
-    if (!tensorDescs)
-        return make_error(tensorDescs.error());
-
-    auto scratchPlanStart = Clock::now();
-    auto scratchPlan = planRuntimeScratch(compiled, *tensorDescs, devices_);
-    auto scratchPlanEnd = Clock::now();
+    if (!cachedPlan)
+        return make_error(cachedPlan.error());
+    if (scratchPlanStart == Clock::time_point{})
+        scratchPlanStart = Clock::now();
+    auto scratchPlan = instantiateRuntimeScratch((*cachedPlan)->scratchLayout, devices_);
+    scratchPlanEnd = Clock::now();
     profile_stage(
         options,
         "run_values.plan_scratch",
@@ -1329,7 +1356,7 @@ Result<std::vector<RunOutput>> Engine::runValuesImpl(
     if (!scratchPlan)
         return make_error(scratchPlan.error());
 
-    auto state = initialize_runtime_state(tensorDescs.take(), scratchPlan.take());
+    auto state = initialize_runtime_state((*cachedPlan)->tensorDescs, scratchPlan.take());
     ScratchBufferGuard scratchGuard(devices_, state);
 
     for (size_t opIndex = 0; opIndex < graph.ops().size(); opIndex++) {

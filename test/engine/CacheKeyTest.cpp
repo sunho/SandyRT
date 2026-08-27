@@ -1,5 +1,6 @@
 #include "CacheKey.h"
 #include "InvocationCacheKey.h"
+#include "RuntimeScratchPlan.h"
 
 #include <gtest/gtest.h>
 
@@ -62,5 +63,31 @@ TEST(CacheKeyTest, InvocationKeyIncludesProgramAndPagedLength) {
     EXPECT_NE(*a, *differentProgram);
 }
 
-} // namespace
+TEST(CacheKeyTest, RuntimePlanCacheHitsExactKeyAndMissesPagedLength) {
+    auto key = [](int64_t length) {
+        sandy::core::CacheKeyBuilder builder("runtime-invocation-v1");
+        builder.addU64(17).addShape(sandy::core::Shape({1, 2, length, 64}));
+        return std::move(builder).finish();
+    };
+    sandy::engine::RuntimePlanCache cache;
+    size_t calculations = 0;
+    auto create = [&]() -> Result<sandy::engine::CachedInvocationPlan> {
+        calculations++;
+        return sandy::engine::CachedInvocationPlan{
+            sandy::engine::RuntimeTensorDescs(),
+            sandy::engine::RuntimeScratchLayout{},
+        };
+    };
 
+    ASSERT_TRUE(cache.getOrCreate(key(1024), create));
+    ASSERT_TRUE(cache.getOrCreate(key(1024), create));
+    ASSERT_TRUE(cache.getOrCreate(key(1025), create));
+
+    EXPECT_EQ(calculations, 2u);
+    auto stats = cache.stats();
+    EXPECT_EQ(stats.hits, 1u);
+    EXPECT_EQ(stats.misses, 2u);
+    EXPECT_EQ(stats.entries, 2u);
+}
+
+} // namespace

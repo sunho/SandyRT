@@ -238,6 +238,8 @@ TEST_F(EngineCompileTest, RunExecutesKernelGraphWithFakeDevice) {
     auto outputsResult = engine.run(*compiled, inputs, weights);
     ASSERT_TRUE(outputsResult) << outputsResult.error();
     ASSERT_EQ(outputsResult->size(), 1u);
+    EXPECT_EQ(engine.runtimePlanCacheStats().misses, 1u);
+    EXPECT_EQ(engine.runtimePlanCacheStats().hits, 0u);
 
     ASSERT_EQ(fakePtr->loads.size(), 2u);
     EXPECT_EQ(fakePtr->loads[0].name, "x");
@@ -254,6 +256,11 @@ TEST_F(EngineCompileTest, RunExecutesKernelGraphWithFakeDevice) {
 
     EXPECT_EQ(fakePtr->reads, std::vector<sandy::device::DeviceBufferId>({202}));
     expect_same_buffers(fakePtr->deallocs, {200, 201, 202});
+
+    auto repeated = engine.run(*compiled, inputs, weights);
+    ASSERT_TRUE(repeated) << repeated.error();
+    EXPECT_EQ(engine.runtimePlanCacheStats().misses, 1u);
+    EXPECT_EQ(engine.runtimePlanCacheStats().hits, 1u);
 }
 
 TEST_F(EngineCompileTest, RunEmbeddingWithRank1WeightAllocatesScalarLookupShape) {

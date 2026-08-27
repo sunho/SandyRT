@@ -21,7 +21,7 @@ public:
         ir::kernel_ir::ValueId value,
         core::TensorDesc desc) = 0;
     virtual Result<void> free(ir::kernel_ir::ValueId value) = 0;
-    virtual Result<DeviceScratchAllocation> finalize() = 0;
+    virtual Result<DeviceScratchLayout> finalizeLayout() = 0;
 };
 
 class Device {

@@ -42,7 +42,7 @@ Status: complete
 
 ## Step 2: Split and cache scratch layouts
 
-Status: pending
+Status: complete
 
 - Separate deterministic scratch placement from device-buffer instantiation.
 - Cache inferred `RuntimeTensorDescs` plus immutable `RuntimeScratchLayout` by the

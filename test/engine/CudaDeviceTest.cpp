@@ -507,7 +507,7 @@ void run_attention_test(
 
 } // namespace
 
-TEST(CudaDeviceTest, ScratchAllocatorFinalizesOneBackingBufferWithValueViews) {
+TEST(CudaDeviceTest, ScratchAllocatorFinalizesReusablePlacementLayout) {
     if (auto reason = cuda_device_skip_reason(); !reason.empty())
         GTEST_SKIP() << reason;
 
@@ -524,27 +524,16 @@ TEST(CudaDeviceTest, ScratchAllocatorFinalizesOneBackingBufferWithValueViews) {
                 sandy::core::Shape({5}), sandy::core::DType::BF16)));
     ASSERT_TRUE(allocator->free(11));
 
-    auto allocation = allocator->finalize();
-    ASSERT_TRUE(allocation) << allocation.error();
-    ASSERT_NE(allocation->buffer, 0u);
-    ASSERT_EQ(allocation->views.size(), 2u);
-    EXPECT_EQ(allocation->views.at(7).buffer, allocation->buffer);
-    EXPECT_EQ(allocation->views.at(11).buffer, allocation->buffer);
-    EXPECT_EQ(allocation->views.at(7).view.storageOffset, 0);
-    EXPECT_EQ(allocation->views.at(11).view.storageOffset, 0);
-    EXPECT_EQ(allocation->views.at(7).view.desc.shape,
+    auto layout = allocator->finalizeLayout();
+    ASSERT_TRUE(layout) << layout.error();
+    ASSERT_GT(layout->bytes, 0u);
+    ASSERT_EQ(layout->placements.size(), 2u);
+    EXPECT_EQ(layout->placements.at(7).byteOffset, 0u);
+    EXPECT_EQ(layout->placements.at(11).byteOffset, 0u);
+    EXPECT_EQ(layout->placements.at(7).desc.shape,
               sandy::core::Shape({3}));
-    EXPECT_EQ(allocation->views.at(11).view.desc.shape,
+    EXPECT_EQ(layout->placements.at(11).desc.shape,
               sandy::core::Shape({5}));
-
-    auto second = device.read(allocation->views.at(11));
-    ASSERT_TRUE(second) << second.error();
-    auto secondAccess = (*second)->access();
-    ASSERT_TRUE(secondAccess) << secondAccess.error();
-    EXPECT_EQ(secondAccess->data().size(), 10u);
-
-    auto deallocated = device.dealloc(allocation->buffer);
-    ASSERT_TRUE(deallocated) << deallocated.error();
 }
 
 TEST(CudaDeviceTest, RunChainedElementwiseF32) {

@@ -352,7 +352,7 @@ Result<void> CudaDevice::dealloc(DeviceBufferId buffer) {
 }
 
 std::unique_ptr<DeviceScratchAllocator> CudaDevice::createScratchAllocator() {
-    return std::make_unique<CudaScratchAllocator>(*this);
+    return std::make_unique<CudaScratchAllocator>();
 }
 
 Result<DeviceBufferId> CudaDevice::load(core::TensorBuffer& src) {

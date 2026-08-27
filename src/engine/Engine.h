@@ -7,6 +7,7 @@
 #include "MidIR.h"
 #include "MidIRToKernelIR.h"
 #include "Result.h"
+#include "RuntimeScratchPlan.h"
 
 #include <cstddef>
 #include <functional>
@@ -97,6 +98,10 @@ public:
         const TensorMap& weights,
         const EngineRunOptions* options = nullptr);
 
+    RuntimePlanCacheStats runtimePlanCacheStats() const {
+        return runtimePlanCache_.stats();
+    }
+
     Result<std::vector<RunOutput>> runValues(
         const CompiledKernelGraph& compiled,
         std::span<const RunInput> inputs,
@@ -113,6 +118,7 @@ private:
 
     std::vector<std::unique_ptr<device::Device>> devices_;
     std::unique_ptr<device::DeviceWiseCopier> copier_;
+    RuntimePlanCache runtimePlanCache_;
 };
 
 } // namespace sandy::engine

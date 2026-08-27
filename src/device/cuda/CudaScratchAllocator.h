@@ -12,13 +12,13 @@ class CudaDevice;
 
 class CudaScratchAllocator final : public DeviceScratchAllocator {
 public:
-    explicit CudaScratchAllocator(CudaDevice& device) : device_(device) {}
+    CudaScratchAllocator() = default;
 
     Result<void> alloc(
         ir::kernel_ir::ValueId value,
         core::TensorDesc desc) override;
     Result<void> free(ir::kernel_ir::ValueId value) override;
-    Result<DeviceScratchAllocation> finalize() override;
+    Result<DeviceScratchLayout> finalizeLayout() override;
 
     size_t requiredBytes() const { return cursor_; }
 
@@ -34,7 +34,6 @@ private:
         size_t bytes = 0;
     };
 
-    CudaDevice& device_;
     size_t cursor_ = 0;
     bool finalized_ = false;
     std::unordered_map<ir::kernel_ir::ValueId, Placement> placements_;

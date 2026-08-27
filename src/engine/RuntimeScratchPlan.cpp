@@ -71,7 +71,7 @@ bool mayRequireDenseAllocation(const Op& op) {
 
 } // namespace
 
-Result<RuntimeScratchPlan> planRuntimeScratch(
+Result<RuntimeScratchLayout> planRuntimeScratchLayout(
         const CompiledKernelGraph& compiled,
         const RuntimeTensorDescs& tensorDescs,
         std::vector<std::unique_ptr<device::Device>>& devices) {
@@ -145,27 +145,80 @@ Result<RuntimeScratchPlan> planRuntimeScratch(
         }
     }
 
-    RuntimeScratchPlan plan;
+    RuntimeScratchLayout plan;
     for (DeviceId id = 0; id < allocators.size(); ++id) {
         if (!allocators[id])
             continue;
-        auto allocation = allocators[id]->finalize();
+        auto allocation = allocators[id]->finalizeLayout();
         if (!allocation) {
-            for (const auto& [allocatedDevice, buffer] : plan.buffers) {
-                auto found = lookupDevice(devices, allocatedDevice);
-                if (found)
-                    (void)(*found)->dealloc(buffer);
-            }
             return make_error(allocation.error());
         }
-        if (allocation->buffer != 0)
-            plan.buffers[id] = allocation->buffer;
-        for (auto& [value, view] : allocation->views) {
+        if (allocation->bytes != 0)
+            plan.devices[id] = std::move(*allocation);
+    }
+    return plan;
+}
+
+Result<RuntimeScratchPlan> instantiateRuntimeScratch(
+        const RuntimeScratchLayout& layout,
+        std::vector<std::unique_ptr<device::Device>>& devices) {
+    RuntimeScratchPlan plan;
+    for (const auto& [id, deviceLayout] : layout.devices) {
+        auto found = lookupDevice(devices, id);
+        if (!found)
+            return make_error(found.error());
+        auto buffer = (*found)->alloc(core::TensorDesc(
+            core::Shape({static_cast<int64_t>(deviceLayout.bytes)}),
+            core::DType::U8));
+        if (!buffer) {
+            for (const auto& [allocatedDevice, allocatedBuffer] : plan.buffers) {
+                auto allocated = lookupDevice(devices, allocatedDevice);
+                if (allocated)
+                    (void)(*allocated)->dealloc(allocatedBuffer);
+            }
+            return make_error(buffer.error());
+        }
+        plan.buffers[id] = *buffer;
+        for (const auto& [value, placement] : deviceLayout.placements) {
+            auto view = (*found)->defaultView(placement.desc);
+            if (!view) {
+                for (const auto& [allocatedDevice, allocatedBuffer] : plan.buffers) {
+                    auto allocated = lookupDevice(devices, allocatedDevice);
+                    if (allocated)
+                        (void)(*allocated)->dealloc(allocatedBuffer);
+                }
+                return make_error(view.error());
+            }
+            auto elementBytes = core::dtype_size(placement.desc.dtype);
+            view->storageOffset = static_cast<int64_t>(placement.byteOffset / elementBytes);
             plan.devices[value] = id;
-            plan.views[value] = std::move(view);
+            plan.views[value] = device::DeviceTensorView{*buffer, view.take()};
         }
     }
     return plan;
+}
+
+Result<RuntimePlanCache::PlanPtr> RuntimePlanCache::getOrCreate(
+        const core::CacheKey& key,
+        const Factory& factory) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto found = entries_.find(key);
+    if (found != entries_.end()) {
+        hits_++;
+        return found->second;
+    }
+    auto created = factory();
+    if (!created)
+        return make_error(created.error());
+    auto plan = std::make_shared<const CachedInvocationPlan>(created.take());
+    entries_.emplace(key, plan);
+    misses_++;
+    return plan;
+}
+
+RuntimePlanCacheStats RuntimePlanCache::stats() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return RuntimePlanCacheStats{hits_, misses_, entries_.size()};
 }
 
 } // namespace sandy::engine

@@ -72,4 +72,14 @@ struct DeviceScratchAllocation {
     std::unordered_map<ir::kernel_ir::ValueId, DeviceTensorView> views;
 };
 
+struct DeviceScratchPlacement {
+    core::TensorDesc desc;
+    size_t byteOffset = 0;
+};
+
+struct DeviceScratchLayout {
+    size_t bytes = 0;
+    std::unordered_map<ir::kernel_ir::ValueId, DeviceScratchPlacement> placements;
+};
+
 } // namespace sandy::device

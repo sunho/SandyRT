@@ -102,41 +102,27 @@ Result<void> CudaScratchAllocator::free(ir::kernel_ir::ValueId value) {
     return {};
 }
 
-Result<DeviceScratchAllocation> CudaScratchAllocator::finalize() {
+Result<DeviceScratchLayout> CudaScratchAllocator::finalizeLayout() {
     if (finalized_)
         return make_error("CUDA scratch allocator is already finalized");
     finalized_ = true;
 
-    DeviceScratchAllocation result;
+    DeviceScratchLayout result;
     if (placements_.empty())
         return result;
-    auto buffer = device_.alloc(core::TensorDesc(
-        core::Shape({static_cast<int64_t>(cursor_)}),
-        core::DType::U8));
-    if (!buffer) return make_error(buffer.error());
-    result.buffer = buffer.take();
-
+    result.bytes = cursor_;
     for (const auto& [value, placement] : placements_) {
-        auto view = device_.defaultView(placement.desc);
-        if (!view) {
-            auto deallocated = device_.dealloc(result.buffer);
-            if (!deallocated) return make_error(deallocated.error());
-            return make_error(view.error());
-        }
         auto elementBytes = core::dtype_size(placement.desc.dtype);
         if (placement.byteOffset % kVectorLoadAlignment != 0) {
-            auto deallocated = device_.dealloc(result.buffer);
-            if (!deallocated) return make_error(deallocated.error());
             return make_error("CUDA scratch placement is not vector-load aligned");
         }
         if (placement.byteOffset % elementBytes != 0) {
-            auto deallocated = device_.dealloc(result.buffer);
-            if (!deallocated) return make_error(deallocated.error());
             return make_error("CUDA scratch placement is not element aligned");
         }
-        auto viewValue = view.take();
-        viewValue.storageOffset = static_cast<int64_t>(placement.byteOffset / elementBytes);
-        result.views[value] = DeviceTensorView{result.buffer, std::move(viewValue)};
+        result.placements[value] = DeviceScratchPlacement{
+            placement.desc,
+            placement.byteOffset,
+        };
     }
     return result;
 }
