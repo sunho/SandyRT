@@ -1,6 +1,9 @@
 #include "CudaKernels.h"
+#include "CudaAttentionJit.h"
+#include "CudaJitLaunchUtils.cuh"
 #include "CudaKernelLaunchUtils.cuh"
 #include "CudaKernelUtils.cuh"
+#include "CudaJitAttentionAbi.cuh"
 
 #include <algorithm>
 #include <cmath>
@@ -793,6 +796,131 @@ int choose_decoder_split_size(
     return 1;
 }
 
+bool compatible_paged_kv(const DeviceAttentionProgram& program) {
+    return program.k.access == cuda_kernel::AccessKind::Paged &&
+        program.v.access == cuda_kernel::AccessKind::Paged &&
+        program.k.pageSize == program.v.pageSize &&
+        program.k.pageShift == program.v.pageShift &&
+        program.k.growDim == program.v.growDim &&
+        program.k.pageCount == program.v.pageCount &&
+        program.k.pagedInnerElements == program.v.pagedInnerElements &&
+        program.k.pagedPhysicalPrefixElements ==
+            program.v.pagedPhysicalPrefixElements;
+}
+
+Result<void> launch_attention_decoder_jit(
+        DeviceAttentionProgram program,
+        const CudaLaunchContext& context,
+        const CudaAttentionProgram& compiled,
+        int splitSize) {
+    if (!context.jitCache)
+        return make_error("cuda attention decode JIT cache is null");
+    const int accesses[] = {
+        jit_access_kind(program.q.access),
+        SANDY_JIT_PAGED,
+        SANDY_JIT_PAGED,
+        program.hasPositionOffsets
+            ? jit_access_kind(program.positionOffsets.access)
+            : SANDY_JIT_CONTIGUOUS,
+        jit_access_kind(program.output.access),
+    };
+    auto jit = compiled.jitVariants->getOrCompile(
+        cudaJitAccessKey(accesses), [&] {
+            return compileCudaAttentionDecodeJit(
+                context.cudaDevice, *context.jitCache, compiled.dtype,
+                accesses[0], accesses[4], compiled.rank, compiled.headDim,
+                compiled.queryHeadsPerKv, compiled.hasPositionOffsets,
+                compiled.positionDtype, accesses[3], compiled.window,
+                program.scale);
+        });
+    if (!jit)
+        return make_error(jit.error());
+
+    int numSplits = static_cast<int>(ceil_div_i64(program.tk, splitSize));
+    int64_t stateCount = program.batch * program.qHeads * numSplits;
+    size_t partialElements = static_cast<size_t>(stateCount) *
+        static_cast<size_t>(program.headDim + 2);
+    size_t partialBytes = partialElements * sizeof(float);
+    float* partial = nullptr;
+    auto allocated = cuda_malloc_stream_ordered(
+        &partial, partialBytes, context.stream,
+        "cudaMallocAsync attention decoder JIT partials");
+    if (!allocated)
+        return make_error(allocated.error());
+    auto releasePartial = [&]() -> Result<void> {
+        auto freed = cuda_free_stream_ordered(
+            partial, context.stream,
+            "cudaFreeAsync attention decoder JIT partials");
+        partial = nullptr;
+        return freed;
+    };
+
+    auto q = pack_jit_tensor_arg(program.q);
+    auto k = pack_jit_tensor_arg(program.k);
+    auto v = pack_jit_tensor_arg(program.v);
+    auto output = pack_jit_tensor_arg(program.output);
+    if (!q || !k || !v || !output) {
+        auto released = releasePartial();
+        const auto& error = !q ? q.error() : !k ? k.error() :
+            !v ? v.error() : output.error();
+        return make_error(released ? error : error + "; " + released.error());
+    }
+
+    SandyAttentionDecodeParams params{};
+    params.q = q.take();
+    params.k = k.take();
+    params.v = v.take();
+    params.output = output.take();
+    if (program.hasPositionOffsets) {
+        auto positions = pack_jit_tensor_arg(program.positionOffsets);
+        if (!positions) {
+            auto released = releasePartial();
+            return make_error(
+                released ? positions.error()
+                         : positions.error() + "; " + released.error());
+        }
+        params.positionOffsets = positions.take();
+    }
+    params.partial = partial;
+    params.batch = program.batch;
+    params.qHeads = program.qHeads;
+    params.kvHeads = program.kvHeads;
+    params.tk = program.tk;
+    params.window = program.window;
+    params.scale = program.scale;
+    params.splitSize = splitSize;
+    params.numSplits = numSplits;
+    params.reduce = 0;
+
+    void* arguments[] = {&params};
+    auto partialLaunch = (*jit)->launch(
+        dim3(
+            static_cast<unsigned>(numSplits),
+            static_cast<unsigned>(program.qHeads),
+            static_cast<unsigned>(program.batch)),
+        dim3(32), 0, context.stream, arguments);
+    if (!partialLaunch) {
+        auto released = releasePartial();
+        return make_error(
+            released ? partialLaunch.error()
+                     : partialLaunch.error() + "; " + released.error());
+    }
+
+    params.reduce = 1;
+    auto reduceLaunch = (*jit)->launch(
+        dim3(
+            static_cast<unsigned>(program.qHeads),
+            static_cast<unsigned>(program.batch)),
+        dim3(32), 0, context.stream, arguments);
+    if (!reduceLaunch) {
+        auto released = releasePartial();
+        return make_error(
+            released ? reduceLaunch.error()
+                     : reduceLaunch.error() + "; " + released.error());
+    }
+    return releasePartial();
+}
+
 template <int HeadDim>
 Result<void> launch_attention_decoder_variant(
         DeviceAttentionProgram program,
@@ -1032,6 +1160,15 @@ Result<void> launch_cuda_attention(
         int64_t numSplits = ceil_div_i64(launchProgram.tk, splitSize);
         if (numSplits > std::numeric_limits<unsigned>::max()) {
             return make_error("cuda attention decoder split count exceeds CUDA grid limit");
+        }
+
+        if (program.jitVariants && compatible_paged_kv(launchProgram)) {
+            auto launched = launch_attention_decoder_jit(
+                launchProgram, context, program, splitSize);
+            if (launched)
+                return {};
+            if (!program.jitFallbackOnError)
+                return make_error(launched.error());
         }
 
         switch (launchProgram.headDim) {

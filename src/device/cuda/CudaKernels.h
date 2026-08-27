@@ -134,6 +134,14 @@ struct CudaSlidingQueryKeyScoreProgram {
 struct CudaAttentionProgram {
     int64_t window = 0;
     double scale = -1.0;
+    core::DType dtype = core::DType::F32;
+    core::DType positionDtype = core::DType::I64;
+    int rank = 4;
+    int64_t headDim = 0;
+    int64_t queryHeadsPerKv = 0;
+    bool hasPositionOffsets = false;
+    std::shared_ptr<CudaJitVariants> jitVariants;
+    bool jitFallbackOnError = false;
 };
 
 Result<void> launch_cuda_elementwise(

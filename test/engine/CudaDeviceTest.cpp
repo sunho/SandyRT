@@ -3707,19 +3707,26 @@ TEST(CudaDeviceTest, RunAttentionReadsPagedKeyValueCacheF32) {
         kir::InputSource{kir::InputSourceKind::Argument, 3, ""},
         positions);
     auto output = graph.addValue(tensor_type({batch, qHeads, tq, headDim}));
+    int64_t window = 2;
     auto* op = graph.addOp<kir::AttentionKernelOp>(
         q,
         k,
         v,
         positions,
         output,
-        0,
+        window,
         scale);
     graph.setOutputs({output});
 
     sandy::device::CudaDevice device;
     auto compiled = device.compile(graph);
     ASSERT_TRUE(compiled) << compiled.error();
+    auto compiledAgain = device.compile(graph);
+    ASSERT_TRUE(compiledAgain) << compiledAgain.error();
+    auto jitStats = device.jitCacheStats();
+    EXPECT_EQ(jitStats.misses, 1u);
+    EXPECT_EQ(jitStats.hits, 1u);
+    EXPECT_EQ(jitStats.entries, 1u);
 
     auto qValues = make_pattern(
         static_cast<size_t>(batch * qHeads * tq * headDim),
@@ -3796,7 +3803,7 @@ TEST(CudaDeviceTest, RunAttentionReadsPagedKeyValueCacheF32) {
         tq,
         tk,
         headDim,
-        0,
+        window,
         scale,
         std::vector<int64_t>{tk - 1});
     ASSERT_TRUE(expected) << expected.error();

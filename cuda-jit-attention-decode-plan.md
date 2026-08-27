@@ -7,8 +7,8 @@ resolve paged K/V pointers once per physical page rather than once per scalar
 element. Keep prefill behavior unchanged. Split decode and prefill attention
 sources first so later work can evolve and benchmark them independently.
 
-Every implementation step starts by rereading this document and ends in a
-separate commit. Status and validation results are recorded before committing.
+Every implementation step starts by rereading this document. Status and
+validation results are recorded before committing.
 
 ## Invariants
 
@@ -81,7 +81,7 @@ loop.
 
 ## Step 4: Cached JIT decode partial and reduce kernels
 
-Status: pending
+Status: complete
 
 - Use the highlighted decode ABI/config/kernel sources established in Step 2;
   do not migrate prefill in this task.
@@ -94,11 +94,15 @@ Status: pending
 - Add an enabled-by-default decode JIT flag and explicit fallback-on-error flag,
   mirroring the other migrated CUDA families.
 - Test JIT/fallback parity, cache reuse across changing KV lengths, and useful
-  compile diagnostics, then commit.
+  compile diagnostics.
+
+Validation: the runtime page-boundary/sliding-window attention test and the
+highlighted-source compile test pass. A complete Gemma graph creates exactly
+two new attention modules and reuses them across changing KV lengths.
 
 ## Step 5: Validation and profile comparison
 
-Status: pending
+Status: complete
 
 - Run focused attention tests and the complete CUDA device suite, documenting
   any pre-existing unrelated failure.
@@ -108,4 +112,10 @@ Status: pending
 - Compare decode partial/reduce GPU time, complete attention GPU time, host
   `device.run`, cache behavior, end-to-end decode wall time, and throughput
   against the typed tensor-access profile.
-- Record results here and commit the completed analysis.
+- Record results in the profile artifact analysis.
+
+Validation: Release `-O2 -DNDEBUG` with native CUDA architecture was verified.
+The full CUDA suite passes 70/71 tests; only the known unrelated asynchronous
+gather out-of-range reporting test fails. The warmed benchmark and Nsight trace
+are analyzed in
+`artifacts/gemma4_a4b_bench_1024p_128d_o2_native_warm_attention_decode_jit/profile_analysis.md`.

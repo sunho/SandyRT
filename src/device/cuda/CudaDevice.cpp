@@ -1,5 +1,6 @@
 #include "CudaDevice.h"
 #include "CudaScratchAllocator.h"
+#include "CudaAttentionJit.h"
 #include "CudaElementwiseJit.h"
 #include "CudaGatherJit.h"
 #include "CudaLayoutTransformJit.h"
@@ -8,6 +9,7 @@
 #include "CudaRoPEJit.h"
 #include "CudaSoftmaxJit.h"
 
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <limits>
@@ -490,10 +492,65 @@ Result<DeviceCompiledGraphId> CudaDevice::compile(const ir::kernel_ir::Graph& gr
             case ir::kernel_ir::OpKind::AttentionKernel: {
                 const auto& attention =
                     static_cast<const ir::kernel_ir::AttentionKernelOp&>(op);
-                kernel.program = CudaAttentionProgram{
-                    attention.window(),
-                    attention.scale(),
-                };
+                CudaAttentionProgram program{
+                    attention.window(), attention.scale()};
+                const auto& qType = graph.value(op.inputs()[0]).type;
+                const auto& kType = graph.value(op.inputs()[1]).type;
+                const auto& vType = graph.value(op.inputs()[2]).type;
+                const auto& outputType = graph.value(op.outputs()[0]).type;
+                program.dtype = qType.dtype;
+                program.rank = qType.shape.rank();
+                program.headDim = qType.shape.dim(program.rank - 1);
+                auto qHeads = qType.shape.dim(program.rank - 3);
+                auto kvHeads = kType.shape.dim(program.rank - 3);
+                program.queryHeadsPerKv = kvHeads > 0 ? qHeads / kvHeads : 0;
+                program.hasPositionOffsets = op.inputs().size() == 4;
+                if (program.hasPositionOffsets) {
+                    program.positionDtype =
+                        graph.value(op.inputs()[3]).type.dtype;
+                }
+                if (environment_flag("SANDY_CUDA_ATTENTION_DECODE_JIT", true) &&
+                    qType.shape.dim(program.rank - 2) == 1 &&
+                    default_jit_access(kType) == SANDY_JIT_PAGED &&
+                    default_jit_access(vType) == SANDY_JIT_PAGED) {
+                    program.jitFallbackOnError = environment_flag(
+                        "SANDY_CUDA_ATTENTION_DECODE_JIT_FALLBACK", false);
+                    const int accesses[] = {
+                        default_jit_access(qType),
+                        SANDY_JIT_PAGED,
+                        SANDY_JIT_PAGED,
+                        program.hasPositionOffsets
+                            ? default_jit_access(
+                                  graph.value(op.inputs()[3]).type)
+                            : SANDY_JIT_CONTIGUOUS,
+                        default_jit_access(outputType),
+                    };
+                    float scale = program.scale > 0.0
+                        ? static_cast<float>(program.scale)
+                        : 1.0f / std::sqrt(
+                              static_cast<float>(program.headDim));
+                    auto variants = std::make_shared<CudaJitVariants>();
+                    auto jit = variants->getOrCompile(
+                        cudaJitAccessKey(accesses), [&] {
+                            return compileCudaAttentionDecodeJit(
+                                cudaDevice_, jitCache_, program.dtype,
+                                accesses[0], accesses[4], program.rank,
+                                program.headDim, program.queryHeadsPerKv,
+                                program.hasPositionOffsets,
+                                program.positionDtype, accesses[3],
+                                program.window, scale);
+                        });
+                    if (!jit) {
+                        if (!program.jitFallbackOnError) {
+                            return make_error(
+                                "CUDA attention decode JIT compile failed: " +
+                                jit.error());
+                        }
+                    } else {
+                        program.jitVariants = std::move(variants);
+                    }
+                }
+                kernel.program = std::move(program);
                 break;
             }
             case ir::kernel_ir::OpKind::MoeGatherKernel: {
