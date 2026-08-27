@@ -30,7 +30,7 @@ separate commit. Completed steps are marked in their commit.
 
 ## Step 1: Canonical cache keys and program handles
 
-Status: pending
+Status: complete
 
 - Add a shared `CacheKey`/`CacheKeyBuilder` implementation with stable byte
   encoding, domain separation, hash combining, shapes, dtypes, and paged tensor
@@ -109,4 +109,3 @@ Status: pending
 - Prefill scratch planning: 2.992 ms.
 - Decode scratch planning: 224.690 ms total, 1.769 ms/evaluation.
 - Decode descriptor inference: 112.557 ms total, 0.886 ms/evaluation.
-

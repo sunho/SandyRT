@@ -1,5 +1,6 @@
 add_library(EngineLib
   Engine.cpp
+  InvocationCacheKey.cpp
   RuntimeScratchPlan.cpp
   RuntimeTensorDesc.cpp
 )

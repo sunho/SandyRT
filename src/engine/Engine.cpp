@@ -5,6 +5,8 @@
 #include "RuntimeScratchPlan.h"
 #include "RuntimeTensorDesc.h"
 
+#include <atomic>
+
 #include <algorithm>
 #include <chrono>
 #include <limits>
@@ -24,6 +26,8 @@ using device::DeviceWiseCopier;
 using device::HostBounceDeviceWiseCopier;
 
 namespace {
+
+std::atomic<CompiledProgramId> nextCompiledProgramId{1};
 
 using ir::kernel_ir::Graph;
 using ir::kernel_ir::DeviceTransferOp;
@@ -1094,6 +1098,7 @@ Result<std::unique_ptr<CompiledKernelGraph>> Engine::compile(
         return make_error(lowered.error());
 
     auto compiled = std::make_unique<CompiledKernelGraph>();
+    compiled->programId = nextCompiledProgramId.fetch_add(1, std::memory_order_relaxed);
     compiled->graph = lowered.take();
     compiled->defaultDevice = 0;
     compiled->device = compiled->defaultDevice;

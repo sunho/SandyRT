@@ -12,6 +12,8 @@
 
 namespace sandy::engine {
 
+using CompiledProgramId = uint64_t;
+
 struct RunOptions {};
 
 using device::DeviceBufferId;
@@ -33,6 +35,7 @@ using RunInput = std::variant<TensorBufferPtr, DevicePagedTensorView, RunTensorT
 using RunOutput = std::variant<TensorBufferPtr, DevicePagedTensorView, RunTensorTuple>;
 
 struct CompiledKernelGraph {
+    CompiledProgramId programId = 0;
     std::unique_ptr<ir::kernel_ir::Graph> graph;
 
     ir::kernel_ir::DeviceId defaultDevice = 0;

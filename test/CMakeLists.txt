@@ -156,6 +156,7 @@ set_target_properties(compiler_tests PROPERTIES
 gtest_discover_tests(compiler_tests)
 
 add_executable(engine_tests
+  engine/CacheKeyTest.cpp
   engine/EngineTest.cpp
   engine/EngineCompileTest.cpp
   engine/CpuDeviceTest.cpp

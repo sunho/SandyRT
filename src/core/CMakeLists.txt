@@ -1,5 +1,6 @@
 add_library(CoreLib
   Allocator.cpp
+  CacheKey.cpp
   Tensor.cpp
   TensorBuffer.cpp
   TensorCalc.cpp
