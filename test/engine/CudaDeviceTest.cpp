@@ -749,6 +749,25 @@ TEST(CudaDeviceTest, JitCompileFailureNamesGeneratedHeader) {
               std::string::npos) << result.error();
 }
 
+TEST(CudaDeviceTest, JitAttentionDecodeCompilesPageMajorModule) {
+    if (auto reason = cuda_device_skip_reason(); !reason.empty())
+        GTEST_SKIP() << reason;
+
+    sandy::device::CudaJitRequest request;
+    request.sourceName = "CudaJitAttentionDecodeKernel.cu";
+    request.source = sandy::device::embeddedAttentionDecodeKernelSource();
+    request.headers = sandy::device::embeddedAttentionDecodeHeaders();
+    request.entryName = "sandy_jit_attention_decode";
+    request.options = {"-lineinfo"};
+
+    sandy::device::CudaJitCache cache;
+    auto result = cache.getOrCompile(0, request);
+    ASSERT_TRUE(result) << result.error();
+    auto stats = cache.stats();
+    EXPECT_EQ(stats.misses, 1u);
+    EXPECT_EQ(stats.entries, 1u);
+}
+
 TEST(CudaDeviceTest, ScratchAllocatorFinalizesReusablePlacementLayout) {
     if (auto reason = cuda_device_skip_reason(); !reason.empty())
         GTEST_SKIP() << reason;

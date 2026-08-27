@@ -11,6 +11,50 @@ __device__ __forceinline__ uint16_t sandy_float_to_bf16(float value) {
     return static_cast<uint16_t>((bits + 0x7fffu + lsb) >> 16);
 }
 
+template <int DType>
+struct SandyJitElementType;
+
+template <>
+struct SandyJitElementType<SANDY_JIT_F32> {
+    using Type = float;
+};
+
+template <>
+struct SandyJitElementType<SANDY_JIT_BF16> {
+    using Type = uint16_t;
+};
+
+template <int DType>
+using SandyJitElement = typename SandyJitElementType<DType>::Type;
+
+template <int DType>
+__device__ __forceinline__ float sandy_typed_load(
+        const SandyJitElement<DType>* data,
+        int64_t index) {
+    if constexpr (DType == SANDY_JIT_F32)
+        return data[index];
+    else
+        return sandy_bf16_to_float(data[index]);
+}
+
+template <int DType>
+__device__ __forceinline__ const SandyJitElement<DType>* sandy_paged_page(
+        const SandyJitTensorArg& tensor,
+        int64_t pageOrdinal) {
+    auto pages = static_cast<const SandyJitElement<DType>* const*>(tensor.data);
+    return pages[pageOrdinal];
+}
+
+template <int DType>
+__device__ __forceinline__ const SandyJitElement<DType>* sandy_paged_row(
+        const SandyJitTensorArg& tensor,
+        const SandyJitElement<DType>* page,
+        int64_t prefix,
+        int64_t growInPage) {
+    return page + prefix * tensor.pagedPhysicalPrefixElements +
+        growInPage * tensor.pagedInnerElements;
+}
+
 __device__ __forceinline__ int64_t sandy_strided_index(
         const SandyJitTensorArg& tensor,
         int64_t linear) {

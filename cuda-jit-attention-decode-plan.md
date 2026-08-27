@@ -64,16 +64,20 @@ unchanged.
 
 ## Step 3: Page-major typed decode access
 
-Status: pending
+Status: complete
 
 - Add reusable typed row/page helpers to the highlighted JIT tensor-access
   source.
 - Implement page-segment iteration that handles a split beginning or ending in
   the middle of a page.
 - Retain a contiguous-access specialization with direct consecutive rows.
-- Add focused tests spanning page boundaries, split boundaries, sliding-window
-  boundaries, BF16/F32, and contiguous/paged K/V.
+- Add a focused NVRTC compile test for the page-major module. Runtime parity for
+  page/split/window boundaries follows in Step 4 once dispatch is connected.
 - Commit the access primitive and its tests separately.
+
+Validation: the highlighted decode source compiles successfully through the
+generic JIT cache, including the typed uniform page lookup and page-segment
+loop.
 
 ## Step 4: Cached JIT decode partial and reduce kernels
 

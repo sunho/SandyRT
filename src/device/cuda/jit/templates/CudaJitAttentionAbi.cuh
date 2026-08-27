@@ -17,4 +17,5 @@ struct SandyAttentionDecodeParams {
     float scale;
     int32_t splitSize;
     int32_t numSplits;
+    int32_t reduce;
 };
