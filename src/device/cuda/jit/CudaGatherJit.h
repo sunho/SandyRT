@@ -5,11 +5,14 @@
 
 namespace sandy::device {
 
-Result<CudaJitCache::KernelPtr> compileCudaLayoutTransformJit(
+Result<CudaJitCache::KernelPtr> compileCudaGatherJit(
     int cudaDevice,
     CudaJitCache& cache,
-    core::DType dtype,
-    int inputAccess,
+    core::DType idsDtype,
+    core::DType valueDtype,
+    int tableRank,
+    int idsAccess,
+    int tableAccess,
     int outputAccess);
 
 } // namespace sandy::device

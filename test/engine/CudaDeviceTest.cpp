@@ -594,13 +594,31 @@ TEST(CudaDeviceTest, ElementwiseJitEmitterProducesStraightLineExpressions) {
     auto emitted = sandy::device::emitCudaElementwiseJitSource(program);
     ASSERT_TRUE(emitted) << emitted.error();
     EXPECT_NE(emitted->evaluatorSource.find(
-                  "const float s0 = loader.template load<SANDY_JIT_F32>(0);"),
+                  "const float s0 = loader.template load<0, SANDY_JIT_F32, "
+                  "SandyElementwiseInputAccess<0>>();"),
               std::string::npos);
     EXPECT_NE(emitted->evaluatorSource.find("const float s2 = s0 * s1;"),
               std::string::npos);
     EXPECT_NE(emitted->evaluatorSource.find("const float s3 = fmaxf(s2, 0.0f);"),
               std::string::npos);
     EXPECT_EQ(emitted->evaluatorSource.find("switch"), std::string::npos);
+}
+
+TEST(CudaDeviceTest, JitTensorAccessSpecializesDTypeAndAccessAtCompileTime) {
+    auto headers = sandy::device::embeddedElementwiseHeaders();
+    auto access = std::find_if(
+        headers.begin(),
+        headers.end(),
+        [](const sandy::device::CudaJitHeader& header) {
+            return header.name == "CudaJitTensorAccess.cuh";
+        });
+    ASSERT_NE(access, headers.end());
+    EXPECT_NE(access->source.find("template <int Access>"), std::string::npos);
+    EXPECT_NE(access->source.find("if constexpr (Access =="), std::string::npos);
+    EXPECT_NE(access->source.find("template <int DType, int Access>"),
+              std::string::npos);
+    EXPECT_EQ(access->source.find("tensor.access"), std::string::npos);
+    EXPECT_EQ(access->source.find("tensor.dtype =="), std::string::npos);
 }
 
 TEST(CudaDeviceTest, ElementwiseJitSourceExcludesRuntimeTensorProperties) {
@@ -934,6 +952,14 @@ TEST(CudaDeviceTest, RunElementwiseBF16WithStridedInput) {
     };
     auto run = device.run(*compiled, op->id(), inputs, outputs);
     ASSERT_TRUE(run) << run.error();
+    auto afterFirstRun = device.jitCacheStats();
+    EXPECT_EQ(afterFirstRun.misses, 2u);
+    EXPECT_EQ(afterFirstRun.entries, 2u);
+    auto runAgain = device.run(*compiled, op->id(), inputs, outputs);
+    ASSERT_TRUE(runAgain) << runAgain.error();
+    auto afterSecondRun = device.jitCacheStats();
+    EXPECT_EQ(afterSecondRun.misses, 2u);
+    EXPECT_EQ(afterSecondRun.entries, 2u);
     expect_bf16_output_near(device, *outputBuffer, {1.5f, 4.5f, 2.5f, 5.5f, 3.5f, 6.5f});
 }
 
@@ -1445,6 +1471,12 @@ TEST(CudaDeviceTest, RunGatherF32WithI32Ids) {
     sandy::device::CudaDevice device;
     auto compiled = device.compile(graph);
     ASSERT_TRUE(compiled) << compiled.error();
+    auto compiledAgain = device.compile(graph);
+    ASSERT_TRUE(compiledAgain) << compiledAgain.error();
+    auto stats = device.jitCacheStats();
+    EXPECT_EQ(stats.misses, 1u);
+    EXPECT_EQ(stats.hits, 1u);
+    EXPECT_EQ(stats.entries, 1u);
 
     auto idsHost = make_i32_buffer("ids", sandy::core::Shape({3}), {2, 0, 3});
     auto tableHost = make_f32_buffer(
@@ -1537,6 +1569,57 @@ TEST(CudaDeviceTest, RunGatherF32WithI64IdsKeepsLeadingDims) {
         device,
         *outputBuffer,
         {3.0f, 4.0f, 7.0f, 8.0f, 1.0f, 2.0f, 5.0f, 6.0f});
+}
+
+TEST(CudaDeviceTest, RunGatherJitBF16WithI64Ids) {
+    if (auto reason = cuda_device_skip_reason(); !reason.empty())
+        GTEST_SKIP() << reason;
+    namespace kir = sandy::ir::kernel_ir;
+
+    kir::Graph graph;
+    auto ids = graph.addValue(tensor_type({2}, sandy::core::DType::I64));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 0, ""},
+        ids);
+    auto table = graph.addValue(tensor_type({3, 2}, sandy::core::DType::BF16));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 1, ""},
+        table);
+    auto output = graph.addValue(tensor_type({2, 2}, sandy::core::DType::BF16));
+    auto* op = graph.addOp<kir::GatherKernelOp>(ids, table, output);
+    graph.setOutputs({output});
+
+    sandy::device::CudaDevice device;
+    auto compiled = device.compile(graph);
+    ASSERT_TRUE(compiled) << compiled.error();
+
+    auto idsHost = make_i64_buffer("ids", sandy::core::Shape({2}), {2, 0});
+    auto tableHost = make_bf16_buffer(
+        "table",
+        sandy::core::Shape({3, 2}),
+        {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f});
+    auto idsBuffer = device.load(*idsHost);
+    ASSERT_TRUE(idsBuffer) << idsBuffer.error();
+    auto tableBuffer = device.load(*tableHost);
+    ASSERT_TRUE(tableBuffer) << tableBuffer.error();
+    auto outputBuffer = device.alloc(
+        sandy::core::TensorDesc({2, 2}, sandy::core::DType::BF16));
+    ASSERT_TRUE(outputBuffer) << outputBuffer.error();
+
+    std::vector<sandy::device::DeviceRunValue> inputs = {
+        tensor_view(device, *idsBuffer, idsHost->desc()),
+        tensor_view(device, *tableBuffer, tableHost->desc()),
+    };
+    std::vector<sandy::device::DeviceRunValue> outputs = {
+        tensor_view(
+            device,
+            *outputBuffer,
+            sandy::core::TensorDesc({2, 2}, sandy::core::DType::BF16)),
+    };
+    auto run = device.run(*compiled, op->id(), inputs, outputs);
+    ASSERT_TRUE(run) << run.error();
+
+    expect_bf16_output_near(device, *outputBuffer, {5.0f, 6.0f, 1.0f, 2.0f});
 }
 
 TEST(CudaDeviceTest, RunGatherF32Rank1WeightReturnsScalarLookup) {

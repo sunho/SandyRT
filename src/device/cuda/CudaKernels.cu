@@ -2,6 +2,7 @@
 #include "CudaKernelLaunchUtils.cuh"
 #include "CudaKernelUtils.cuh"
 #include "jit/CudaJitLaunchUtils.cuh"
+#include "jit/CudaReductionJit.h"
 #include "jit/templates/CudaJitReductionAbi.cuh"
 
 #include <limits>
@@ -142,26 +143,47 @@ Result<void> launch_cuda_reduction(
     if (blockCount > std::numeric_limits<int>::max())
         return make_error("cuda reduction block count exceeds grid limit");
 
-    if (program.jitKernel) {
-        auto input = pack_jit_tensor_arg(launchProgram.input);
-        if (!input)
-            return make_error(input.error());
-        auto output = pack_jit_tensor_arg(launchProgram.output);
-        if (!output)
-            return make_error(output.error());
-        SandyReductionParams params{
-            input.take(),
-            output.take(),
-            launchProgram.axis,
-            launchProgram.reduceDim,
+    if (program.jitVariants) {
+        if (!context.jitCache)
+            return make_error("cuda reduction JIT cache is null");
+        const int accesses[] = {
+            jit_access_kind(launchProgram.input.access),
+            jit_access_kind(launchProgram.output.access),
         };
-        void* arguments[] = {&params};
-        return program.jitKernel->launch(
-            dim3(static_cast<unsigned>(blockCount)),
-            dim3(cuda_kernel::kBlockSize),
-            0,
-            context.stream,
-            arguments);
+        auto jit = program.jitVariants->getOrCompile(
+            cudaJitAccessKey(accesses),
+            [&] {
+                return compileCudaReductionJit(
+                    context.cudaDevice,
+                    *context.jitCache,
+                    launchProgram.input.dtype,
+                    accesses[0],
+                    accesses[1]);
+            });
+        if (!jit) {
+            if (!program.jitFallbackOnError)
+                return make_error(jit.error());
+        } else {
+            auto input = pack_jit_tensor_arg(launchProgram.input);
+            if (!input)
+                return make_error(input.error());
+            auto output = pack_jit_tensor_arg(launchProgram.output);
+            if (!output)
+                return make_error(output.error());
+            SandyReductionParams params{
+                input.take(),
+                output.take(),
+                launchProgram.axis,
+                launchProgram.reduceDim,
+            };
+            void* arguments[] = {&params};
+            return (*jit)->launch(
+                dim3(static_cast<unsigned>(blockCount)),
+                dim3(cuda_kernel::kBlockSize),
+                0,
+                context.stream,
+                arguments);
+        }
     }
 
     reduction_sum_keepdims_kernel<<<

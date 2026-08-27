@@ -1,6 +1,9 @@
 #include "CudaKernels.h"
 #include "CudaKernelLaunchUtils.cuh"
 #include "CudaKernelUtils.cuh"
+#include "jit/CudaJitLaunchUtils.cuh"
+#include "jit/CudaGatherJit.h"
+#include "jit/templates/CudaJitGatherAbi.cuh"
 
 #include <cstdint>
 #include <limits>
@@ -358,7 +361,9 @@ __global__ void moe_gather_copy_x_kernel(
 
 } // namespace
 
-Result<void> launch_cuda_gather(const CudaLaunchContext& context) {
+Result<void> launch_cuda_gather(
+        const CudaLaunchContext& context,
+        const CudaGatherProgram& compiled) {
     auto valid = validate_context(context, 2, 1, "gather");
     if (!valid)
         return make_error(valid.error());
@@ -377,6 +382,57 @@ Result<void> launch_cuda_gather(const CudaLaunchContext& context) {
     int blocks = static_cast<int>(
         (program.outputNumel + cuda_kernel::kBlockSize - 1) /
         cuda_kernel::kBlockSize);
+    if (compiled.jitVariants) {
+        if (!context.jitCache)
+            return make_error("cuda gather JIT cache is null");
+        const int accesses[] = {
+            jit_access_kind(program.ids.access),
+            jit_access_kind(program.table.access),
+            jit_access_kind(program.output.access),
+        };
+        auto jit = compiled.jitVariants->getOrCompile(
+            cudaJitAccessKey(accesses),
+            [&] {
+                return compileCudaGatherJit(
+                    context.cudaDevice,
+                    *context.jitCache,
+                    compiled.idsDtype,
+                    compiled.valueDtype,
+                    compiled.tableRank,
+                    accesses[0],
+                    accesses[1],
+                    accesses[2]);
+            });
+        if (!jit) {
+            if (!compiled.jitFallbackOnError)
+                return make_error(jit.error());
+        } else {
+            auto ids = pack_jit_tensor_arg(program.ids);
+            if (!ids)
+                return make_error(ids.error());
+            auto table = pack_jit_tensor_arg(program.table);
+            if (!table)
+                return make_error(table.error());
+            auto output = pack_jit_tensor_arg(program.output);
+            if (!output)
+                return make_error(output.error());
+            SandyGatherParams params{
+                ids.take(),
+                table.take(),
+                output.take(),
+                program.vocab,
+                program.hidden,
+                errorFlag,
+            };
+            void* arguments[] = {&params};
+            return (*jit)->launch(
+                dim3(static_cast<unsigned>(blocks)),
+                dim3(cuda_kernel::kBlockSize),
+                0,
+                context.stream,
+                arguments);
+        }
+    }
     gather_kernel<<<blocks, cuda_kernel::kBlockSize, 0, context.stream>>>(
         program,
         errorFlag);

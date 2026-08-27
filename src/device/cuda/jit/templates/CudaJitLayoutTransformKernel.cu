@@ -8,6 +8,9 @@ extern "C" __global__ void sandy_jit_layout_transform(
         static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (linear >= params.output.numel)
         return;
-    sandy_runtime_copy_element<SandyLayoutElement>(
+    sandy_runtime_copy_element<
+        SandyLayoutElement,
+        SandyLayoutInputAccess,
+        SandyLayoutOutputAccess>(
         params.input, params.output, linear);
 }

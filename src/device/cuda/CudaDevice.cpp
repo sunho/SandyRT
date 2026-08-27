@@ -1,6 +1,7 @@
 #include "CudaDevice.h"
 #include "CudaScratchAllocator.h"
 #include "CudaElementwiseJit.h"
+#include "CudaGatherJit.h"
 #include "CudaLayoutTransformJit.h"
 #include "CudaReductionJit.h"
 
@@ -75,6 +76,12 @@ bool environment_flag(const char* name, bool defaultValue) {
     if (text == "1" || text == "true" || text == "on" || text == "yes")
         return true;
     return defaultValue;
+}
+
+int default_jit_access(const ir::kernel_ir::ValueType& type) {
+    return type.kind == ir::kernel_ir::ValueKind::PagedTensor
+        ? SANDY_JIT_PAGED
+        : SANDY_JIT_CONTIGUOUS;
 }
 
 } // namespace
@@ -210,17 +217,28 @@ Result<DeviceCompiledGraphId> CudaDevice::compile(const ir::kernel_ir::Graph& gr
                     layout.dims(),
                 };
                 if (environment_flag("SANDY_CUDA_LAYOUT_TRANSFORM_JIT", true)) {
-                    auto jit = compileCudaLayoutTransformJit(
-                        cudaDevice_,
-                        jitCache_,
-                        graph.value(op.inputs()[0]).type.dtype);
+                    program.jitFallbackOnError = environment_flag(
+                        "SANDY_CUDA_LAYOUT_TRANSFORM_JIT_FALLBACK", false);
+                    const auto& inputType = graph.value(op.inputs()[0]).type;
+                    const auto& outputType = graph.value(op.outputs()[0]).type;
+                    const int accesses[] = {
+                        default_jit_access(inputType),
+                        default_jit_access(outputType),
+                    };
+                    auto variants = std::make_shared<CudaJitVariants>();
+                    auto jit = variants->getOrCompile(
+                        cudaJitAccessKey(accesses),
+                        [&] {
+                            return compileCudaLayoutTransformJit(
+                                cudaDevice_, jitCache_, inputType.dtype,
+                                accesses[0], accesses[1]);
+                        });
                     if (!jit) {
-                        if (!environment_flag(
-                                "SANDY_CUDA_LAYOUT_TRANSFORM_JIT_FALLBACK", false))
+                        if (!program.jitFallbackOnError)
                             return make_error(
                                 "CUDA layout transform JIT compile failed: " + jit.error());
                     } else {
-                        program.jitKernel = jit.take();
+                        program.jitVariants = std::move(variants);
                     }
                 }
                 kernel.program = std::move(program);
@@ -236,12 +254,29 @@ Result<DeviceCompiledGraphId> CudaDevice::compile(const ir::kernel_ir::Graph& gr
                     elementwise.scalars(),
                 };
                 if (environment_flag("SANDY_CUDA_ELEMENTWISE_JIT", true)) {
-                    auto jit = compileCudaElementwiseJit(cudaDevice_, jitCache_, program);
+                    program.jitFallbackOnError = environment_flag(
+                        "SANDY_CUDA_ELEMENTWISE_JIT_FALLBACK", false);
+                    std::vector<int> inputAccesses;
+                    inputAccesses.reserve(program.elementwiseInputs.size());
+                    for (const auto& input : program.elementwiseInputs)
+                        inputAccesses.push_back(default_jit_access(graph.value(input.value).type));
+                    int outputAccess =
+                        default_jit_access(graph.value(program.output).type);
+                    std::vector<int> accesses = inputAccesses;
+                    accesses.push_back(outputAccess);
+                    auto variants = std::make_shared<CudaJitVariants>();
+                    auto jit = variants->getOrCompile(
+                        cudaJitAccessKey(accesses),
+                        [&] {
+                            return compileCudaElementwiseJit(
+                                cudaDevice_, jitCache_, program,
+                                inputAccesses, outputAccess);
+                        });
                     if (!jit) {
-                        if (!environment_flag("SANDY_CUDA_ELEMENTWISE_JIT_FALLBACK", false))
+                        if (!program.jitFallbackOnError)
                             return make_error("CUDA elementwise JIT compile failed: " + jit.error());
                     } else {
-                        program.jitKernel = jit.take();
+                        program.jitVariants = std::move(variants);
                     }
                 }
                 kernel.program = std::move(program);
@@ -256,15 +291,27 @@ Result<DeviceCompiledGraphId> CudaDevice::compile(const ir::kernel_ir::Graph& gr
                     reduction.keepDims(),
                 };
                 if (environment_flag("SANDY_CUDA_REDUCTION_JIT", true)) {
-                    auto jit = compileCudaReductionJit(
-                        cudaDevice_,
-                        jitCache_,
-                        graph.value(op.inputs()[0]).type.dtype);
+                    program.jitFallbackOnError = environment_flag(
+                        "SANDY_CUDA_REDUCTION_JIT_FALLBACK", false);
+                    const auto& inputType = graph.value(op.inputs()[0]).type;
+                    const auto& outputType = graph.value(op.outputs()[0]).type;
+                    const int accesses[] = {
+                        default_jit_access(inputType),
+                        default_jit_access(outputType),
+                    };
+                    auto variants = std::make_shared<CudaJitVariants>();
+                    auto jit = variants->getOrCompile(
+                        cudaJitAccessKey(accesses),
+                        [&] {
+                            return compileCudaReductionJit(
+                                cudaDevice_, jitCache_, inputType.dtype,
+                                accesses[0], accesses[1]);
+                        });
                     if (!jit) {
-                        if (!environment_flag("SANDY_CUDA_REDUCTION_JIT_FALLBACK", false))
+                        if (!program.jitFallbackOnError)
                             return make_error("CUDA reduction JIT compile failed: " + jit.error());
                     } else {
-                        program.jitKernel = jit.take();
+                        program.jitVariants = std::move(variants);
                     }
                 }
                 kernel.program = std::move(program);
@@ -281,9 +328,42 @@ Result<DeviceCompiledGraphId> CudaDevice::compile(const ir::kernel_ir::Graph& gr
                 };
                 break;
             }
-            case ir::kernel_ir::OpKind::GatherKernel:
-                kernel.program = std::monostate{};
+            case ir::kernel_ir::OpKind::GatherKernel: {
+                CudaGatherProgram program;
+                if (environment_flag("SANDY_CUDA_GATHER_JIT", true)) {
+                    program.jitFallbackOnError = environment_flag(
+                        "SANDY_CUDA_GATHER_JIT_FALLBACK", false);
+                    const auto inputs = op.inputs();
+                    const auto& idsType = graph.value(inputs[0]).type;
+                    const auto& tableType = graph.value(inputs[1]).type;
+                    const auto& outputType = graph.value(op.outputs()[0]).type;
+                    program.idsDtype = idsType.dtype;
+                    program.valueDtype = tableType.dtype;
+                    program.tableRank = tableType.shape.rank();
+                    const int accesses[] = {
+                        default_jit_access(idsType),
+                        default_jit_access(tableType),
+                        default_jit_access(outputType),
+                    };
+                    auto variants = std::make_shared<CudaJitVariants>();
+                    auto jit = variants->getOrCompile(
+                        cudaJitAccessKey(accesses),
+                        [&] {
+                            return compileCudaGatherJit(
+                                cudaDevice_, jitCache_, program.idsDtype,
+                                program.valueDtype, program.tableRank,
+                                accesses[0], accesses[1], accesses[2]);
+                        });
+                    if (!jit) {
+                        if (!program.jitFallbackOnError)
+                            return make_error("CUDA gather JIT compile failed: " + jit.error());
+                    } else {
+                        program.jitVariants = std::move(variants);
+                    }
+                }
+                kernel.program = std::move(program);
                 break;
+            }
             case ir::kernel_ir::OpKind::SoftmaxKernel: {
                 const auto& softmax = static_cast<const ir::kernel_ir::SoftmaxKernelOp&>(op);
                 kernel.program = CudaSoftmaxProgram{softmax.axis()};
@@ -582,6 +662,7 @@ Result<void> CudaDevice::run(
         inputViews,
         outputViews,
         kernel.kind == ir::kernel_ir::OpKind::AttentionKernel ? &deviceProps_ : nullptr,
+        &jitCache_,
     };
 
     switch (kernel.kind) {
@@ -607,7 +688,9 @@ Result<void> CudaDevice::run(
                 context,
                 std::get<CudaMatMulProgram>(kernel.program));
         case ir::kernel_ir::OpKind::GatherKernel:
-            return launch_cuda_gather(context);
+            return launch_cuda_gather(
+                context,
+                std::get<CudaGatherProgram>(kernel.program));
         case ir::kernel_ir::OpKind::SoftmaxKernel:
             return launch_cuda_softmax(
                 context,

@@ -23,7 +23,9 @@ Each item gets focused correctness/cache coverage and a separate commit.
 2. Layout transform (complete: dtype-specialized raw copies with no runtime
    size switch; focused JIT/fallback tests pass; full suite 65/66 with only the
    pre-existing asynchronous gather bounds failure)
-3. Gather
+3. Gather (complete: per-role ID/value/access specialization, lazy access
+   variants, focused JIT/fallback tests pass; full suite 67/68 with only the
+   pre-existing asynchronous gather bounds failure)
 4. Softmax
 5. Norm
 6. RoPE
@@ -41,6 +43,10 @@ each JIT family establishes parity.
 - Build and benchmark with `-O2` and `CMAKE_CUDA_ARCHITECTURES=native`.
 - A compiled program has a stable monotonic handle; global caches do not use raw
   pointers as identities.
+- Tensor dtype and access kind are compile-time JIT policies per ordered tensor
+  role. Default graph policies are prewarmed; runtime view changes lazily compile
+  once into a per-operation variant cache. Shapes, strides, pointers, and paged
+  lengths remain runtime ABI data.
 - Tensor signatures include kind, dtype, every concrete dimension, tuple order,
   and paged grow dimension/page size.
 - Scratch cache entries contain immutable descriptor/placement calculations,
@@ -53,8 +59,8 @@ each JIT family establishes parity.
   which runtime properties appear in its generated source.
 - Hand-written JIT CUDA lives in real `.cu`/`.cuh` files for syntax highlighting
   and is embedded into the binary at build time.
-- The initial JIT specializes only scalar evaluation. Runtime load/store policies
-  preserve contiguous, strided, broadcast, BF16/F32, and paged behavior.
+- Shared JIT tensor access templates preserve contiguous, strided, broadcast,
+  BF16/F32, and paged behavior without runtime dtype/access switches.
 - The current interpreter remains available as an explicit fallback until JIT
   parity is established.
 

@@ -4,6 +4,7 @@
 #include "CudaKernels.h"
 
 #include <string>
+#include <span>
 
 namespace sandy::device {
 
@@ -18,6 +19,8 @@ Result<CudaElementwiseJitSource> emitCudaElementwiseJitSource(
 Result<CudaJitCache::KernelPtr> compileCudaElementwiseJit(
     int cudaDevice,
     CudaJitCache& cache,
-    const CudaElementwiseProgram& program);
+    const CudaElementwiseProgram& program,
+    std::span<const int> inputAccesses,
+    int outputAccess);
 
 } // namespace sandy::device

@@ -12,5 +12,7 @@ std::string_view embeddedReductionKernelSource();
 std::vector<CudaJitHeader> embeddedReductionHeaders();
 std::string_view embeddedLayoutTransformKernelSource();
 std::vector<CudaJitHeader> embeddedLayoutTransformHeaders();
+std::string_view embeddedGatherKernelSource();
+std::vector<CudaJitHeader> embeddedGatherHeaders();
 
 } // namespace sandy::device

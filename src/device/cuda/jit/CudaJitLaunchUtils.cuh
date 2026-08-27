@@ -5,6 +5,18 @@
 
 namespace sandy::device {
 
+inline int jit_access_kind(cuda_kernel::AccessKind access) {
+    switch (access) {
+        case cuda_kernel::AccessKind::Contiguous:
+            return SANDY_JIT_CONTIGUOUS;
+        case cuda_kernel::AccessKind::Strided:
+            return SANDY_JIT_STRIDED;
+        case cuda_kernel::AccessKind::Paged:
+            return SANDY_JIT_PAGED;
+    }
+    return SANDY_JIT_STRIDED;
+}
+
 inline Result<SandyJitTensorArg> pack_jit_tensor_arg(
         const cuda_kernel::TensorArg& source) {
     SandyJitTensorArg target{};

@@ -1,6 +1,7 @@
 #include "CudaLayoutTransformJit.h"
 
 #include "CudaJitEmbeddedSources.h"
+#include "CudaJitPolicy.h"
 
 namespace sandy::device {
 
@@ -34,10 +35,22 @@ Result<std::string> layout_element_config(core::DType dtype) {
 Result<CudaJitCache::KernelPtr> compileCudaLayoutTransformJit(
         int cudaDevice,
         CudaJitCache& cache,
-        core::DType dtype) {
+        core::DType dtype,
+        int inputAccess,
+        int outputAccess) {
     auto config = layout_element_config(dtype);
     if (!config)
         return make_error(config.error());
+    auto inputPolicy = cudaJitAccessConstant(inputAccess);
+    if (!inputPolicy)
+        return make_error(inputPolicy.error());
+    auto outputPolicy = cudaJitAccessConstant(outputAccess);
+    if (!outputPolicy)
+        return make_error(outputPolicy.error());
+    *config += "inline constexpr int SandyLayoutInputAccess = " +
+        std::string(*inputPolicy) + ";\n";
+    *config += "inline constexpr int SandyLayoutOutputAccess = " +
+        std::string(*outputPolicy) + ";\n";
     CudaJitRequest request;
     request.sourceName = "CudaJitLayoutTransformKernel.cu";
     request.source = embeddedLayoutTransformKernelSource();

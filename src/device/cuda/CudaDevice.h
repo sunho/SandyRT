@@ -57,6 +57,7 @@ private:
         std::monostate,
         CudaElementwiseProgram,
         CudaLayoutTransformProgram,
+        CudaGatherProgram,
         CudaMatMulProgram,
         CudaMoeGatherProgram,
         CudaMoeMatMulProgram,

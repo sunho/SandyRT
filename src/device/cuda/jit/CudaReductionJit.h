@@ -8,6 +8,8 @@ namespace sandy::device {
 Result<CudaJitCache::KernelPtr> compileCudaReductionJit(
     int cudaDevice,
     CudaJitCache& cache,
-    core::DType dtype);
+    core::DType dtype,
+    int inputAccess,
+    int outputAccess);
 
 } // namespace sandy::device

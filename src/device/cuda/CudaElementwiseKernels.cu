@@ -1,6 +1,7 @@
 #include "CudaKernels.h"
 #include "CudaKernelLaunchUtils.cuh"
 #include "CudaKernelUtils.cuh"
+#include "jit/CudaElementwiseJit.h"
 #include "jit/CudaJitLaunchUtils.cuh"
 
 #include <cmath>
@@ -232,18 +233,42 @@ Result<void> launch_cuda_elementwise(
     int blocks = static_cast<int>(
         (launchProgram.numel + cuda_kernel::kBlockSize - 1) /
         cuda_kernel::kBlockSize);
-    if (program.jitKernel) {
-        auto params = pack_jit_elementwise_params(launchProgram);
-        if (!params)
-            return make_error(params.error());
-        auto launchParams = params.take();
-        void* arguments[] = {&launchParams};
-        return program.jitKernel->launch(
-            dim3(static_cast<unsigned>(blocks)),
-            dim3(cuda_kernel::kBlockSize),
-            0,
-            context.stream,
-            arguments);
+    if (program.jitVariants) {
+        if (!context.jitCache)
+            return make_error("cuda elementwise JIT cache is null");
+        std::vector<int> inputAccesses;
+        inputAccesses.reserve(static_cast<size_t>(launchProgram.inputs.count));
+        for (int i = 0; i < launchProgram.inputs.count; ++i)
+            inputAccesses.push_back(jit_access_kind(launchProgram.inputs.items[i].access));
+        int outputAccess = jit_access_kind(launchProgram.output.access);
+        std::vector<int> accesses = inputAccesses;
+        accesses.push_back(outputAccess);
+        auto jit = program.jitVariants->getOrCompile(
+            cudaJitAccessKey(accesses),
+            [&] {
+                return compileCudaElementwiseJit(
+                    context.cudaDevice,
+                    *context.jitCache,
+                    program,
+                    inputAccesses,
+                    outputAccess);
+            });
+        if (!jit) {
+            if (!program.jitFallbackOnError)
+                return make_error(jit.error());
+        } else {
+            auto params = pack_jit_elementwise_params(launchProgram);
+            if (!params)
+                return make_error(params.error());
+            auto launchParams = params.take();
+            void* arguments[] = {&launchParams};
+            return (*jit)->launch(
+                dim3(static_cast<unsigned>(blocks)),
+                dim3(cuda_kernel::kBlockSize),
+                0,
+                context.stream,
+                arguments);
+        }
     }
     elementwise_kernel<<<blocks, cuda_kernel::kBlockSize, 0, context.stream>>>(
         launchProgram);

@@ -2,6 +2,7 @@
 
 #include "CacheKey.h"
 #include "CudaJitEmbeddedSources.h"
+#include "CudaJitPolicy.h"
 
 #include <bit>
 #include <cstdint>
@@ -63,8 +64,9 @@ Result<std::string> scalar_expression(const ScalarNode& node) {
             auto dtype = jit_float_dtype(node.dtype);
             if (!dtype)
                 return make_error(dtype.error());
-            return "loader.template load<" + dtype.take() + ">(" +
-                std::to_string(node.inputIndex) + ")";
+            auto index = std::to_string(node.inputIndex);
+            return "loader.template load<" + index + ", " + dtype.take() +
+                ", SandyElementwiseInputAccess<" + index + ">>()";
         }
         case ScalarOp::Constant: {
             float value = static_cast<float>(node.constant);
@@ -164,10 +166,33 @@ Result<CudaElementwiseJitSource> emitCudaElementwiseJitSource(
 Result<CudaJitCache::KernelPtr> compileCudaElementwiseJit(
         int cudaDevice,
         CudaJitCache& cache,
-        const CudaElementwiseProgram& program) {
+        const CudaElementwiseProgram& program,
+        std::span<const int> inputAccesses,
+        int outputAccess) {
     auto generated = emitCudaElementwiseJitSource(program);
     if (!generated)
         return make_error(generated.error());
+    if (inputAccesses.size() != program.elementwiseInputs.size())
+        return make_error("CUDA elementwise JIT access policy count mismatch");
+
+    std::ostringstream config;
+    config << "#pragma once\n\n"
+           << "template <int InputIndex>\n"
+           << "inline constexpr int SandyElementwiseInputAccess = "
+           << "SANDY_JIT_CONTIGUOUS;\n";
+    for (size_t i = 0; i < inputAccesses.size(); ++i) {
+        auto access = cudaJitAccessConstant(inputAccesses[i]);
+        if (!access)
+            return make_error(access.error());
+        config << "template <>\ninline constexpr int "
+               << "SandyElementwiseInputAccess<" << i << "> = "
+               << *access << ";\n";
+    }
+    auto outputPolicy = cudaJitAccessConstant(outputAccess);
+    if (!outputPolicy)
+        return make_error(outputPolicy.error());
+    config << "inline constexpr int SandyElementwiseOutputAccess = "
+           << *outputPolicy << ";\n";
 
     CudaJitRequest request;
     request.sourceName = "CudaJitElementwiseKernel.cu";
@@ -176,6 +201,8 @@ Result<CudaJitCache::KernelPtr> compileCudaElementwiseJit(
     for (auto& header : request.headers) {
         if (header.name == "generated/ElementwiseEvaluator.cuh")
             header.source = generated->evaluatorSource;
+        else if (header.name == "generated/ElementwiseConfig.cuh")
+            header.source = config.str();
     }
     request.entryName = generated->entryName;
     request.options = {

@@ -23,37 +23,40 @@ __device__ __forceinline__ int64_t sandy_strided_index(
     return storage;
 }
 
+template <int Access>
 __device__ __forceinline__ void* sandy_storage_data(
         const SandyJitTensorArg& tensor,
         int64_t linear,
         int64_t* storage) {
-    if (tensor.access != SANDY_JIT_PAGED) {
-        *storage = tensor.access == SANDY_JIT_CONTIGUOUS
-            ? tensor.storageOffset + linear
-            : sandy_strided_index(tensor, linear);
+    if constexpr (Access == SANDY_JIT_CONTIGUOUS) {
+        *storage = tensor.storageOffset + linear;
         return tensor.data;
+    } else if constexpr (Access == SANDY_JIT_STRIDED) {
+        *storage = sandy_strided_index(tensor, linear);
+        return tensor.data;
+    } else {
+        int64_t prefix = linear / tensor.pagedLogicalPrefixElements;
+        int64_t remainder = linear - prefix * tensor.pagedLogicalPrefixElements;
+        int64_t grow = remainder / tensor.pagedInnerElements;
+        int64_t inner = remainder - grow * tensor.pagedInnerElements;
+        int64_t pageOrdinal = grow >> tensor.pageShift;
+        int64_t growInPage = grow & tensor.pageMask;
+        if (pageOrdinal < 0 || pageOrdinal >= tensor.pageCount) {
+            *storage = -1;
+            return nullptr;
+        }
+        *storage = prefix * tensor.pagedPhysicalPrefixElements +
+                   growInPage * tensor.pagedInnerElements + inner;
+        return static_cast<void**>(tensor.data)[pageOrdinal];
     }
-    int64_t prefix = linear / tensor.pagedLogicalPrefixElements;
-    int64_t remainder = linear - prefix * tensor.pagedLogicalPrefixElements;
-    int64_t grow = remainder / tensor.pagedInnerElements;
-    int64_t inner = remainder - grow * tensor.pagedInnerElements;
-    int64_t pageOrdinal = grow >> tensor.pageShift;
-    int64_t growInPage = grow & tensor.pageMask;
-    if (pageOrdinal < 0 || pageOrdinal >= tensor.pageCount) {
-        *storage = -1;
-        return nullptr;
-    }
-    *storage = prefix * tensor.pagedPhysicalPrefixElements +
-               growInPage * tensor.pagedInnerElements + inner;
-    return static_cast<void**>(tensor.data)[pageOrdinal];
 }
 
-template <int DType>
+template <int DType, int Access>
 __device__ __forceinline__ float sandy_runtime_load(
         const SandyJitTensorArg& tensor,
         int64_t linear) {
     int64_t storage = -1;
-    const void* data = sandy_storage_data(tensor, linear, &storage);
+    const void* data = sandy_storage_data<Access>(tensor, linear, &storage);
     if (!data || storage < 0)
         return 0.0f;
     if constexpr (DType == SANDY_JIT_F32)
@@ -62,13 +65,13 @@ __device__ __forceinline__ float sandy_runtime_load(
         return sandy_bf16_to_float(static_cast<const uint16_t*>(data)[storage]);
 }
 
-template <int DType>
+template <int DType, int Access>
 __device__ __forceinline__ void sandy_runtime_store(
         const SandyJitTensorArg& tensor,
         int64_t linear,
         float value) {
     int64_t storage = -1;
-    void* data = sandy_storage_data(tensor, linear, &storage);
+    void* data = sandy_storage_data<Access>(tensor, linear, &storage);
     if (!data || storage < 0)
         return;
     if constexpr (DType == SANDY_JIT_F32)
@@ -77,41 +80,54 @@ __device__ __forceinline__ void sandy_runtime_store(
         static_cast<uint16_t*>(data)[storage] = sandy_float_to_bf16(value);
 }
 
-template <typename Element>
+template <typename Element, int InputAccess, int OutputAccess>
 __device__ __forceinline__ void sandy_runtime_copy_element(
         const SandyJitTensorArg& input,
         const SandyJitTensorArg& output,
         int64_t linear) {
     int64_t inputStorage = -1;
     int64_t outputStorage = -1;
-    const void* inputData = sandy_storage_data(input, linear, &inputStorage);
-    void* outputData = sandy_storage_data(output, linear, &outputStorage);
+    const void* inputData =
+        sandy_storage_data<InputAccess>(input, linear, &inputStorage);
+    void* outputData =
+        sandy_storage_data<OutputAccess>(output, linear, &outputStorage);
     if (!inputData || !outputData || inputStorage < 0 || outputStorage < 0)
         return;
     static_cast<Element*>(outputData)[outputStorage] =
         static_cast<const Element*>(inputData)[inputStorage];
 }
 
+template <typename Element, int Access>
+__device__ __forceinline__ int64_t sandy_runtime_load_integer(
+        const SandyJitTensorArg& tensor,
+        int64_t linear) {
+    int64_t storage = -1;
+    const void* data = sandy_storage_data<Access>(tensor, linear, &storage);
+    if (!data || storage < 0)
+        return 0;
+    return static_cast<int64_t>(static_cast<const Element*>(data)[storage]);
+}
+
 struct SandyRuntimeLoader {
     const SandyElementwiseParams& params;
     int64_t linear;
 
-    template <int DType>
-    __device__ __forceinline__ float load(int inputIndex) const {
-        const auto& input = params.inputs[inputIndex];
+    template <int InputIndex, int DType, int Access>
+    __device__ __forceinline__ float load() const {
+        const auto& input = params.inputs[InputIndex];
         int64_t inputLinear = linear;
-        if (params.broadcasts[inputIndex] == SANDY_JIT_BROADCAST_RIGHT_ALIGNED)
+        if (params.broadcasts[InputIndex] == SANDY_JIT_BROADCAST_RIGHT_ALIGNED)
             inputLinear = input.numel == 0 ? 0 : linear % input.numel;
-        return sandy_runtime_load<DType>(input, inputLinear);
+        return sandy_runtime_load<DType, Access>(input, inputLinear);
     }
 };
 
 struct SandyRuntimeStorer {
-    template <int DType>
+    template <int DType, int Access>
     __device__ __forceinline__ static void store(
             const SandyJitTensorArg& output,
             int64_t linear,
             float value) {
-        sandy_runtime_store<DType>(output, linear, value);
+        sandy_runtime_store<DType, Access>(output, linear, value);
     }
 };

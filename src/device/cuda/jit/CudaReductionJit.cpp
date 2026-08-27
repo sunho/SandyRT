@@ -1,6 +1,7 @@
 #include "CudaReductionJit.h"
 
 #include "CudaJitEmbeddedSources.h"
+#include "CudaJitPolicy.h"
 
 #include <utility>
 
@@ -9,7 +10,9 @@ namespace sandy::device {
 Result<CudaJitCache::KernelPtr> compileCudaReductionJit(
         int cudaDevice,
         CudaJitCache& cache,
-        core::DType dtype) {
+        core::DType dtype,
+        int inputAccess,
+        int outputAccess) {
     std::string config = "#pragma once\nconstexpr int SandyReductionDType = ";
     switch (dtype) {
         case core::DType::F32:
@@ -21,6 +24,16 @@ Result<CudaJitCache::KernelPtr> compileCudaReductionJit(
         default:
             return make_error("CUDA reduction JIT unsupported dtype");
     }
+    auto inputPolicy = cudaJitAccessConstant(inputAccess);
+    if (!inputPolicy)
+        return make_error(inputPolicy.error());
+    auto outputPolicy = cudaJitAccessConstant(outputAccess);
+    if (!outputPolicy)
+        return make_error(outputPolicy.error());
+    config += "constexpr int SandyReductionInputAccess = " +
+        std::string(*inputPolicy) + ";\n";
+    config += "constexpr int SandyReductionOutputAccess = " +
+        std::string(*outputPolicy) + ";\n";
     CudaJitRequest request;
     request.sourceName = "CudaJitReductionKernel.cu";
     request.source = embeddedReductionKernelSource();

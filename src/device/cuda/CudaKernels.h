@@ -2,6 +2,7 @@
 
 #include "CudaRuntime.h"
 #include "CudaJit.h"
+#include "CudaJitPolicy.h"
 #include "DeviceTypes.h"
 #include "KernelIR.h"
 #include "Result.h"
@@ -43,6 +44,7 @@ struct CudaLaunchContext {
     std::span<const CudaDeviceBufferView> inputs;
     std::span<const CudaDeviceBufferView> outputs;
     const cudaDeviceProp* deviceProps = nullptr;
+    CudaJitCache* jitCache = nullptr;
 };
 
 struct CudaElementwiseProgram {
@@ -50,14 +52,16 @@ struct CudaElementwiseProgram {
     ir::kernel_ir::ValueId output = 0;
     ir::kernel_ir::ScalarId result = 0;
     std::vector<ir::kernel_ir::ScalarNode> scalars;
-    CudaJitCache::KernelPtr jitKernel;
+    std::shared_ptr<CudaJitVariants> jitVariants;
+    bool jitFallbackOnError = false;
 };
 
 struct CudaLayoutTransformProgram {
     ir::kernel_ir::LayoutTransformKind transform =
         ir::kernel_ir::LayoutTransformKind::Contiguous;
     std::vector<int64_t> dims;
-    CudaJitCache::KernelPtr jitKernel;
+    std::shared_ptr<CudaJitVariants> jitVariants;
+    bool jitFallbackOnError = false;
 };
 
 struct CudaMatMulProgram {
@@ -69,6 +73,14 @@ struct CudaMoeMatMulProgram {
     bool transposeRhs = false;
 };
 
+struct CudaGatherProgram {
+    core::DType idsDtype = core::DType::I32;
+    core::DType valueDtype = core::DType::F32;
+    int tableRank = 0;
+    std::shared_ptr<CudaJitVariants> jitVariants;
+    bool jitFallbackOnError = false;
+};
+
 struct CudaMoeGatherProgram {
     int64_t numExperts = 0;
     int64_t topK = 0;
@@ -78,7 +90,8 @@ struct CudaReductionProgram {
     ir::kernel_ir::ReduceOp reduce = ir::kernel_ir::ReduceOp::Sum;
     std::vector<int64_t> axes;
     bool keepDims = false;
-    CudaJitCache::KernelPtr jitKernel;
+    std::shared_ptr<CudaJitVariants> jitVariants;
+    bool jitFallbackOnError = false;
 };
 
 struct CudaSoftmaxProgram {
@@ -133,7 +146,9 @@ Result<void> launch_cuda_moe_gather(
 
 Result<void> launch_cuda_moe_scatter_sum(const CudaLaunchContext& context);
 
-Result<void> launch_cuda_gather(const CudaLaunchContext& context);
+Result<void> launch_cuda_gather(
+    const CudaLaunchContext& context,
+    const CudaGatherProgram& program);
 
 Result<void> launch_cuda_softmax(
     const CudaLaunchContext& context,

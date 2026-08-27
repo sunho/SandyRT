@@ -2,6 +2,7 @@
 #include "CudaKernelLaunchUtils.cuh"
 #include "CudaKernelUtils.cuh"
 #include "jit/CudaJitLaunchUtils.cuh"
+#include "jit/CudaLayoutTransformJit.h"
 #include "jit/templates/CudaJitLayoutTransformAbi.cuh"
 
 namespace sandy::device {
@@ -107,21 +108,42 @@ Result<void> launch_cuda_layout_transform(
     int blocks = static_cast<int>(
         (outputArg.numel + cuda_kernel::kBlockSize - 1) /
         cuda_kernel::kBlockSize);
-    if (program.jitKernel) {
-        auto jitInput = pack_jit_tensor_arg(inputArg);
-        if (!jitInput)
-            return make_error(jitInput.error());
-        auto jitOutput = pack_jit_tensor_arg(outputArg);
-        if (!jitOutput)
-            return make_error(jitOutput.error());
-        SandyLayoutTransformParams params{jitInput.take(), jitOutput.take()};
-        void* arguments[] = {&params};
-        return program.jitKernel->launch(
-            dim3(static_cast<unsigned>(blocks)),
-            dim3(cuda_kernel::kBlockSize),
-            0,
-            context.stream,
-            arguments);
+    if (program.jitVariants) {
+        if (!context.jitCache)
+            return make_error("cuda layout transform JIT cache is null");
+        const int accesses[] = {
+            jit_access_kind(inputArg.access),
+            jit_access_kind(outputArg.access),
+        };
+        auto jit = program.jitVariants->getOrCompile(
+            cudaJitAccessKey(accesses),
+            [&] {
+                return compileCudaLayoutTransformJit(
+                    context.cudaDevice,
+                    *context.jitCache,
+                    inputArg.dtype,
+                    accesses[0],
+                    accesses[1]);
+            });
+        if (!jit) {
+            if (!program.jitFallbackOnError)
+                return make_error(jit.error());
+        } else {
+            auto jitInput = pack_jit_tensor_arg(inputArg);
+            if (!jitInput)
+                return make_error(jitInput.error());
+            auto jitOutput = pack_jit_tensor_arg(outputArg);
+            if (!jitOutput)
+                return make_error(jitOutput.error());
+            SandyLayoutTransformParams params{jitInput.take(), jitOutput.take()};
+            void* arguments[] = {&params};
+            return (*jit)->launch(
+                dim3(static_cast<unsigned>(blocks)),
+                dim3(cuda_kernel::kBlockSize),
+                0,
+                context.stream,
+                arguments);
+        }
     }
     layout_transform_kernel<<<blocks, cuda_kernel::kBlockSize, 0, context.stream>>>(
         inputArg,

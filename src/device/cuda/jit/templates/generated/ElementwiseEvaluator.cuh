@@ -7,6 +7,9 @@ struct GeneratedElementwiseEvaluator {
 
     template <typename Loader>
     __device__ __forceinline__ static float eval(const Loader& loader) {
-        return loader.template load<SANDY_JIT_F32>(0);
+        return loader.template load<
+            0,
+            SANDY_JIT_F32,
+            SandyElementwiseInputAccess<0>>();
     }
 };
