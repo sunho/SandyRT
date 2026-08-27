@@ -80,7 +80,7 @@ Status: complete
 
 ## Step 5: Correctness, cache, and failure coverage
 
-Status: pending
+Status: complete
 
 - Test every scalar operation and fused chains.
 - Test F32/BF16, constants, broadcast, strided tensors, paged tensors, refreshed
@@ -88,6 +88,11 @@ Status: pending
 - Test JIT reuse, ABI/template invalidation, concurrent same-key lookup, useful
   NVRTC diagnostics, and interpreter/JIT parity.
 - Run the complete CUDA device test suite and document any unrelated failure.
+
+Validation: 12/12 focused JIT tests pass. The complete CUDA device suite is
+62/63 passing. The sole failure is the pre-existing, unrelated
+`CudaDeviceTest.RunGatherReportsOutOfRangeId`: the asynchronous gather launch
+returns success where the test expects synchronous device-side bounds reporting.
 
 ## Step 6: Warmed benchmark and profile comparison
 

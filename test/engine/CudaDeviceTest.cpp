@@ -1,4 +1,5 @@
 #include "CudaDevice.h"
+#include "CudaElementwiseJit.h"
 #include "CudaJit.h"
 #include "CudaJitEmbeddedSources.h"
 #include "KernelIR.h"
@@ -9,8 +10,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cstdint>
 #include <cstring>
+#include <future>
 #include <initializer_list>
 #include <limits>
 #include <memory>
@@ -156,6 +159,24 @@ float read_bf16(std::span<const uint8_t> bytes, size_t index) {
     return bf16_bits_to_f32(bits);
 }
 
+Result<std::vector<float>> read_f32_values(
+        sandy::device::CudaDevice& device,
+        sandy::device::DeviceBufferId buffer) {
+    auto read = device.read(buffer);
+    if (!read)
+        return make_error(read.error());
+    auto access = (*read)->access();
+    if (!access)
+        return make_error(access.error());
+    auto data = (*access).data();
+    if (data.size() % sizeof(float) != 0)
+        return make_error("test output byte size is not a multiple of float");
+    std::vector<float> values(data.size() / sizeof(float));
+    for (size_t i = 0; i < values.size(); ++i)
+        values[i] = read_f32(data, i);
+    return values;
+}
+
 int64_t read_i64(std::span<const uint8_t> bytes, size_t index) {
     int64_t value = 0;
     std::memcpy(&value, bytes.data() + index * sizeof(int64_t), sizeof(int64_t));
@@ -174,6 +195,30 @@ std::string cuda_device_skip_reason() {
         return "CUDA runtime reports no devices";
     return "";
 }
+
+class ScopedEnvironmentVariable {
+public:
+    ScopedEnvironmentVariable(const char* name, const char* value)
+        : name_(name) {
+        if (const char* old = std::getenv(name))
+            oldValue_ = std::string(old);
+        if (value)
+            setenv(name, value, 1);
+        else
+            unsetenv(name);
+    }
+
+    ~ScopedEnvironmentVariable() {
+        if (oldValue_)
+            setenv(name_.c_str(), oldValue_->c_str(), 1);
+        else
+            unsetenv(name_.c_str());
+    }
+
+private:
+    std::string name_;
+    std::optional<std::string> oldValue_;
+};
 
 sandy::ir::kernel_ir::ValueType tensor_type(
         sandy::core::Shape shape,
@@ -532,6 +577,109 @@ TEST(CudaDeviceTest, JitCacheCompilesHighlightedTemplateOnce) {
     EXPECT_EQ(stats.entries, 1u);
 }
 
+TEST(CudaDeviceTest, ElementwiseJitEmitterProducesStraightLineExpressions) {
+    namespace kir = sandy::ir::kernel_ir;
+    sandy::device::CudaElementwiseProgram program{
+        {kir::ElementwiseInput{7, kir::BroadcastMode::None}},
+        8,
+        3,
+        {
+            kir::ScalarNode{0, kir::ScalarOp::Load, sandy::core::DType::F32, 0, 0.0, {}},
+            kir::ScalarNode{1, kir::ScalarOp::Constant, sandy::core::DType::F32, 0, 2.0, {}},
+            kir::ScalarNode{2, kir::ScalarOp::Mul, sandy::core::DType::F32, 0, 0.0, {0, 1}},
+            kir::ScalarNode{3, kir::ScalarOp::ReLU, sandy::core::DType::F32, 0, 0.0, {2}},
+        },
+    };
+    auto emitted = sandy::device::emitCudaElementwiseJitSource(program);
+    ASSERT_TRUE(emitted) << emitted.error();
+    EXPECT_NE(emitted->evaluatorSource.find("const float s0 = loader.load(0);"),
+              std::string::npos);
+    EXPECT_NE(emitted->evaluatorSource.find("const float s2 = s0 * s1;"),
+              std::string::npos);
+    EXPECT_NE(emitted->evaluatorSource.find("const float s3 = fmaxf(s2, 0.0f);"),
+              std::string::npos);
+    EXPECT_EQ(emitted->evaluatorSource.find("switch"), std::string::npos);
+}
+
+TEST(CudaDeviceTest, JitKeyInvalidatesOnAbiAndTemplateChanges) {
+    if (auto reason = cuda_device_skip_reason(); !reason.empty())
+        GTEST_SKIP() << reason;
+
+    sandy::device::CudaJitRequest request;
+    request.sourceName = "CudaJitElementwiseKernel.cu";
+    request.source = sandy::device::embeddedElementwiseKernelSource();
+    request.headers = sandy::device::embeddedElementwiseHeaders();
+    request.entryName = "sandy_jit_key_test";
+    request.options = {"-DSANDY_JIT_ENTRY_NAME=sandy_jit_key_test"};
+    auto original = sandy::device::buildCudaJitCacheKey(0, request);
+    ASSERT_TRUE(original) << original.error();
+
+    request.abiVersion++;
+    auto changedAbi = sandy::device::buildCudaJitCacheKey(0, request);
+    ASSERT_TRUE(changedAbi) << changedAbi.error();
+    EXPECT_NE(*original, *changedAbi);
+
+    request.abiVersion--;
+    request.headers.front().source += "\n// changed template";
+    auto changedHeader = sandy::device::buildCudaJitCacheKey(0, request);
+    ASSERT_TRUE(changedHeader) << changedHeader.error();
+    EXPECT_NE(*original, *changedHeader);
+}
+
+TEST(CudaDeviceTest, JitCacheCoalescesConcurrentSameKeyCompiles) {
+    if (auto reason = cuda_device_skip_reason(); !reason.empty())
+        GTEST_SKIP() << reason;
+
+    sandy::device::CudaJitRequest request;
+    request.sourceName = "CudaJitElementwiseKernel.cu";
+    request.source = sandy::device::embeddedElementwiseKernelSource();
+    request.headers = sandy::device::embeddedElementwiseHeaders();
+    request.entryName = "sandy_jit_concurrent_test";
+    request.options = {"-DSANDY_JIT_ENTRY_NAME=sandy_jit_concurrent_test"};
+    sandy::device::CudaJitCache cache;
+
+    std::vector<std::future<Result<sandy::device::CudaJitCache::KernelPtr>>> futures;
+    for (int i = 0; i < 4; ++i) {
+        futures.push_back(std::async(std::launch::async, [&] {
+            return cache.getOrCompile(0, request);
+        }));
+    }
+    sandy::device::CudaJitCache::KernelPtr first;
+    for (auto& future : futures) {
+        auto result = future.get();
+        ASSERT_TRUE(result) << result.error();
+        if (!first)
+            first = *result;
+        EXPECT_EQ(first, *result);
+    }
+    auto stats = cache.stats();
+    EXPECT_EQ(stats.misses, 1u);
+    EXPECT_EQ(stats.hits, 3u);
+    EXPECT_EQ(stats.entries, 1u);
+}
+
+TEST(CudaDeviceTest, JitCompileFailureNamesGeneratedHeader) {
+    if (auto reason = cuda_device_skip_reason(); !reason.empty())
+        GTEST_SKIP() << reason;
+
+    sandy::device::CudaJitRequest request;
+    request.sourceName = "CudaJitElementwiseKernel.cu";
+    request.source = sandy::device::embeddedElementwiseKernelSource();
+    request.headers = sandy::device::embeddedElementwiseHeaders();
+    for (auto& header : request.headers) {
+        if (header.name == "generated/ElementwiseEvaluator.cuh")
+            header.source = "#pragma once\nthis is invalid cuda source;\n";
+    }
+    request.entryName = "sandy_jit_diagnostic_test";
+    request.options = {"-DSANDY_JIT_ENTRY_NAME=sandy_jit_diagnostic_test"};
+
+    sandy::device::CudaJitCache cache;
+    auto result = cache.getOrCompile(0, request);
+    ASSERT_FALSE(result);
+    EXPECT_NE(result.error().find("generated/ElementwiseEvaluator.cuh"),
+              std::string::npos) << result.error();
+}
+
 TEST(CudaDeviceTest, ScratchAllocatorFinalizesReusablePlacementLayout) {
     if (auto reason = cuda_device_skip_reason(); !reason.empty())
         GTEST_SKIP() << reason;
@@ -608,6 +756,240 @@ TEST(CudaDeviceTest, RunChainedElementwiseF32) {
         device,
         *outputBuffer,
         {0.0f, std::tanh(1.0f), std::tanh(2.0f)});
+}
+
+TEST(CudaDeviceTest, RunEveryElementwiseScalarOperationF32AndReuseJit) {
+    if (auto reason = cuda_device_skip_reason(); !reason.empty())
+        GTEST_SKIP() << reason;
+    namespace kir = sandy::ir::kernel_ir;
+
+    kir::Graph graph;
+    auto input = graph.addValue(tensor_type({3}));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 0, ""}, input);
+    auto output = graph.addValue(tensor_type({3}));
+    auto* op = graph.addOp<kir::ElementwiseKernelOp>(
+        std::vector<kir::ElementwiseInput>{{input, kir::BroadcastMode::None}},
+        output,
+        16,
+        std::vector<kir::ScalarNode>{
+            {0, kir::ScalarOp::Load, sandy::core::DType::F32, 0, 0.0, {}},
+            {1, kir::ScalarOp::Constant, sandy::core::DType::F32, 0, 2.0, {}},
+            {2, kir::ScalarOp::Add, sandy::core::DType::F32, 0, 0.0, {0, 1}},
+            {3, kir::ScalarOp::Sub, sandy::core::DType::F32, 0, 0.0, {2, 1}},
+            {4, kir::ScalarOp::Mul, sandy::core::DType::F32, 0, 0.0, {3, 1}},
+            {5, kir::ScalarOp::Div, sandy::core::DType::F32, 0, 0.0, {4, 1}},
+            {6, kir::ScalarOp::Max, sandy::core::DType::F32, 0, 0.0, {5, 1}},
+            {7, kir::ScalarOp::Min, sandy::core::DType::F32, 0, 0.0, {6, 2}},
+            {8, kir::ScalarOp::Neg, sandy::core::DType::F32, 0, 0.0, {7}},
+            {9, kir::ScalarOp::Neg, sandy::core::DType::F32, 0, 0.0, {8}},
+            {10, kir::ScalarOp::Sqrt, sandy::core::DType::F32, 0, 0.0, {9}},
+            {11, kir::ScalarOp::Rsqrt, sandy::core::DType::F32, 0, 0.0, {10}},
+            {12, kir::ScalarOp::Exp, sandy::core::DType::F32, 0, 0.0, {11}},
+            {13, kir::ScalarOp::Log, sandy::core::DType::F32, 0, 0.0, {12}},
+            {14, kir::ScalarOp::Tanh, sandy::core::DType::F32, 0, 0.0, {13}},
+            {15, kir::ScalarOp::ReLU, sandy::core::DType::F32, 0, 0.0, {14}},
+            {16, kir::ScalarOp::Cast, sandy::core::DType::F32, 0, 0.0, {15}},
+        });
+    graph.setOutputs({output});
+
+    sandy::device::CudaDevice device;
+    auto compiled = device.compile(graph);
+    ASSERT_TRUE(compiled) << compiled.error();
+    auto compiledAgain = device.compile(graph);
+    ASSERT_TRUE(compiledAgain) << compiledAgain.error();
+    auto stats = device.jitCacheStats();
+    EXPECT_EQ(stats.misses, 1u);
+    EXPECT_EQ(stats.hits, 1u);
+    EXPECT_EQ(stats.entries, 1u);
+
+    auto host = make_f32_buffer("x", sandy::core::Shape({3}), {0.25f, 2.0f, 4.0f});
+    auto inputBuffer = device.load(*host);
+    ASSERT_TRUE(inputBuffer) << inputBuffer.error();
+    auto outputBuffer = device.alloc(sandy::core::TensorDesc({3}, sandy::core::DType::F32));
+    ASSERT_TRUE(outputBuffer) << outputBuffer.error();
+    std::vector<sandy::device::DeviceRunValue> inputs = {
+        tensor_view(device, *inputBuffer, host->desc()),
+    };
+    std::vector<sandy::device::DeviceRunValue> outputs = {
+        tensor_view(device, *outputBuffer, sandy::core::TensorDesc({3}, sandy::core::DType::F32)),
+    };
+    auto run = device.run(*compiled, op->id(), inputs, outputs);
+    ASSERT_TRUE(run) << run.error();
+
+    std::vector<float> expected;
+    for (float x : {0.25f, 2.0f, 4.0f}) {
+        float value = x + 2.0f;
+        value -= 2.0f;
+        value *= 2.0f;
+        value /= 2.0f;
+        value = std::max(value, 2.0f);
+        value = std::min(value, x + 2.0f);
+        value = -value;
+        value = -value;
+        value = std::sqrt(value);
+        value = 1.0f / std::sqrt(value);
+        value = std::exp(value);
+        value = std::log(value);
+        value = std::tanh(value);
+        value = std::max(value, 0.0f);
+        expected.push_back(value);
+    }
+    expect_f32_output_near(device, *outputBuffer, expected, 1.0e-5f);
+}
+
+TEST(CudaDeviceTest, RunElementwiseBF16WithStridedInput) {
+    if (auto reason = cuda_device_skip_reason(); !reason.empty())
+        GTEST_SKIP() << reason;
+    namespace kir = sandy::ir::kernel_ir;
+
+    kir::Graph graph;
+    auto input = graph.addValue(tensor_type({3, 2}, sandy::core::DType::BF16));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 0, ""}, input);
+    auto output = graph.addValue(tensor_type({3, 2}, sandy::core::DType::BF16));
+    auto* op = graph.addOp<kir::ElementwiseKernelOp>(
+        std::vector<kir::ElementwiseInput>{{input, kir::BroadcastMode::None}},
+        output,
+        2,
+        std::vector<kir::ScalarNode>{
+            {0, kir::ScalarOp::Load, sandy::core::DType::BF16, 0, 0.0, {}},
+            {1, kir::ScalarOp::Constant, sandy::core::DType::BF16, 0, 0.5, {}},
+            {2, kir::ScalarOp::Add, sandy::core::DType::BF16, 0, 0.0, {0, 1}},
+        });
+    graph.setOutputs({output});
+
+    sandy::device::CudaDevice device;
+    auto compiled = device.compile(graph);
+    ASSERT_TRUE(compiled) << compiled.error();
+    auto host = make_bf16_buffer(
+        "x", sandy::core::Shape({2, 3}), {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f});
+    auto inputBuffer = device.load(*host);
+    ASSERT_TRUE(inputBuffer) << inputBuffer.error();
+    auto outputBuffer = device.alloc(
+        sandy::core::TensorDesc({3, 2}, sandy::core::DType::BF16));
+    ASSERT_TRUE(outputBuffer) << outputBuffer.error();
+
+    sandy::device::TensorViewDesc transposed;
+    transposed.desc = sandy::core::TensorDesc({3, 2}, sandy::core::DType::BF16);
+    transposed.strides = {1, 3};
+    std::vector<sandy::device::DeviceRunValue> inputs = {
+        sandy::device::DeviceTensorView{*inputBuffer, transposed},
+    };
+    std::vector<sandy::device::DeviceRunValue> outputs = {
+        tensor_view(
+            device, *outputBuffer,
+            sandy::core::TensorDesc({3, 2}, sandy::core::DType::BF16)),
+    };
+    auto run = device.run(*compiled, op->id(), inputs, outputs);
+    ASSERT_TRUE(run) << run.error();
+    expect_bf16_output_near(device, *outputBuffer, {1.5f, 4.5f, 2.5f, 5.5f, 3.5f, 6.5f});
+}
+
+TEST(CudaDeviceTest, RunZeroSizedElementwiseOutput) {
+    if (auto reason = cuda_device_skip_reason(); !reason.empty())
+        GTEST_SKIP() << reason;
+    namespace kir = sandy::ir::kernel_ir;
+
+    kir::Graph graph;
+    auto input = graph.addValue(tensor_type({0}));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 0, ""}, input);
+    auto output = graph.addValue(tensor_type({0}));
+    auto* op = graph.addOp<kir::ElementwiseKernelOp>(
+        std::vector<kir::ElementwiseInput>{{input, kir::BroadcastMode::None}},
+        output,
+        0,
+        std::vector<kir::ScalarNode>{
+            {0, kir::ScalarOp::Load, sandy::core::DType::F32, 0, 0.0, {}},
+        });
+    graph.setOutputs({output});
+
+    sandy::device::CudaDevice device;
+    auto compiled = device.compile(graph);
+    ASSERT_TRUE(compiled) << compiled.error();
+    auto host = make_f32_buffer(
+        "empty", sandy::core::Shape({0}), std::initializer_list<float>{});
+    auto inputBuffer = device.load(*host);
+    ASSERT_TRUE(inputBuffer) << inputBuffer.error();
+    auto outputBuffer = device.alloc(sandy::core::TensorDesc({0}, sandy::core::DType::F32));
+    ASSERT_TRUE(outputBuffer) << outputBuffer.error();
+    std::vector<sandy::device::DeviceRunValue> inputs = {
+        tensor_view(device, *inputBuffer, host->desc()),
+    };
+    std::vector<sandy::device::DeviceRunValue> outputs = {
+        tensor_view(device, *outputBuffer, sandy::core::TensorDesc({0}, sandy::core::DType::F32)),
+    };
+    auto run = device.run(*compiled, op->id(), inputs, outputs);
+    ASSERT_TRUE(run) << run.error();
+    auto values = read_f32_values(device, *outputBuffer);
+    ASSERT_TRUE(values) << values.error();
+    EXPECT_TRUE(values->empty());
+}
+
+TEST(CudaDeviceTest, InterpreterFallbackMatchesElementwiseJit) {
+    if (auto reason = cuda_device_skip_reason(); !reason.empty())
+        GTEST_SKIP() << reason;
+    namespace kir = sandy::ir::kernel_ir;
+
+    kir::Graph graph;
+    auto input = graph.addValue(tensor_type({4}));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 0, ""}, input);
+    auto output = graph.addValue(tensor_type({4}));
+    auto* op = graph.addOp<kir::ElementwiseKernelOp>(
+        std::vector<kir::ElementwiseInput>{{input, kir::BroadcastMode::None}},
+        output,
+        4,
+        std::vector<kir::ScalarNode>{
+            {0, kir::ScalarOp::Load, sandy::core::DType::F32, 0, 0.0, {}},
+            {1, kir::ScalarOp::Constant, sandy::core::DType::F32, 0, 1.25, {}},
+            {2, kir::ScalarOp::Mul, sandy::core::DType::F32, 0, 0.0, {0, 1}},
+            {3, kir::ScalarOp::Neg, sandy::core::DType::F32, 0, 0.0, {2}},
+            {4, kir::ScalarOp::Tanh, sandy::core::DType::F32, 0, 0.0, {3}},
+        });
+    graph.setOutputs({output});
+    auto host = make_f32_buffer(
+        "x", sandy::core::Shape({4}), {-2.0f, -0.5f, 0.25f, 3.0f});
+
+    auto runGraph = [&](sandy::device::CudaDevice& device) -> Result<std::vector<float>> {
+        auto compiled = device.compile(graph);
+        if (!compiled)
+            return make_error(compiled.error());
+        auto inputBuffer = device.load(*host);
+        if (!inputBuffer)
+            return make_error(inputBuffer.error());
+        auto outputBuffer = device.alloc(
+            sandy::core::TensorDesc({4}, sandy::core::DType::F32));
+        if (!outputBuffer)
+            return make_error(outputBuffer.error());
+        std::vector<sandy::device::DeviceRunValue> inputs = {
+            tensor_view(device, *inputBuffer, host->desc()),
+        };
+        std::vector<sandy::device::DeviceRunValue> outputs = {
+            tensor_view(
+                device, *outputBuffer,
+                sandy::core::TensorDesc({4}, sandy::core::DType::F32)),
+        };
+        auto run = device.run(*compiled, op->id(), inputs, outputs);
+        if (!run)
+            return make_error(run.error());
+        return read_f32_values(device, *outputBuffer);
+    };
+
+    sandy::device::CudaDevice jitDevice;
+    auto jitValues = runGraph(jitDevice);
+    ASSERT_TRUE(jitValues) << jitValues.error();
+    EXPECT_EQ(jitDevice.jitCacheStats().entries, 1u);
+
+    ScopedEnvironmentVariable disableJit("SANDY_CUDA_ELEMENTWISE_JIT", "0");
+    sandy::device::CudaDevice interpreterDevice;
+    auto interpreterValues = runGraph(interpreterDevice);
+    ASSERT_TRUE(interpreterValues) << interpreterValues.error();
+    EXPECT_EQ(interpreterDevice.jitCacheStats().entries, 0u);
+    ASSERT_EQ(jitValues->size(), interpreterValues->size());
+    for (size_t i = 0; i < jitValues->size(); ++i)
+        EXPECT_FLOAT_EQ((*jitValues)[i], (*interpreterValues)[i]) << "at index " << i;
 }
 
 TEST(CudaDeviceTest, RunLayoutTransformMaterializesStridedF32View) {
