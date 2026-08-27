@@ -29,6 +29,7 @@ experiments/gemma4_a4b26b/
 tokenizer.json
 logs/
 profiles/
+artifacts/
 gmon.out
 gmon.*
 perf.data*
