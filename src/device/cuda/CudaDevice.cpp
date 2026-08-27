@@ -1,9 +1,12 @@
 #include "CudaDevice.h"
 #include "CudaScratchAllocator.h"
+#include "CudaElementwiseJit.h"
 
+#include <cstdlib>
 #include <limits>
 #include <memory>
 #include <span>
+#include <string_view>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -57,6 +60,18 @@ Result<size_t> tensor_byte_size(const core::TensorDesc& desc) {
 bool kernel_requires_cublas(ir::kernel_ir::OpKind kind) {
     return kind == ir::kernel_ir::OpKind::MatMulKernel ||
            kind == ir::kernel_ir::OpKind::MoeMatMulKernel;
+}
+
+bool environment_flag(const char* name, bool defaultValue) {
+    const char* value = std::getenv(name);
+    if (!value)
+        return defaultValue;
+    std::string_view text(value);
+    if (text == "0" || text == "false" || text == "off" || text == "no")
+        return false;
+    if (text == "1" || text == "true" || text == "on" || text == "yes")
+        return true;
+    return defaultValue;
 }
 
 } // namespace
@@ -196,12 +211,22 @@ Result<DeviceCompiledGraphId> CudaDevice::compile(const ir::kernel_ir::Graph& gr
             case ir::kernel_ir::OpKind::ElementwiseKernel: {
                 const auto& elementwise =
                     static_cast<const ir::kernel_ir::ElementwiseKernelOp&>(op);
-                kernel.program = CudaElementwiseProgram{
+                CudaElementwiseProgram program{
                     elementwise.elementwiseInputs(),
                     elementwise.output(),
                     elementwise.result(),
                     elementwise.scalars(),
                 };
+                if (environment_flag("SANDY_CUDA_ELEMENTWISE_JIT", true)) {
+                    auto jit = compileCudaElementwiseJit(cudaDevice_, jitCache_, program);
+                    if (!jit) {
+                        if (!environment_flag("SANDY_CUDA_ELEMENTWISE_JIT_FALLBACK", false))
+                            return make_error("CUDA elementwise JIT compile failed: " + jit.error());
+                    } else {
+                        program.jitKernel = jit.take();
+                    }
+                }
+                kernel.program = std::move(program);
                 break;
             }
             case ir::kernel_ir::OpKind::ReductionKernel: {

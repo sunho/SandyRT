@@ -1,6 +1,7 @@
 #include "CudaKernels.h"
 #include "CudaKernelLaunchUtils.cuh"
 #include "CudaKernelUtils.cuh"
+#include "jit/templates/CudaJitAbi.cuh"
 
 #include <cmath>
 
@@ -114,6 +115,75 @@ Result<DeviceElementwiseProgram> pack_elementwise_program(
     return packed;
 }
 
+Result<SandyJitTensorArg> pack_jit_tensor_arg(
+        const cuda_kernel::TensorArg& source) {
+    SandyJitTensorArg target{};
+    target.data = source.data;
+    for (int i = 0; i < SANDY_JIT_MAX_RANK; ++i) {
+        target.dims[i] = source.dims[i];
+        target.strides[i] = source.strides[i];
+    }
+    target.storageOffset = source.storageOffset;
+    target.numel = source.numel;
+    target.growDim = source.growDim;
+    target.pageSize = source.pageSize;
+    target.pageCount = source.pageCount;
+    target.pageElementCount = source.pageElementCount;
+    target.pageMask = source.pageMask;
+    target.pagedInnerElements = source.pagedInnerElements;
+    target.pagedLogicalPrefixElements = source.pagedLogicalPrefixElements;
+    target.pagedPhysicalPrefixElements = source.pagedPhysicalPrefixElements;
+    target.rank = source.rank;
+    target.pageShift = source.pageShift;
+
+    switch (source.dtype) {
+        case core::DType::F32:
+            target.dtype = SANDY_JIT_F32;
+            break;
+        case core::DType::BF16:
+            target.dtype = SANDY_JIT_BF16;
+            break;
+        default:
+            return make_error("cuda elementwise JIT unsupported dtype");
+    }
+    switch (source.access) {
+        case cuda_kernel::AccessKind::Contiguous:
+            target.access = SANDY_JIT_CONTIGUOUS;
+            break;
+        case cuda_kernel::AccessKind::Strided:
+            target.access = SANDY_JIT_STRIDED;
+            break;
+        case cuda_kernel::AccessKind::Paged:
+            target.access = SANDY_JIT_PAGED;
+            break;
+    }
+    return target;
+}
+
+Result<SandyElementwiseParams> pack_jit_elementwise_params(
+        const DeviceElementwiseProgram& source) {
+    SandyElementwiseParams target{};
+    for (int i = 0; i < source.inputs.count; ++i) {
+        auto input = pack_jit_tensor_arg(source.inputs.items[i]);
+        if (!input)
+            return make_error(input.error());
+        target.inputs[i] = input.take();
+        switch (source.inputBroadcasts[i]) {
+            case ir::kernel_ir::BroadcastMode::None:
+                target.broadcasts[i] = SANDY_JIT_BROADCAST_NONE;
+                break;
+            case ir::kernel_ir::BroadcastMode::RightAligned:
+                target.broadcasts[i] = SANDY_JIT_BROADCAST_RIGHT_ALIGNED;
+                break;
+        }
+    }
+    auto output = pack_jit_tensor_arg(source.output);
+    if (!output)
+        return make_error(output.error());
+    target.output = output.take();
+    return target;
+}
+
 __device__ float apply_scalar(
         const DeviceScalarNode& node,
         const float* values) {
@@ -207,6 +277,19 @@ Result<void> launch_cuda_elementwise(
     int blocks = static_cast<int>(
         (launchProgram.numel + cuda_kernel::kBlockSize - 1) /
         cuda_kernel::kBlockSize);
+    if (program.jitKernel) {
+        auto params = pack_jit_elementwise_params(launchProgram);
+        if (!params)
+            return make_error(params.error());
+        auto launchParams = params.take();
+        void* arguments[] = {&launchParams};
+        return program.jitKernel->launch(
+            dim3(static_cast<unsigned>(blocks)),
+            dim3(cuda_kernel::kBlockSize),
+            0,
+            context.stream,
+            arguments);
+    }
     elementwise_kernel<<<blocks, cuda_kernel::kBlockSize, 0, context.stream>>>(
         launchProgram);
     return cuda_check(cudaGetLastError(), "cuda elementwise launch");

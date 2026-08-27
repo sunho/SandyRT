@@ -67,7 +67,7 @@ Status: complete
 
 ## Step 4: Straight-line elementwise evaluator JIT
 
-Status: pending
+Status: complete
 
 - Emit one `GeneratedElementwiseEvaluator::eval` body per scalar DAG.
 - Instantiate the highlighted policy kernel as

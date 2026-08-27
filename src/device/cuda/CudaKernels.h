@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CudaRuntime.h"
+#include "CudaJit.h"
 #include "DeviceTypes.h"
 #include "KernelIR.h"
 #include "Result.h"
@@ -10,6 +11,7 @@
 #include <cuda_runtime.h>
 
 #include <cstddef>
+#include <memory>
 #include <span>
 #include <string>
 #include <vector>
@@ -48,6 +50,7 @@ struct CudaElementwiseProgram {
     ir::kernel_ir::ValueId output = 0;
     ir::kernel_ir::ScalarId result = 0;
     std::vector<ir::kernel_ir::ScalarNode> scalars;
+    CudaJitCache::KernelPtr jitKernel;
 };
 
 struct CudaLayoutTransformProgram {

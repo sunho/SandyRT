@@ -37,6 +37,7 @@ if(SANDY_ENABLE_CUDA)
   target_sources(DeviceLib
     PRIVATE
     cuda/CudaRuntime.cpp
+    cuda/jit/CudaElementwiseJit.cpp
     cuda/jit/CudaJit.cpp
     cuda/jit/CudaJitEmbeddedSources.cpp
     cuda/CudaScratchAllocator.cpp

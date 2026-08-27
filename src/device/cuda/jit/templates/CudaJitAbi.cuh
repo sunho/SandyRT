@@ -1,8 +1,12 @@
 #pragma once
+#ifdef __CUDACC_RTC__
 using int32_t = int;
 using uint16_t = unsigned short;
 using uint32_t = unsigned int;
 using int64_t = long long;
+#else
+#include <cstdint>
+#endif
 
 constexpr int SANDY_JIT_ABI_VERSION = 1;
 constexpr int SANDY_JIT_MAX_RANK = 8;

@@ -48,6 +48,8 @@ public:
     Result<TensorBufferPtr> read(DeviceTensorView src) override;
     Result<TensorBufferPtr> read(DeviceBufferId src);
 
+    CudaJitCacheStats jitCacheStats() const { return jitCache_.stats(); }
+
 private:
     Result<DevicePagedPoolId> createPagedPoolImpl(DevicePagedPoolDesc desc) override;
 
@@ -105,6 +107,7 @@ private:
     std::unordered_map<DeviceCompiledGraphId, CudaDeviceGraph> graphs_;
     std::unordered_map<DevicePagedPoolId, CudaPagedTensorPool> pagedPools_;
     std::unordered_map<DevicePagedTensorId, CudaPagedTensor> pagedTensors_;
+    CudaJitCache jitCache_;
 };
 
 } // namespace sandy::device
