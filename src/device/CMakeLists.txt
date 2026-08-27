@@ -55,6 +55,10 @@ if(SANDY_ENABLE_CUDA)
     kNormAbi CudaJitNormAbiSource.generated.h)
   sandy_embed_cuda_source("${SANDY_JIT_TEMPLATE_DIR}/CudaJitNormKernel.cu"
     kNormKernel CudaJitNormKernelSource.generated.h)
+  sandy_embed_cuda_source("${SANDY_JIT_TEMPLATE_DIR}/CudaJitRoPEAbi.cuh"
+    kRoPEAbi CudaJitRoPEAbiSource.generated.h)
+  sandy_embed_cuda_source("${SANDY_JIT_TEMPLATE_DIR}/CudaJitRoPEKernel.cu"
+    kRoPEKernel CudaJitRoPEKernelSource.generated.h)
 
   target_sources(DeviceLib
     PRIVATE
@@ -66,6 +70,7 @@ if(SANDY_ENABLE_CUDA)
     cuda/jit/CudaLayoutTransformJit.cpp
     cuda/jit/CudaNormJit.cpp
     cuda/jit/CudaReductionJit.cpp
+    cuda/jit/CudaRoPEJit.cpp
     cuda/jit/CudaSoftmaxJit.cpp
     cuda/CudaScratchAllocator.cpp
     cuda/CudaDevice.cpp

@@ -3960,6 +3960,12 @@ TEST(CudaDeviceTest, RunRoPEF32ImplicitPositions) {
     sandy::device::CudaDevice device;
     auto compiled = device.compile(graph);
     ASSERT_TRUE(compiled) << compiled.error();
+    auto compiledAgain = device.compile(graph);
+    ASSERT_TRUE(compiledAgain) << compiledAgain.error();
+    auto stats = device.jitCacheStats();
+    EXPECT_EQ(stats.misses, 1u);
+    EXPECT_EQ(stats.hits, 1u);
+    EXPECT_EQ(stats.entries, 1u);
 
     auto xHost = make_f32_buffer(
         "x",

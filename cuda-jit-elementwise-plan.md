@@ -32,7 +32,9 @@ Each item gets focused correctness/cache coverage and a separate commit.
 5. Norm (complete: RMSNorm with/without weight and LayerNorm, including BF16
    strided access and fallback; full suite 69/70 with only the pre-existing
    asynchronous gather bounds failure)
-6. RoPE
+6. RoPE (complete: implicit/runtime positions, split-half, partial tails,
+   negative-position reporting, cache reuse, and fallback; full suite 69/70
+   with only the pre-existing asynchronous gather bounds failure)
 7. TopK
 8. MoE gather
 9. MoE scatter sum

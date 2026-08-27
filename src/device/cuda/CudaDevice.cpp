@@ -5,6 +5,7 @@
 #include "CudaLayoutTransformJit.h"
 #include "CudaNormJit.h"
 #include "CudaReductionJit.h"
+#include "CudaRoPEJit.h"
 #include "CudaSoftmaxJit.h"
 
 #include <cstdio>
@@ -440,11 +441,41 @@ Result<DeviceCompiledGraphId> CudaDevice::compile(const ir::kernel_ir::Graph& gr
             }
             case ir::kernel_ir::OpKind::RoPEKernel: {
                 const auto& rope = static_cast<const ir::kernel_ir::RoPEKernelOp&>(op);
-                kernel.program = CudaRoPEProgram{
+                CudaRoPEProgram program{
                     rope.theta(),
                     rope.rotaryDim(),
                     rope.splitHalf(),
                 };
+                if (environment_flag("SANDY_CUDA_ROPE_JIT", true)) {
+                    program.jitFallbackOnError = environment_flag(
+                        "SANDY_CUDA_ROPE_JIT_FALLBACK", false);
+                    program.dtype = graph.value(op.inputs()[0]).type.dtype;
+                    program.hasPositions = op.inputs().size() == 2;
+                    if (program.hasPositions)
+                        program.positionDtype = graph.value(op.inputs()[1]).type.dtype;
+                    const int accesses[] = {
+                        default_jit_access(graph.value(op.inputs()[0]).type),
+                        program.hasPositions
+                            ? default_jit_access(graph.value(op.inputs()[1]).type)
+                            : SANDY_JIT_CONTIGUOUS,
+                        default_jit_access(graph.value(op.outputs()[0]).type),
+                    };
+                    auto variants = std::make_shared<CudaJitVariants>();
+                    auto jit = variants->getOrCompile(
+                        cudaJitAccessKey(accesses), [&] {
+                            return compileCudaRoPEJit(
+                                cudaDevice_, jitCache_, program.dtype,
+                                program.splitHalf, program.hasPositions,
+                                program.positionDtype, accesses[0], accesses[1], accesses[2]);
+                        });
+                    if (!jit) {
+                        if (!program.jitFallbackOnError)
+                            return make_error("CUDA RoPE JIT compile failed: " + jit.error());
+                    } else {
+                        program.jitVariants = std::move(variants);
+                    }
+                }
+                kernel.program = std::move(program);
                 break;
             }
             case ir::kernel_ir::OpKind::SlidingQueryKeyScoreKernel: {

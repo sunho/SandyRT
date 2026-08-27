@@ -1,6 +1,9 @@
 #include "CudaKernels.h"
 #include "CudaKernelLaunchUtils.cuh"
 #include "CudaKernelUtils.cuh"
+#include "jit/CudaJitLaunchUtils.cuh"
+#include "jit/CudaRoPEJit.h"
+#include "jit/templates/CudaJitRoPEAbi.cuh"
 
 #include <cmath>
 #include <cstdint>
@@ -294,14 +297,55 @@ Result<void> launch_cuda_rope(
         return make_error(cleared.error());
     }
 
-    rope_kernel<<<
-        static_cast<int>(blockCount),
-        cuda_kernel::kBlockSize,
-        0,
-        context.stream>>>(
-        launchProgram,
-        errorFlag);
-    auto launched = cuda_check(cudaGetLastError(), "cuda rope launch");
+    Result<void> launched;
+    bool usedJit = false;
+    if (program.jitVariants) {
+        const int accesses[] = {
+            jit_access_kind(launchProgram.x.access),
+            launchProgram.hasPositionIds
+                ? jit_access_kind(launchProgram.positionIds.access)
+                : SANDY_JIT_CONTIGUOUS,
+            jit_access_kind(launchProgram.output.access),
+        };
+        auto jit = program.jitVariants->getOrCompile(
+            cudaJitAccessKey(accesses), [&] {
+                return compileCudaRoPEJit(
+                    context.cudaDevice, *context.jitCache, program.dtype,
+                    program.splitHalf, program.hasPositions, program.positionDtype,
+                    accesses[0], accesses[1], accesses[2]);
+            });
+        if (!jit && !program.jitFallbackOnError) {
+            freeFlag();
+            return make_error(jit.error());
+        }
+        if (jit) {
+            usedJit = true;
+            auto x = pack_jit_tensor_arg(launchProgram.x);
+            auto output = pack_jit_tensor_arg(launchProgram.output);
+            if (!x || !output) { freeFlag(); return make_error(!x ? x.error() : output.error()); }
+            SandyRoPEParams params{};
+            params.input = x.take();
+            params.output = output.take();
+            if (launchProgram.hasPositionIds) {
+                auto positions = pack_jit_tensor_arg(launchProgram.positionIds);
+                if (!positions) { freeFlag(); return make_error(positions.error()); }
+                params.positions = positions.take();
+            }
+            params.seq = launchProgram.seq; params.dim = launchProgram.dim;
+            params.rotaryDim = launchProgram.rotaryDim; params.vectors = launchProgram.vectors;
+            params.positionCount = launchProgram.positionCount;
+            params.theta = launchProgram.theta; params.errorFlag = errorFlag;
+            void* arguments[] = {&params};
+            launched = (*jit)->launch(
+                dim3(static_cast<unsigned>(blockCount)), dim3(cuda_kernel::kBlockSize),
+                0, context.stream, arguments);
+        }
+    }
+    if (!usedJit) {
+        rope_kernel<<<static_cast<int>(blockCount), cuda_kernel::kBlockSize, 0, context.stream>>>(
+            launchProgram, errorFlag);
+        launched = cuda_check(cudaGetLastError(), "cuda rope launch");
+    }
     if (!launched) {
         freeFlag();
         return make_error(launched.error());

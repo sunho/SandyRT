@@ -119,6 +119,11 @@ struct CudaRoPEProgram {
     double theta = 10000.0;
     int64_t rotaryDim = -1;
     bool splitHalf = false;
+    core::DType dtype = core::DType::F32;
+    core::DType positionDtype = core::DType::I64;
+    bool hasPositions = false;
+    std::shared_ptr<CudaJitVariants> jitVariants;
+    bool jitFallbackOnError = false;
 };
 
 struct CudaSlidingQueryKeyScoreProgram {

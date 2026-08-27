@@ -13,6 +13,8 @@
 #include "CudaJitNormKernelSource.generated.h"
 #include "CudaJitReductionAbiSource.generated.h"
 #include "CudaJitReductionKernelSource.generated.h"
+#include "CudaJitRoPEAbiSource.generated.h"
+#include "CudaJitRoPEKernelSource.generated.h"
 #include "CudaJitSoftmaxAbiSource.generated.h"
 #include "CudaJitSoftmaxKernelSource.generated.h"
 #include "CudaJitTensorAccessSource.generated.h"
@@ -90,6 +92,18 @@ std::vector<CudaJitHeader> embeddedNormHeaders() {
         {"CudaJitAbi.cuh", cuda_jit_embedded::kAbi},
         {"CudaJitTensorAccess.cuh", cuda_jit_embedded::kTensorAccess},
         {"CudaJitNormAbi.cuh", cuda_jit_embedded::kNormAbi},
+    };
+}
+
+std::string_view embeddedRoPEKernelSource() {
+    return cuda_jit_embedded::kRoPEKernel;
+}
+
+std::vector<CudaJitHeader> embeddedRoPEHeaders() {
+    return {
+        {"CudaJitAbi.cuh", cuda_jit_embedded::kAbi},
+        {"CudaJitTensorAccess.cuh", cuda_jit_embedded::kTensorAccess},
+        {"CudaJitRoPEAbi.cuh", cuda_jit_embedded::kRoPEAbi},
     };
 }
 
