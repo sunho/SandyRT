@@ -5,11 +5,11 @@
 #include "Device.h"
 #include "KernelIR.h"
 
+#include <absl/container/flat_hash_map.h>
 #include <cuda_runtime.h>
 
 #include <cstdint>
 #include <string>
-#include <unordered_map>
 #include <variant>
 #include <vector>
 
@@ -83,7 +83,7 @@ private:
     };
 
     struct CudaDeviceGraph {
-        std::unordered_map<ir::kernel_ir::OpId, CudaDeviceKernel> kernels;
+        absl::flat_hash_map<ir::kernel_ir::OpId, CudaDeviceKernel> kernels;
     };
 
     Result<void> ensure_stream();
@@ -104,10 +104,10 @@ private:
     DeviceCompiledGraphId nextGraphId_ = 1;
     DevicePagedPoolId nextPagedPoolId_ = 1;
     DevicePagedTensorId nextPagedTensorId_ = 1;
-    std::unordered_map<DeviceBufferId, CudaDeviceBuffer> buffers_;
-    std::unordered_map<DeviceCompiledGraphId, CudaDeviceGraph> graphs_;
-    std::unordered_map<DevicePagedPoolId, CudaPagedTensorPool> pagedPools_;
-    std::unordered_map<DevicePagedTensorId, CudaPagedTensor> pagedTensors_;
+    absl::flat_hash_map<DeviceBufferId, CudaDeviceBuffer> buffers_;
+    absl::flat_hash_map<DeviceCompiledGraphId, CudaDeviceGraph> graphs_;
+    absl::flat_hash_map<DevicePagedPoolId, CudaPagedTensorPool> pagedPools_;
+    absl::flat_hash_map<DevicePagedTensorId, CudaPagedTensor> pagedTensors_;
     CudaJitCache jitCache_;
 };
 

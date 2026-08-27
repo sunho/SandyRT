@@ -10,6 +10,7 @@
 #include "CudaSoftmaxJit.h"
 
 #include <cmath>
+#include <array>
 #include <cstdio>
 #include <cstdlib>
 #include <limits>
@@ -176,11 +177,12 @@ Result<void> CudaDevice::ensure_async_memory_pool() {
 }
 
 Result<void> CudaDevice::ensure_cublas_handle() {
+    if (cublasHandle_)
+        return {};
+
     auto stream = ensure_stream();
     if (!stream)
         return make_error(stream.error());
-    if (cublasHandle_)
-        return {};
 
     auto created = cublas_check(cublasCreate(&cublasHandle_), "cublasCreate");
     if (!created)
@@ -258,32 +260,25 @@ Result<DeviceCompiledGraphId> CudaDevice::compile(const ir::kernel_ir::Graph& gr
                     elementwise.result(),
                     elementwise.scalars(),
                 };
-                if (environment_flag("SANDY_CUDA_ELEMENTWISE_JIT", true)) {
-                    program.jitFallbackOnError = environment_flag(
-                        "SANDY_CUDA_ELEMENTWISE_JIT_FALLBACK", false);
-                    std::vector<int> inputAccesses;
-                    inputAccesses.reserve(program.elementwiseInputs.size());
-                    for (const auto& input : program.elementwiseInputs)
-                        inputAccesses.push_back(default_jit_access(graph.value(input.value).type));
-                    int outputAccess =
-                        default_jit_access(graph.value(program.output).type);
-                    std::vector<int> accesses = inputAccesses;
-                    accesses.push_back(outputAccess);
-                    auto variants = std::make_shared<CudaJitVariants>();
-                    auto jit = variants->getOrCompile(
-                        cudaJitAccessKey(accesses),
-                        [&] {
-                            return compileCudaElementwiseJit(
-                                cudaDevice_, jitCache_, program,
-                                inputAccesses, outputAccess);
-                        });
-                    if (!jit) {
-                        if (!program.jitFallbackOnError)
-                            return make_error("CUDA elementwise JIT compile failed: " + jit.error());
-                    } else {
-                        program.jitVariants = std::move(variants);
-                    }
-                }
+                std::vector<int> inputAccesses;
+                inputAccesses.reserve(program.elementwiseInputs.size());
+                for (const auto& input : program.elementwiseInputs)
+                    inputAccesses.push_back(default_jit_access(graph.value(input.value).type));
+                int outputAccess =
+                    default_jit_access(graph.value(program.output).type);
+                std::vector<int> accesses = inputAccesses;
+                accesses.push_back(outputAccess);
+                auto variants = std::make_shared<CudaJitVariants>();
+                auto jit = variants->getOrCompile(
+                    cudaJitAccessKey(accesses),
+                    [&] {
+                        return compileCudaElementwiseJit(
+                            cudaDevice_, jitCache_, program,
+                            inputAccesses, outputAccess);
+                    });
+                if (!jit)
+                    return make_error("CUDA elementwise JIT compile failed: " + jit.error());
+                program.jitVariants = std::move(variants);
                 kernel.program = std::move(program);
                 break;
             }
@@ -746,8 +741,15 @@ Result<void> CudaDevice::run(
             return make_error(cublas.error());
     }
 
-    std::vector<CudaDeviceBufferView> inputViews;
-    inputViews.reserve(inputs.size());
+    constexpr size_t kMaxRunInputs = 8;
+    constexpr size_t kMaxRunOutputs = 4;
+    if (inputs.size() > kMaxRunInputs)
+        return make_error("cuda device kernel input count exceeds run capacity");
+    if (outputs.size() > kMaxRunOutputs)
+        return make_error("cuda device kernel output count exceeds run capacity");
+
+    std::array<CudaDeviceBufferView, kMaxRunInputs> inputViews;
+    size_t inputViewCount = 0;
     for (const auto& input : inputs) {
         auto* tensor = std::get_if<DeviceTensorView>(&input);
         if (tensor) {
@@ -756,7 +758,7 @@ Result<void> CudaDevice::run(
                 return make_error(view.error());
             auto viewValue = view.take();
             viewValue.view = tensor->view;
-            inputViews.push_back(std::move(viewValue));
+            inputViews[inputViewCount++] = std::move(viewValue);
             continue;
         }
 
@@ -775,7 +777,7 @@ Result<void> CudaDevice::run(
         auto view = defaultView(pagedValue.meta.logicalDesc);
         if (!view)
             return make_error(view.error());
-        inputViews.push_back(CudaDeviceBufferView{
+        inputViews[inputViewCount++] = CudaDeviceBufferView{
             pagedValue.pageTable,
             view.take(),
             pagedValue.pageBytes * static_cast<size_t>(pagedValue.meta.pageCount),
@@ -784,11 +786,11 @@ Result<void> CudaDevice::run(
             pagedValue.meta.pageSize,
             pagedValue.meta.pageCount,
             pagedValue.meta.pageElementCount,
-        });
+        };
     }
 
-    std::vector<CudaDeviceBufferView> outputViews;
-    outputViews.reserve(outputs.size());
+    std::array<CudaDeviceBufferView, kMaxRunOutputs> outputViews;
+    size_t outputViewCount = 0;
     for (const auto& output : outputs) {
         auto* tensor = std::get_if<DeviceTensorView>(&output);
         if (!tensor)
@@ -798,7 +800,7 @@ Result<void> CudaDevice::run(
             return make_error(view.error());
         auto viewValue = view.take();
         viewValue.view = tensor->view;
-        outputViews.push_back(std::move(viewValue));
+        outputViews[outputViewCount++] = std::move(viewValue);
     }
 
     CudaLaunchContext context{
@@ -806,8 +808,8 @@ Result<void> CudaDevice::run(
         stream_,
         cublasHandle_,
         opId,
-        inputViews,
-        outputViews,
+        std::span<const CudaDeviceBufferView>(inputViews.data(), inputViewCount),
+        std::span<const CudaDeviceBufferView>(outputViews.data(), outputViewCount),
         kernel.kind == ir::kernel_ir::OpKind::AttentionKernel ? &deviceProps_ : nullptr,
         &jitCache_,
     };

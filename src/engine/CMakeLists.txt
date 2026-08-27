@@ -14,6 +14,7 @@ target_link_libraries(EngineLib
   CoreLib
   IRLib
   DeviceLib
+  absl::flat_hash_map
 )
 
 set_target_properties(EngineLib PROPERTIES

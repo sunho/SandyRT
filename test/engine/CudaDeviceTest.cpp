@@ -10,7 +10,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstdlib>
 #include <cstdint>
 #include <cstring>
 #include <future>
@@ -195,30 +194,6 @@ std::string cuda_device_skip_reason() {
         return "CUDA runtime reports no devices";
     return "";
 }
-
-class ScopedEnvironmentVariable {
-public:
-    ScopedEnvironmentVariable(const char* name, const char* value)
-        : name_(name) {
-        if (const char* old = std::getenv(name))
-            oldValue_ = std::string(old);
-        if (value)
-            setenv(name, value, 1);
-        else
-            unsetenv(name);
-    }
-
-    ~ScopedEnvironmentVariable() {
-        if (oldValue_)
-            setenv(name_.c_str(), oldValue_->c_str(), 1);
-        else
-            unsetenv(name_.c_str());
-    }
-
-private:
-    std::string name_;
-    std::optional<std::string> oldValue_;
-};
 
 sandy::ir::kernel_ir::ValueType tensor_type(
         sandy::core::Shape shape,
@@ -1021,71 +996,6 @@ TEST(CudaDeviceTest, RunZeroSizedElementwiseOutput) {
     auto values = read_f32_values(device, *outputBuffer);
     ASSERT_TRUE(values) << values.error();
     EXPECT_TRUE(values->empty());
-}
-
-TEST(CudaDeviceTest, InterpreterFallbackMatchesElementwiseJit) {
-    if (auto reason = cuda_device_skip_reason(); !reason.empty())
-        GTEST_SKIP() << reason;
-    namespace kir = sandy::ir::kernel_ir;
-
-    kir::Graph graph;
-    auto input = graph.addValue(tensor_type({4}));
-    graph.addOp<kir::InputOp>(
-        kir::InputSource{kir::InputSourceKind::Argument, 0, ""}, input);
-    auto output = graph.addValue(tensor_type({4}));
-    auto* op = graph.addOp<kir::ElementwiseKernelOp>(
-        std::vector<kir::ElementwiseInput>{{input, kir::BroadcastMode::None}},
-        output,
-        4,
-        std::vector<kir::ScalarNode>{
-            {0, kir::ScalarOp::Load, sandy::core::DType::F32, 0, 0.0, {}},
-            {1, kir::ScalarOp::Constant, sandy::core::DType::F32, 0, 1.25, {}},
-            {2, kir::ScalarOp::Mul, sandy::core::DType::F32, 0, 0.0, {0, 1}},
-            {3, kir::ScalarOp::Neg, sandy::core::DType::F32, 0, 0.0, {2}},
-            {4, kir::ScalarOp::Tanh, sandy::core::DType::F32, 0, 0.0, {3}},
-        });
-    graph.setOutputs({output});
-    auto host = make_f32_buffer(
-        "x", sandy::core::Shape({4}), {-2.0f, -0.5f, 0.25f, 3.0f});
-
-    auto runGraph = [&](sandy::device::CudaDevice& device) -> Result<std::vector<float>> {
-        auto compiled = device.compile(graph);
-        if (!compiled)
-            return make_error(compiled.error());
-        auto inputBuffer = device.load(*host);
-        if (!inputBuffer)
-            return make_error(inputBuffer.error());
-        auto outputBuffer = device.alloc(
-            sandy::core::TensorDesc({4}, sandy::core::DType::F32));
-        if (!outputBuffer)
-            return make_error(outputBuffer.error());
-        std::vector<sandy::device::DeviceRunValue> inputs = {
-            tensor_view(device, *inputBuffer, host->desc()),
-        };
-        std::vector<sandy::device::DeviceRunValue> outputs = {
-            tensor_view(
-                device, *outputBuffer,
-                sandy::core::TensorDesc({4}, sandy::core::DType::F32)),
-        };
-        auto run = device.run(*compiled, op->id(), inputs, outputs);
-        if (!run)
-            return make_error(run.error());
-        return read_f32_values(device, *outputBuffer);
-    };
-
-    sandy::device::CudaDevice jitDevice;
-    auto jitValues = runGraph(jitDevice);
-    ASSERT_TRUE(jitValues) << jitValues.error();
-    EXPECT_EQ(jitDevice.jitCacheStats().entries, 1u);
-
-    ScopedEnvironmentVariable disableJit("SANDY_CUDA_ELEMENTWISE_JIT", "0");
-    sandy::device::CudaDevice interpreterDevice;
-    auto interpreterValues = runGraph(interpreterDevice);
-    ASSERT_TRUE(interpreterValues) << interpreterValues.error();
-    EXPECT_EQ(interpreterDevice.jitCacheStats().entries, 0u);
-    ASSERT_EQ(jitValues->size(), interpreterValues->size());
-    for (size_t i = 0; i < jitValues->size(); ++i)
-        EXPECT_FLOAT_EQ((*jitValues)[i], (*interpreterValues)[i]) << "at index " << i;
 }
 
 TEST(CudaDeviceTest, RunLayoutTransformMaterializesStridedF32View) {

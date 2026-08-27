@@ -53,7 +53,6 @@ struct CudaElementwiseProgram {
     ir::kernel_ir::ScalarId result = 0;
     std::vector<ir::kernel_ir::ScalarNode> scalars;
     std::shared_ptr<CudaJitVariants> jitVariants;
-    bool jitFallbackOnError = false;
 };
 
 struct CudaLayoutTransformProgram {

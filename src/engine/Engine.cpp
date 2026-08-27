@@ -6,6 +6,8 @@
 #include "RuntimeScratchPlan.h"
 #include "RuntimeTensorDesc.h"
 
+#include <absl/container/flat_hash_map.h>
+
 #include <atomic>
 
 #include <algorithm>
@@ -94,12 +96,12 @@ struct RuntimeState {
         bool owned = false;
     };
 
-    std::unordered_map<ValueId, DeviceBufferId> buffers;
-    std::unordered_map<ValueId, DevicePagedTensorView> pagedTensors;
-    std::unordered_map<ValueId, TensorViewDesc> views;
-    std::unordered_map<ValueId, uint32_t> bufferDevices;
+    absl::flat_hash_map<ValueId, DeviceBufferId> buffers;
+    absl::flat_hash_map<ValueId, DevicePagedTensorView> pagedTensors;
+    absl::flat_hash_map<ValueId, TensorViewDesc> views;
+    absl::flat_hash_map<ValueId, uint32_t> bufferDevices;
     std::unordered_map<ValueId, std::vector<ValueId>> tensorTuples;
-    std::unordered_map<DeviceId, std::unordered_map<DeviceBufferId, BufferRef>> bufferRefs;
+    absl::flat_hash_map<DeviceId, absl::flat_hash_map<DeviceBufferId, BufferRef>> bufferRefs;
     std::vector<std::pair<DeviceId, DeviceBufferId>> retiredOwnedBuffers;
     std::unordered_map<DeviceId, DeviceBufferId> scratchBuffers;
     RuntimeTensorDescs tensorDescs;
@@ -177,7 +179,7 @@ DeviceId runtime_op_device(
 }
 
 Result<DeviceBufferId> lookup_runtime_buffer(
-        const std::unordered_map<ValueId, DeviceBufferId>& buffers,
+        const absl::flat_hash_map<ValueId, DeviceBufferId>& buffers,
         ValueId value) {
     auto it = buffers.find(value);
     if (it == buffers.end())
@@ -186,7 +188,7 @@ Result<DeviceBufferId> lookup_runtime_buffer(
 }
 
 Result<TensorViewDesc> lookup_runtime_view(
-        const std::unordered_map<ValueId, TensorViewDesc>& views,
+        const absl::flat_hash_map<ValueId, TensorViewDesc>& views,
         ValueId value) {
     auto it = views.find(value);
     if (it == views.end())

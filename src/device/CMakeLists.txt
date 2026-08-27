@@ -112,6 +112,7 @@ target_link_libraries(DeviceLib
   PUBLIC
   CoreLib
   IRLib
+  absl::flat_hash_map
 )
 
 if(SANDY_ENABLE_CUDA)
