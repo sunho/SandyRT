@@ -1,6 +1,7 @@
 #include "CudaDevice.h"
 #include "CudaScratchAllocator.h"
 #include "CudaElementwiseJit.h"
+#include "CudaReductionJit.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -233,11 +234,21 @@ Result<DeviceCompiledGraphId> CudaDevice::compile(const ir::kernel_ir::Graph& gr
             case ir::kernel_ir::OpKind::ReductionKernel: {
                 const auto& reduction =
                     static_cast<const ir::kernel_ir::ReductionKernelOp&>(op);
-                kernel.program = CudaReductionProgram{
+                CudaReductionProgram program{
                     reduction.reduce(),
                     reduction.axes(),
                     reduction.keepDims(),
                 };
+                if (environment_flag("SANDY_CUDA_REDUCTION_JIT", true)) {
+                    auto jit = compileCudaReductionJit(cudaDevice_, jitCache_);
+                    if (!jit) {
+                        if (!environment_flag("SANDY_CUDA_REDUCTION_JIT_FALLBACK", false))
+                            return make_error("CUDA reduction JIT compile failed: " + jit.error());
+                    } else {
+                        program.jitKernel = jit.take();
+                    }
+                }
+                kernel.program = std::move(program);
                 break;
             }
             case ir::kernel_ir::OpKind::LinearKernel:

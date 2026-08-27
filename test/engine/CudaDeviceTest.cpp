@@ -2771,6 +2771,64 @@ TEST(CudaDeviceTest, RunReductionSumF32LastDimKeepDims) {
         });
 }
 
+TEST(CudaDeviceTest, RunReductionJitBF16StridedMiddleAxisAndReusesSource) {
+    if (auto reason = cuda_device_skip_reason(); !reason.empty())
+        GTEST_SKIP() << reason;
+    namespace kir = sandy::ir::kernel_ir;
+
+    kir::Graph graph;
+    auto x = graph.addValue(tensor_type({3, 2}, sandy::core::DType::BF16));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 0, ""},
+        x);
+    auto output = graph.addValue(tensor_type({3, 1}, sandy::core::DType::BF16));
+    auto* op = graph.addOp<kir::ReductionKernelOp>(
+        kir::ReduceOp::Sum,
+        x,
+        output,
+        std::vector<int64_t>{1},
+        true);
+    graph.setOutputs({output});
+
+    sandy::device::CudaDevice device;
+    auto compiled = device.compile(graph);
+    ASSERT_TRUE(compiled) << compiled.error();
+    auto compiledAgain = device.compile(graph);
+    ASSERT_TRUE(compiledAgain) << compiledAgain.error();
+    auto stats = device.jitCacheStats();
+    EXPECT_EQ(stats.misses, 1u);
+    EXPECT_EQ(stats.hits, 1u);
+    EXPECT_EQ(stats.entries, 1u);
+
+    auto xHost = make_bf16_buffer(
+        "x",
+        sandy::core::Shape({2, 3}),
+        {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f});
+    auto xBuffer = device.load(*xHost);
+    ASSERT_TRUE(xBuffer) << xBuffer.error();
+    auto outputBuffer = device.alloc(
+        sandy::core::TensorDesc({3, 1}, sandy::core::DType::BF16));
+    ASSERT_TRUE(outputBuffer) << outputBuffer.error();
+
+    sandy::device::TensorViewDesc transposed;
+    transposed.desc =
+        sandy::core::TensorDesc({3, 2}, sandy::core::DType::BF16);
+    transposed.strides = {1, 3};
+    std::vector<sandy::device::DeviceRunValue> inputs = {
+        sandy::device::DeviceTensorView{*xBuffer, transposed},
+    };
+    std::vector<sandy::device::DeviceRunValue> outputs = {
+        tensor_view(
+            device,
+            *outputBuffer,
+            sandy::core::TensorDesc({3, 1}, sandy::core::DType::BF16)),
+    };
+    auto run = device.run(*compiled, op->id(), inputs, outputs);
+    ASSERT_TRUE(run) << run.error();
+
+    expect_bf16_output_near(device, *outputBuffer, {5.0f, 7.0f, 9.0f});
+}
+
 TEST(CudaDeviceTest, RunReductionRejectsKeepDimsFalse) {
     if (auto reason = cuda_device_skip_reason(); !reason.empty())
         GTEST_SKIP() << reason;

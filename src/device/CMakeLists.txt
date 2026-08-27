@@ -33,6 +33,10 @@ if(SANDY_ENABLE_CUDA)
     kElementwiseKernel CudaJitElementwiseKernelSource.generated.h)
   sandy_embed_cuda_source("${SANDY_JIT_TEMPLATE_DIR}/generated/ElementwiseEvaluator.cuh"
     kEvaluatorStub CudaJitEvaluatorStubSource.generated.h)
+  sandy_embed_cuda_source("${SANDY_JIT_TEMPLATE_DIR}/CudaJitReductionAbi.cuh"
+    kReductionAbi CudaJitReductionAbiSource.generated.h)
+  sandy_embed_cuda_source("${SANDY_JIT_TEMPLATE_DIR}/CudaJitReductionKernel.cu"
+    kReductionKernel CudaJitReductionKernelSource.generated.h)
 
   target_sources(DeviceLib
     PRIVATE
@@ -40,6 +44,7 @@ if(SANDY_ENABLE_CUDA)
     cuda/jit/CudaElementwiseJit.cpp
     cuda/jit/CudaJit.cpp
     cuda/jit/CudaJitEmbeddedSources.cpp
+    cuda/jit/CudaReductionJit.cpp
     cuda/CudaScratchAllocator.cpp
     cuda/CudaDevice.cpp
     cuda/CudaPagedTensor.cpp

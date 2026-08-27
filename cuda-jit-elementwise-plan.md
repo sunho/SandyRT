@@ -10,6 +10,30 @@ compiled program plus exact input signatures, including Paged-KV length.
 Every implementation step below starts by reading this document and ends in a
 separate commit. Completed steps are marked in their commit.
 
+## Follow-up: shared tensor access migration
+
+Migrate the remaining hand-written CUDA operation families to highlighted,
+embedded NVRTC sources using `SandyJitTensorArg`. Each family keeps shapes,
+strides, dtypes, pointers, and operation parameters in its runtime ABI so its
+full-source cache entry can be reused whenever the kernel code is unchanged.
+Each item gets focused correctness/cache coverage and a separate commit.
+
+1. Reduction (complete: focused JIT/fallback tests pass; full suite 64/65 with
+   only the pre-existing asynchronous gather bounds failure)
+2. Layout transform
+3. Gather
+4. Softmax
+5. Norm
+6. RoPE
+7. TopK
+8. MoE gather
+9. MoE scatter sum
+10. Attention
+
+cuBLAS matmul remains a library call; only Sandy-owned CUDA kernels are in this
+migration. The existing compiled CUDA kernels remain as explicit fallbacks while
+each JIT family establishes parity.
+
 ## Invariants
 
 - Build and benchmark with `-O2` and `CMAKE_CUDA_ARCHITECTURES=native`.

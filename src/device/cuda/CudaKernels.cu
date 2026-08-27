@@ -1,6 +1,8 @@
 #include "CudaKernels.h"
 #include "CudaKernelLaunchUtils.cuh"
 #include "CudaKernelUtils.cuh"
+#include "jit/CudaJitLaunchUtils.cuh"
+#include "jit/templates/CudaJitReductionAbi.cuh"
 
 #include <limits>
 #include <string>
@@ -139,6 +141,28 @@ Result<void> launch_cuda_reduction(
         cuda_kernel::kBlockSize;
     if (blockCount > std::numeric_limits<int>::max())
         return make_error("cuda reduction block count exceeds grid limit");
+
+    if (program.jitKernel) {
+        auto input = pack_jit_tensor_arg(launchProgram.input);
+        if (!input)
+            return make_error(input.error());
+        auto output = pack_jit_tensor_arg(launchProgram.output);
+        if (!output)
+            return make_error(output.error());
+        SandyReductionParams params{
+            input.take(),
+            output.take(),
+            launchProgram.axis,
+            launchProgram.reduceDim,
+        };
+        void* arguments[] = {&params};
+        return program.jitKernel->launch(
+            dim3(static_cast<unsigned>(blockCount)),
+            dim3(cuda_kernel::kBlockSize),
+            0,
+            context.stream,
+            arguments);
+    }
 
     reduction_sum_keepdims_kernel<<<
         static_cast<int>(blockCount),

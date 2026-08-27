@@ -77,6 +77,7 @@ struct CudaReductionProgram {
     ir::kernel_ir::ReduceOp reduce = ir::kernel_ir::ReduceOp::Sum;
     std::vector<int64_t> axes;
     bool keepDims = false;
+    CudaJitCache::KernelPtr jitKernel;
 };
 
 struct CudaSoftmaxProgram {
