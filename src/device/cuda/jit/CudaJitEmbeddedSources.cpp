@@ -1,6 +1,10 @@
 #include "CudaJitEmbeddedSources.h"
 
 #include "CudaJitAbiSource.generated.h"
+#include "CudaJitAttentionAbiSource.generated.h"
+#include "CudaJitAttentionDecodeConfigStubSource.generated.h"
+#include "CudaJitAttentionDecodeKernelSource.generated.h"
+#include "CudaJitAttentionPrefillKernelSource.generated.h"
 #include "CudaJitElementwiseKernelSource.generated.h"
 #include "CudaJitElementwiseConfigStubSource.generated.h"
 #include "CudaJitElementwiseTemplateSource.generated.h"
@@ -104,6 +108,32 @@ std::vector<CudaJitHeader> embeddedRoPEHeaders() {
         {"CudaJitAbi.cuh", cuda_jit_embedded::kAbi},
         {"CudaJitTensorAccess.cuh", cuda_jit_embedded::kTensorAccess},
         {"CudaJitRoPEAbi.cuh", cuda_jit_embedded::kRoPEAbi},
+    };
+}
+
+std::string_view embeddedAttentionDecodeKernelSource() {
+    return cuda_jit_embedded::kAttentionDecodeKernel;
+}
+
+std::vector<CudaJitHeader> embeddedAttentionDecodeHeaders() {
+    return {
+        {"CudaJitAbi.cuh", cuda_jit_embedded::kAbi},
+        {"CudaJitTensorAccess.cuh", cuda_jit_embedded::kTensorAccess},
+        {"CudaJitAttentionAbi.cuh", cuda_jit_embedded::kAttentionAbi},
+        {"CudaJitAttentionDecodeConfig.cuh",
+         cuda_jit_embedded::kAttentionDecodeConfigStub},
+    };
+}
+
+std::string_view embeddedAttentionPrefillKernelSource() {
+    return cuda_jit_embedded::kAttentionPrefillKernel;
+}
+
+std::vector<CudaJitHeader> embeddedAttentionPrefillHeaders() {
+    return {
+        {"CudaJitAbi.cuh", cuda_jit_embedded::kAbi},
+        {"CudaJitTensorAccess.cuh", cuda_jit_embedded::kTensorAccess},
+        {"CudaJitAttentionAbi.cuh", cuda_jit_embedded::kAttentionAbi},
     };
 }
 

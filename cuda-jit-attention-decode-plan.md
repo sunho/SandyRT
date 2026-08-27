@@ -49,7 +49,7 @@ Status: complete
 
 ## Step 2: Split decode and prefill JIT modules
 
-Status: pending
+Status: complete
 
 - Add a shared highlighted JIT attention ABI/config boundary.
 - Add `CudaJitAttentionDecodeKernel.cu` for the decode partial/reduce entries.
@@ -57,6 +57,10 @@ Status: pending
   route or compile it in this decode-only task.
 - Leave the compiled fallback source unchanged.
 - Commit the JIT module boundary together with embedding/build plumbing.
+
+Validation: the CUDA device test target builds successfully with the new
+embedded decode/prefill module boundary; the compiled fallback source is
+unchanged.
 
 ## Step 3: Page-major typed decode access
 

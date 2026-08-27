@@ -59,6 +59,14 @@ if(SANDY_ENABLE_CUDA)
     kRoPEAbi CudaJitRoPEAbiSource.generated.h)
   sandy_embed_cuda_source("${SANDY_JIT_TEMPLATE_DIR}/CudaJitRoPEKernel.cu"
     kRoPEKernel CudaJitRoPEKernelSource.generated.h)
+  sandy_embed_cuda_source("${SANDY_JIT_TEMPLATE_DIR}/CudaJitAttentionAbi.cuh"
+    kAttentionAbi CudaJitAttentionAbiSource.generated.h)
+  sandy_embed_cuda_source("${SANDY_JIT_TEMPLATE_DIR}/CudaJitAttentionDecodeKernel.cu"
+    kAttentionDecodeKernel CudaJitAttentionDecodeKernelSource.generated.h)
+  sandy_embed_cuda_source("${SANDY_JIT_TEMPLATE_DIR}/CudaJitAttentionPrefillKernel.cu"
+    kAttentionPrefillKernel CudaJitAttentionPrefillKernelSource.generated.h)
+  sandy_embed_cuda_source("${SANDY_JIT_TEMPLATE_DIR}/generated/AttentionDecodeConfig.cuh"
+    kAttentionDecodeConfigStub CudaJitAttentionDecodeConfigStubSource.generated.h)
 
   target_sources(DeviceLib
     PRIVATE

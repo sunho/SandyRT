@@ -20,5 +20,9 @@ std::string_view embeddedNormKernelSource();
 std::vector<CudaJitHeader> embeddedNormHeaders();
 std::string_view embeddedRoPEKernelSource();
 std::vector<CudaJitHeader> embeddedRoPEHeaders();
+std::string_view embeddedAttentionDecodeKernelSource();
+std::vector<CudaJitHeader> embeddedAttentionDecodeHeaders();
+std::string_view embeddedAttentionPrefillKernelSource();
+std::vector<CudaJitHeader> embeddedAttentionPrefillHeaders();
 
 } // namespace sandy::device
