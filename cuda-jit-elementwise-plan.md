@@ -53,7 +53,7 @@ Status: complete
 
 ## Step 3: Generic CUDA JIT and highlighted embedded sources
 
-Status: pending
+Status: complete
 
 - Add reusable NVRTC compiler, module/function RAII, diagnostics, architecture
   selection, and thread-safe in-flight compile caching.

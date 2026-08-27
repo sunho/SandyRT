@@ -6,9 +6,39 @@ add_library(DeviceLib
 )
 
 if(SANDY_ENABLE_CUDA)
+  set(SANDY_JIT_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/cuda/jit/generated")
+  file(MAKE_DIRECTORY "${SANDY_JIT_GENERATED_DIR}")
+
+  function(sandy_embed_cuda_source source symbol output_name)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${source}")
+    file(READ "${source}" source_contents)
+    string(FIND "${source_contents}" ")SANDY_JIT_SOURCE\"" delimiter_collision)
+    if(NOT delimiter_collision EQUAL -1)
+      message(FATAL_ERROR "JIT source contains reserved raw-string delimiter: ${source}")
+    endif()
+    file(WRITE "${SANDY_JIT_GENERATED_DIR}/${output_name}"
+      "#pragma once\nnamespace sandy::device::cuda_jit_embedded {\n"
+      "inline constexpr char ${symbol}[] = R\"SANDY_JIT_SOURCE(${source_contents})SANDY_JIT_SOURCE\";\n"
+      "}\n")
+  endfunction()
+
+  set(SANDY_JIT_TEMPLATE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/cuda/jit/templates")
+  sandy_embed_cuda_source("${SANDY_JIT_TEMPLATE_DIR}/CudaJitAbi.cuh"
+    kAbi CudaJitAbiSource.generated.h)
+  sandy_embed_cuda_source("${SANDY_JIT_TEMPLATE_DIR}/CudaJitTensorAccess.cuh"
+    kTensorAccess CudaJitTensorAccessSource.generated.h)
+  sandy_embed_cuda_source("${SANDY_JIT_TEMPLATE_DIR}/CudaJitElementwiseTemplate.cuh"
+    kElementwiseTemplate CudaJitElementwiseTemplateSource.generated.h)
+  sandy_embed_cuda_source("${SANDY_JIT_TEMPLATE_DIR}/CudaJitElementwiseKernel.cu"
+    kElementwiseKernel CudaJitElementwiseKernelSource.generated.h)
+  sandy_embed_cuda_source("${SANDY_JIT_TEMPLATE_DIR}/generated/ElementwiseEvaluator.cuh"
+    kEvaluatorStub CudaJitEvaluatorStubSource.generated.h)
+
   target_sources(DeviceLib
     PRIVATE
     cuda/CudaRuntime.cpp
+    cuda/jit/CudaJit.cpp
+    cuda/jit/CudaJitEmbeddedSources.cpp
     cuda/CudaScratchAllocator.cpp
     cuda/CudaDevice.cpp
     cuda/CudaPagedTensor.cpp
@@ -31,6 +61,9 @@ target_include_directories(DeviceLib
   ${CMAKE_CURRENT_SOURCE_DIR}
   ${CMAKE_CURRENT_SOURCE_DIR}/cpu
   ${CMAKE_CURRENT_SOURCE_DIR}/cuda
+  ${CMAKE_CURRENT_SOURCE_DIR}/cuda/jit
+  ${CMAKE_CURRENT_SOURCE_DIR}/cuda/jit/templates
+  ${SANDY_JIT_GENERATED_DIR}
 )
 
 target_link_libraries(DeviceLib
@@ -44,6 +77,8 @@ if(SANDY_ENABLE_CUDA)
     PUBLIC
     CUDA::cudart
     CUDA::cublas
+    CUDA::cuda_driver
+    CUDA::nvrtc
   )
 endif()
 

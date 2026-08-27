@@ -1,4 +1,6 @@
 #include "CudaDevice.h"
+#include "CudaJit.h"
+#include "CudaJitEmbeddedSources.h"
 #include "KernelIR.h"
 #include "TensorCalc.h"
 
@@ -506,6 +508,29 @@ void run_attention_test(
 }
 
 } // namespace
+
+TEST(CudaDeviceTest, JitCacheCompilesHighlightedTemplateOnce) {
+    if (auto reason = cuda_device_skip_reason(); !reason.empty())
+        GTEST_SKIP() << reason;
+
+    sandy::device::CudaJitRequest request;
+    request.sourceName = "CudaJitElementwiseKernel.cu";
+    request.source = sandy::device::embeddedElementwiseKernelSource();
+    request.headers = sandy::device::embeddedElementwiseHeaders();
+    request.entryName = "sandy_jit_cache_smoke";
+    request.options = {"-DSANDY_JIT_ENTRY_NAME=sandy_jit_cache_smoke"};
+
+    sandy::device::CudaJitCache cache;
+    auto first = cache.getOrCompile(0, request);
+    ASSERT_TRUE(first) << first.error();
+    auto second = cache.getOrCompile(0, request);
+    ASSERT_TRUE(second) << second.error();
+    EXPECT_EQ(*first, *second);
+    auto stats = cache.stats();
+    EXPECT_EQ(stats.misses, 1u);
+    EXPECT_EQ(stats.hits, 1u);
+    EXPECT_EQ(stats.entries, 1u);
+}
 
 TEST(CudaDeviceTest, ScratchAllocatorFinalizesReusablePlacementLayout) {
     if (auto reason = cuda_device_skip_reason(); !reason.empty())
