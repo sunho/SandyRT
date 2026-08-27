@@ -11,6 +11,8 @@
 #include "CudaJitLayoutTransformKernelSource.generated.h"
 #include "CudaJitReductionAbiSource.generated.h"
 #include "CudaJitReductionKernelSource.generated.h"
+#include "CudaJitSoftmaxAbiSource.generated.h"
+#include "CudaJitSoftmaxKernelSource.generated.h"
 #include "CudaJitTensorAccessSource.generated.h"
 
 namespace sandy::device {
@@ -62,6 +64,18 @@ std::vector<CudaJitHeader> embeddedGatherHeaders() {
         {"CudaJitAbi.cuh", cuda_jit_embedded::kAbi},
         {"CudaJitTensorAccess.cuh", cuda_jit_embedded::kTensorAccess},
         {"CudaJitGatherAbi.cuh", cuda_jit_embedded::kGatherAbi},
+    };
+}
+
+std::string_view embeddedSoftmaxKernelSource() {
+    return cuda_jit_embedded::kSoftmaxKernel;
+}
+
+std::vector<CudaJitHeader> embeddedSoftmaxHeaders() {
+    return {
+        {"CudaJitAbi.cuh", cuda_jit_embedded::kAbi},
+        {"CudaJitTensorAccess.cuh", cuda_jit_embedded::kTensorAccess},
+        {"CudaJitSoftmaxAbi.cuh", cuda_jit_embedded::kSoftmaxAbi},
     };
 }
 

@@ -1,6 +1,9 @@
 #include "CudaKernels.h"
 #include "CudaKernelLaunchUtils.cuh"
 #include "CudaKernelUtils.cuh"
+#include "jit/CudaJitLaunchUtils.cuh"
+#include "jit/CudaSoftmaxJit.h"
+#include "jit/templates/CudaJitSoftmaxAbi.cuh"
 
 #include <cmath>
 #include <limits>
@@ -162,6 +165,48 @@ Result<void> launch_cuda_softmax(
     int blocks = static_cast<int>(launchProgram.rows);
     int threads = cuda_kernel::kBlockSize;
     size_t sharedBytes = static_cast<size_t>(threads) * sizeof(float);
+    if (program.jitVariants) {
+        if (!context.jitCache)
+            return make_error("cuda softmax JIT cache is null");
+        const int accesses[] = {
+            jit_access_kind(launchProgram.x.access),
+            jit_access_kind(launchProgram.output.access),
+        };
+        auto jit = program.jitVariants->getOrCompile(
+            cudaJitAccessKey(accesses),
+            [&] {
+                return compileCudaSoftmaxJit(
+                    context.cudaDevice,
+                    *context.jitCache,
+                    program.dtype,
+                    accesses[0],
+                    accesses[1]);
+            });
+        if (!jit) {
+            if (!program.jitFallbackOnError)
+                return make_error(jit.error());
+        } else {
+            auto input = pack_jit_tensor_arg(launchProgram.x);
+            if (!input)
+                return make_error(input.error());
+            auto output = pack_jit_tensor_arg(launchProgram.output);
+            if (!output)
+                return make_error(output.error());
+            SandySoftmaxParams params{
+                input.take(),
+                output.take(),
+                launchProgram.rows,
+                launchProgram.hidden,
+            };
+            void* arguments[] = {&params};
+            return (*jit)->launch(
+                dim3(static_cast<unsigned>(blocks)),
+                dim3(static_cast<unsigned>(threads)),
+                sharedBytes,
+                context.stream,
+                arguments);
+        }
+    }
     softmax_last_dim_kernel<<<blocks, threads, sharedBytes, context.stream>>>(launchProgram);
     return cuda_check(cudaGetLastError(), "cuda softmax launch");
 }

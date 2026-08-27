@@ -3119,6 +3119,71 @@ TEST(CudaDeviceTest, RunSoftmaxRejectsNonLastDim) {
     EXPECT_NE(run.error().find("only supports last dimension"), std::string::npos);
 }
 
+TEST(CudaDeviceTest, RunSoftmaxJitBF16StridedInputAndReusesVariant) {
+    if (auto reason = cuda_device_skip_reason(); !reason.empty())
+        GTEST_SKIP() << reason;
+    namespace kir = sandy::ir::kernel_ir;
+
+    kir::Graph graph;
+    auto x = graph.addValue(tensor_type({3, 2}, sandy::core::DType::BF16));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 0, ""},
+        x);
+    auto output = graph.addValue(tensor_type({3, 2}, sandy::core::DType::BF16));
+    auto* op = graph.addOp<kir::SoftmaxKernelOp>(x, output, -1);
+    graph.setOutputs({output});
+
+    sandy::device::CudaDevice device;
+    auto compiled = device.compile(graph);
+    ASSERT_TRUE(compiled) << compiled.error();
+    auto compiledAgain = device.compile(graph);
+    ASSERT_TRUE(compiledAgain) << compiledAgain.error();
+    auto compiledStats = device.jitCacheStats();
+    EXPECT_EQ(compiledStats.misses, 1u);
+    EXPECT_EQ(compiledStats.hits, 1u);
+    EXPECT_EQ(compiledStats.entries, 1u);
+
+    auto xHost = make_bf16_buffer(
+        "x",
+        sandy::core::Shape({2, 3}),
+        {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f});
+    auto xBuffer = device.load(*xHost);
+    ASSERT_TRUE(xBuffer) << xBuffer.error();
+    auto outputBuffer = device.alloc(
+        sandy::core::TensorDesc({3, 2}, sandy::core::DType::BF16));
+    ASSERT_TRUE(outputBuffer) << outputBuffer.error();
+
+    sandy::device::TensorViewDesc transposed;
+    transposed.desc =
+        sandy::core::TensorDesc({3, 2}, sandy::core::DType::BF16);
+    transposed.strides = {1, 3};
+    std::vector<sandy::device::DeviceRunValue> inputs = {
+        sandy::device::DeviceTensorView{*xBuffer, transposed},
+    };
+    std::vector<sandy::device::DeviceRunValue> outputs = {
+        tensor_view(
+            device,
+            *outputBuffer,
+            sandy::core::TensorDesc({3, 2}, sandy::core::DType::BF16)),
+    };
+    auto run = device.run(*compiled, op->id(), inputs, outputs);
+    ASSERT_TRUE(run) << run.error();
+    auto afterFirstRun = device.jitCacheStats();
+    EXPECT_EQ(afterFirstRun.misses, 2u);
+    EXPECT_EQ(afterFirstRun.entries, 2u);
+    auto runAgain = device.run(*compiled, op->id(), inputs, outputs);
+    ASSERT_TRUE(runAgain) << runAgain.error();
+    auto afterSecondRun = device.jitCacheStats();
+    EXPECT_EQ(afterSecondRun.misses, 2u);
+    EXPECT_EQ(afterSecondRun.entries, 2u);
+
+    expect_bf16_output_near(
+        device,
+        *outputBuffer,
+        {0.0474259f, 0.9525741f, 0.0474259f, 0.9525741f,
+         0.0474259f, 0.9525741f});
+}
+
 TEST(CudaDeviceTest, RunTopKF32LastDim) {
     if (auto reason = cuda_device_skip_reason(); !reason.empty())
         GTEST_SKIP() << reason;

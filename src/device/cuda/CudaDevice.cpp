@@ -4,6 +4,7 @@
 #include "CudaGatherJit.h"
 #include "CudaLayoutTransformJit.h"
 #include "CudaReductionJit.h"
+#include "CudaSoftmaxJit.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -366,7 +367,33 @@ Result<DeviceCompiledGraphId> CudaDevice::compile(const ir::kernel_ir::Graph& gr
             }
             case ir::kernel_ir::OpKind::SoftmaxKernel: {
                 const auto& softmax = static_cast<const ir::kernel_ir::SoftmaxKernelOp&>(op);
-                kernel.program = CudaSoftmaxProgram{softmax.axis()};
+                CudaSoftmaxProgram program{softmax.axis()};
+                if (environment_flag("SANDY_CUDA_SOFTMAX_JIT", true)) {
+                    program.jitFallbackOnError = environment_flag(
+                        "SANDY_CUDA_SOFTMAX_JIT_FALLBACK", false);
+                    const auto& inputType = graph.value(op.inputs()[0]).type;
+                    const auto& outputType = graph.value(op.outputs()[0]).type;
+                    program.dtype = inputType.dtype;
+                    const int accesses[] = {
+                        default_jit_access(inputType),
+                        default_jit_access(outputType),
+                    };
+                    auto variants = std::make_shared<CudaJitVariants>();
+                    auto jit = variants->getOrCompile(
+                        cudaJitAccessKey(accesses),
+                        [&] {
+                            return compileCudaSoftmaxJit(
+                                cudaDevice_, jitCache_, program.dtype,
+                                accesses[0], accesses[1]);
+                        });
+                    if (!jit) {
+                        if (!program.jitFallbackOnError)
+                            return make_error("CUDA softmax JIT compile failed: " + jit.error());
+                    } else {
+                        program.jitVariants = std::move(variants);
+                    }
+                }
+                kernel.program = std::move(program);
                 break;
             }
             case ir::kernel_ir::OpKind::TopKKernel: {

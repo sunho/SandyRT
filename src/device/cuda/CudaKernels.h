@@ -96,6 +96,9 @@ struct CudaReductionProgram {
 
 struct CudaSoftmaxProgram {
     int64_t axis = -1;
+    core::DType dtype = core::DType::F32;
+    std::shared_ptr<CudaJitVariants> jitVariants;
+    bool jitFallbackOnError = false;
 };
 
 struct CudaTopKProgram {

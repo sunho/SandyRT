@@ -26,7 +26,9 @@ Each item gets focused correctness/cache coverage and a separate commit.
 3. Gather (complete: per-role ID/value/access specialization, lazy access
    variants, focused JIT/fallback tests pass; full suite 67/68 with only the
    pre-existing asynchronous gather bounds failure)
-4. Softmax
+4. Softmax (complete: F32/BF16 and strided access variants with focused
+   JIT/fallback tests; full suite 68/69 with only the pre-existing asynchronous
+   gather bounds failure)
 5. Norm
 6. RoPE
 7. TopK

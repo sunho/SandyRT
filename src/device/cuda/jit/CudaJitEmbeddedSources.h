@@ -14,5 +14,7 @@ std::string_view embeddedLayoutTransformKernelSource();
 std::vector<CudaJitHeader> embeddedLayoutTransformHeaders();
 std::string_view embeddedGatherKernelSource();
 std::vector<CudaJitHeader> embeddedGatherHeaders();
+std::string_view embeddedSoftmaxKernelSource();
+std::vector<CudaJitHeader> embeddedSoftmaxHeaders();
 
 } // namespace sandy::device
