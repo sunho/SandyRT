@@ -520,6 +520,14 @@ Result<GenerateResult> Session::generate(
     if (result.finishReason.empty())
         result.finishReason = "length";
     if (logger_) {
+        if (logger_->profileEnabled()) {
+            auto cache = engine_.runtimePlanCacheStats();
+            logger_->logf(
+                "runtime_plan_cache.stats hits=%zu misses=%zu entries=%zu",
+                cache.hits,
+                cache.misses,
+                cache.entries);
+        }
         logger_->logf(
             "server.throughput prefill_tokens=%d prefill_ms=%.3f "
             "prefill_toks_per_s=%.3f decode_tokens=%d decode_ms=%.3f "

@@ -575,6 +575,7 @@ TEST(CudaDeviceTest, JitCacheCompilesHighlightedTemplateOnce) {
     EXPECT_EQ(stats.misses, 1u);
     EXPECT_EQ(stats.hits, 1u);
     EXPECT_EQ(stats.entries, 1u);
+    EXPECT_GT(stats.compileMilliseconds, 0.0);
 }
 
 TEST(CudaDeviceTest, ElementwiseJitEmitterProducesStraightLineExpressions) {

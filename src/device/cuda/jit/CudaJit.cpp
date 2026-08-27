@@ -4,6 +4,7 @@
 
 #include <nvrtc.h>
 
+#include <chrono>
 #include <string_view>
 #include <utility>
 
@@ -178,7 +179,10 @@ Result<CudaJitCache::KernelPtr> CudaJitCache::getOrCompile(
         hits_++;
         return found->second;
     }
+    auto compileStart = std::chrono::steady_clock::now();
     auto kernel = compile_kernel(cudaDevice, request);
+    compileMilliseconds_ += std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - compileStart).count();
     if (!kernel)
         return make_error(kernel.error());
     kernels_.emplace(key.take(), *kernel);
@@ -188,8 +192,8 @@ Result<CudaJitCache::KernelPtr> CudaJitCache::getOrCompile(
 
 CudaJitCacheStats CudaJitCache::stats() const {
     std::lock_guard<std::mutex> lock(mutex_);
-    return CudaJitCacheStats{hits_, misses_, kernels_.size()};
+    return CudaJitCacheStats{
+        hits_, misses_, kernels_.size(), compileMilliseconds_};
 }
 
 } // namespace sandy::device
-

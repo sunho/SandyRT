@@ -62,6 +62,7 @@ struct CudaJitCacheStats {
     size_t hits = 0;
     size_t misses = 0;
     size_t entries = 0;
+    double compileMilliseconds = 0.0;
 };
 
 Result<core::CacheKey> buildCudaJitCacheKey(int cudaDevice, const CudaJitRequest& request);
@@ -78,7 +79,7 @@ private:
     std::unordered_map<core::CacheKey, KernelPtr, core::CacheKeyHash> kernels_;
     size_t hits_ = 0;
     size_t misses_ = 0;
+    double compileMilliseconds_ = 0.0;
 };
 
 } // namespace sandy::device
-

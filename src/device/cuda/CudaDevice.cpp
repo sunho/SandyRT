@@ -2,6 +2,7 @@
 #include "CudaScratchAllocator.h"
 #include "CudaElementwiseJit.h"
 
+#include <cstdio>
 #include <cstdlib>
 #include <limits>
 #include <memory>
@@ -325,6 +326,17 @@ Result<DeviceCompiledGraphId> CudaDevice::compile(const ir::kernel_ir::Graph& gr
 
     auto id = nextGraphId_++;
     graphs_[id] = std::move(compiled);
+    if (environment_flag("SANDY_CUDA_JIT_STATS", false)) {
+        auto stats = jitCache_.stats();
+        std::fprintf(
+            stderr,
+            "cuda_jit.stats graph=%u hits=%zu misses=%zu modules=%zu compile_ms=%.3f\n",
+            id,
+            stats.hits,
+            stats.misses,
+            stats.entries,
+            stats.compileMilliseconds);
+    }
     return id;
 }
 
