@@ -16,5 +16,7 @@ std::string_view embeddedGatherKernelSource();
 std::vector<CudaJitHeader> embeddedGatherHeaders();
 std::string_view embeddedSoftmaxKernelSource();
 std::vector<CudaJitHeader> embeddedSoftmaxHeaders();
+std::string_view embeddedNormKernelSource();
+std::vector<CudaJitHeader> embeddedNormHeaders();
 
 } // namespace sandy::device

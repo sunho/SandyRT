@@ -109,6 +109,10 @@ struct CudaTopKProgram {
 struct CudaNormProgram {
     ir::kernel_ir::NormKind norm = ir::kernel_ir::NormKind::RMSNorm;
     double epsilon = 0.0;
+    bool hasWeight = false;
+    core::DType dtype = core::DType::F32;
+    std::shared_ptr<CudaJitVariants> jitVariants;
+    bool jitFallbackOnError = false;
 };
 
 struct CudaRoPEProgram {

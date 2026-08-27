@@ -9,6 +9,8 @@
 #include "CudaJitGatherKernelSource.generated.h"
 #include "CudaJitLayoutTransformAbiSource.generated.h"
 #include "CudaJitLayoutTransformKernelSource.generated.h"
+#include "CudaJitNormAbiSource.generated.h"
+#include "CudaJitNormKernelSource.generated.h"
 #include "CudaJitReductionAbiSource.generated.h"
 #include "CudaJitReductionKernelSource.generated.h"
 #include "CudaJitSoftmaxAbiSource.generated.h"
@@ -76,6 +78,18 @@ std::vector<CudaJitHeader> embeddedSoftmaxHeaders() {
         {"CudaJitAbi.cuh", cuda_jit_embedded::kAbi},
         {"CudaJitTensorAccess.cuh", cuda_jit_embedded::kTensorAccess},
         {"CudaJitSoftmaxAbi.cuh", cuda_jit_embedded::kSoftmaxAbi},
+    };
+}
+
+std::string_view embeddedNormKernelSource() {
+    return cuda_jit_embedded::kNormKernel;
+}
+
+std::vector<CudaJitHeader> embeddedNormHeaders() {
+    return {
+        {"CudaJitAbi.cuh", cuda_jit_embedded::kAbi},
+        {"CudaJitTensorAccess.cuh", cuda_jit_embedded::kTensorAccess},
+        {"CudaJitNormAbi.cuh", cuda_jit_embedded::kNormAbi},
     };
 }
 

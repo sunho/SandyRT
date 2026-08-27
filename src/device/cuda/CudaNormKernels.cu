@@ -1,6 +1,9 @@
 #include "CudaKernels.h"
 #include "CudaKernelLaunchUtils.cuh"
 #include "CudaKernelUtils.cuh"
+#include "jit/CudaJitLaunchUtils.cuh"
+#include "jit/CudaNormJit.h"
+#include "jit/templates/CudaJitNormAbi.cuh"
 
 #include <limits>
 
@@ -226,6 +229,68 @@ Result<void> launch_cuda_norm(
     int blocks = static_cast<int>(launchProgram.rows);
     int threads = cuda_kernel::kBlockSize;
     size_t sharedBytes = static_cast<size_t>(threads) * sizeof(float);
+
+    if (program.jitVariants) {
+        if (!context.jitCache)
+            return make_error("cuda norm JIT cache is null");
+        std::vector<int> inputAccesses;
+        inputAccesses.push_back(jit_access_kind(launchProgram.x.access));
+        if (launchProgram.hasWeight)
+            inputAccesses.push_back(jit_access_kind(launchProgram.weight.access));
+        if (launchProgram.norm == ir::kernel_ir::NormKind::LayerNorm)
+            inputAccesses.push_back(jit_access_kind(launchProgram.bias.access));
+        int outputAccess = jit_access_kind(launchProgram.output.access);
+        std::vector<int> accesses = inputAccesses;
+        accesses.push_back(outputAccess);
+        auto jit = program.jitVariants->getOrCompile(
+            cudaJitAccessKey(accesses),
+            [&] {
+                return compileCudaNormJit(
+                    context.cudaDevice,
+                    *context.jitCache,
+                    program.norm,
+                    program.hasWeight,
+                    program.dtype,
+                    inputAccesses,
+                    outputAccess);
+            });
+        if (!jit) {
+            if (!program.jitFallbackOnError)
+                return make_error(jit.error());
+        } else {
+            auto input = pack_jit_tensor_arg(launchProgram.x);
+            if (!input)
+                return make_error(input.error());
+            SandyNormParams params{};
+            params.input = input.take();
+            if (launchProgram.hasWeight) {
+                auto weight = pack_jit_tensor_arg(launchProgram.weight);
+                if (!weight)
+                    return make_error(weight.error());
+                params.weight = weight.take();
+            }
+            if (launchProgram.norm == ir::kernel_ir::NormKind::LayerNorm) {
+                auto bias = pack_jit_tensor_arg(launchProgram.bias);
+                if (!bias)
+                    return make_error(bias.error());
+                params.bias = bias.take();
+            }
+            auto output = pack_jit_tensor_arg(launchProgram.output);
+            if (!output)
+                return make_error(output.error());
+            params.output = output.take();
+            params.rows = launchProgram.rows;
+            params.hidden = launchProgram.hidden;
+            params.epsilon = launchProgram.epsilon;
+            void* arguments[] = {&params};
+            return (*jit)->launch(
+                dim3(static_cast<unsigned>(blocks)),
+                dim3(static_cast<unsigned>(threads)),
+                sharedBytes,
+                context.stream,
+                arguments);
+        }
+    }
 
     if (launchProgram.norm == ir::kernel_ir::NormKind::RMSNorm) {
         rms_norm_kernel<<<blocks, threads, sharedBytes, context.stream>>>(launchProgram);

@@ -4482,3 +4482,56 @@ TEST(CudaDeviceTest, RunLayerNormF32) {
             (4.0f - mean1) * inv1 * -1.0f + 1.0f,
         });
 }
+
+TEST(CudaDeviceTest, RunRMSNormJitBF16StridedInput) {
+    if (auto reason = cuda_device_skip_reason(); !reason.empty())
+        GTEST_SKIP() << reason;
+    namespace kir = sandy::ir::kernel_ir;
+
+    kir::Graph graph;
+    auto x = graph.addValue(tensor_type({3, 2}, sandy::core::DType::BF16));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 0, ""}, x);
+    auto output = graph.addValue(tensor_type({3, 2}, sandy::core::DType::BF16));
+    auto* op = graph.addOp<kir::NormKernelOp>(
+        kir::NormKind::RMSNorm,
+        std::vector<kir::ValueId>{x},
+        output,
+        1.0e-6);
+    graph.setOutputs({output});
+
+    sandy::device::CudaDevice device;
+    auto compiled = device.compile(graph);
+    ASSERT_TRUE(compiled) << compiled.error();
+    auto xHost = make_bf16_buffer(
+        "x", sandy::core::Shape({2, 3}),
+        {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f});
+    auto xBuffer = device.load(*xHost);
+    ASSERT_TRUE(xBuffer) << xBuffer.error();
+    auto outputBuffer = device.alloc(
+        sandy::core::TensorDesc({3, 2}, sandy::core::DType::BF16));
+    ASSERT_TRUE(outputBuffer) << outputBuffer.error();
+
+    sandy::device::TensorViewDesc transposed;
+    transposed.desc = sandy::core::TensorDesc({3, 2}, sandy::core::DType::BF16);
+    transposed.strides = {1, 3};
+    std::vector<sandy::device::DeviceRunValue> inputs = {
+        sandy::device::DeviceTensorView{*xBuffer, transposed},
+    };
+    std::vector<sandy::device::DeviceRunValue> outputs = {
+        tensor_view(
+            device, *outputBuffer,
+            sandy::core::TensorDesc({3, 2}, sandy::core::DType::BF16)),
+    };
+    auto run = device.run(*compiled, op->id(), inputs, outputs);
+    ASSERT_TRUE(run) << run.error();
+
+    float inv0 = 1.0f / std::sqrt(8.5f + 1.0e-6f);
+    float inv1 = 1.0f / std::sqrt(14.5f + 1.0e-6f);
+    float inv2 = 1.0f / std::sqrt(22.5f + 1.0e-6f);
+    expect_bf16_output_near(
+        device, *outputBuffer,
+        {inv0, 4.0f * inv0, 2.0f * inv1, 5.0f * inv1,
+         3.0f * inv2, 6.0f * inv2},
+        2.0e-2f);
+}

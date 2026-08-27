@@ -29,7 +29,9 @@ Each item gets focused correctness/cache coverage and a separate commit.
 4. Softmax (complete: F32/BF16 and strided access variants with focused
    JIT/fallback tests; full suite 68/69 with only the pre-existing asynchronous
    gather bounds failure)
-5. Norm
+5. Norm (complete: RMSNorm with/without weight and LayerNorm, including BF16
+   strided access and fallback; full suite 69/70 with only the pre-existing
+   asynchronous gather bounds failure)
 6. RoPE
 7. TopK
 8. MoE gather

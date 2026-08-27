@@ -51,6 +51,10 @@ if(SANDY_ENABLE_CUDA)
     kSoftmaxAbi CudaJitSoftmaxAbiSource.generated.h)
   sandy_embed_cuda_source("${SANDY_JIT_TEMPLATE_DIR}/CudaJitSoftmaxKernel.cu"
     kSoftmaxKernel CudaJitSoftmaxKernelSource.generated.h)
+  sandy_embed_cuda_source("${SANDY_JIT_TEMPLATE_DIR}/CudaJitNormAbi.cuh"
+    kNormAbi CudaJitNormAbiSource.generated.h)
+  sandy_embed_cuda_source("${SANDY_JIT_TEMPLATE_DIR}/CudaJitNormKernel.cu"
+    kNormKernel CudaJitNormKernelSource.generated.h)
 
   target_sources(DeviceLib
     PRIVATE
@@ -60,6 +64,7 @@ if(SANDY_ENABLE_CUDA)
     cuda/jit/CudaJitEmbeddedSources.cpp
     cuda/jit/CudaGatherJit.cpp
     cuda/jit/CudaLayoutTransformJit.cpp
+    cuda/jit/CudaNormJit.cpp
     cuda/jit/CudaReductionJit.cpp
     cuda/jit/CudaSoftmaxJit.cpp
     cuda/CudaScratchAllocator.cpp

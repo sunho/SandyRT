@@ -3,6 +3,7 @@
 #include "CudaElementwiseJit.h"
 #include "CudaGatherJit.h"
 #include "CudaLayoutTransformJit.h"
+#include "CudaNormJit.h"
 #include "CudaReductionJit.h"
 #include "CudaSoftmaxJit.h"
 
@@ -403,7 +404,38 @@ Result<DeviceCompiledGraphId> CudaDevice::compile(const ir::kernel_ir::Graph& gr
             }
             case ir::kernel_ir::OpKind::NormKernel: {
                 const auto& norm = static_cast<const ir::kernel_ir::NormKernelOp&>(op);
-                kernel.program = CudaNormProgram{norm.norm(), norm.epsilon()};
+                CudaNormProgram program{norm.norm(), norm.epsilon()};
+                if (environment_flag("SANDY_CUDA_NORM_JIT", true)) {
+                    program.jitFallbackOnError = environment_flag(
+                        "SANDY_CUDA_NORM_JIT_FALLBACK", false);
+                    program.hasWeight = norm.norm() == ir::kernel_ir::NormKind::LayerNorm ||
+                        op.inputs().size() == 2;
+                    program.dtype = graph.value(op.inputs()[0]).type.dtype;
+                    std::vector<int> inputAccesses;
+                    inputAccesses.reserve(op.inputs().size());
+                    for (auto input : op.inputs())
+                        inputAccesses.push_back(default_jit_access(graph.value(input).type));
+                    int outputAccess =
+                        default_jit_access(graph.value(op.outputs()[0]).type);
+                    std::vector<int> accesses = inputAccesses;
+                    accesses.push_back(outputAccess);
+                    auto variants = std::make_shared<CudaJitVariants>();
+                    auto jit = variants->getOrCompile(
+                        cudaJitAccessKey(accesses),
+                        [&] {
+                            return compileCudaNormJit(
+                                cudaDevice_, jitCache_, program.norm,
+                                program.hasWeight, program.dtype,
+                                inputAccesses, outputAccess);
+                        });
+                    if (!jit) {
+                        if (!program.jitFallbackOnError)
+                            return make_error("CUDA norm JIT compile failed: " + jit.error());
+                    } else {
+                        program.jitVariants = std::move(variants);
+                    }
+                }
+                kernel.program = std::move(program);
                 break;
             }
             case ir::kernel_ir::OpKind::RoPEKernel: {
