@@ -602,6 +602,48 @@ TEST(CudaDeviceTest, ElementwiseJitEmitterProducesStraightLineExpressions) {
     EXPECT_EQ(emitted->evaluatorSource.find("switch"), std::string::npos);
 }
 
+TEST(CudaDeviceTest, ElementwiseJitSourceExcludesRuntimeTensorProperties) {
+    namespace kir = sandy::ir::kernel_ir;
+    sandy::device::CudaElementwiseProgram first{
+        {kir::ElementwiseInput{7, kir::BroadcastMode::None}},
+        8,
+        2,
+        {
+            kir::ScalarNode{0, kir::ScalarOp::Load, sandy::core::DType::F32, 0, 0.0, {}},
+            kir::ScalarNode{1, kir::ScalarOp::Constant, sandy::core::DType::F32, 0, 2.0, {}},
+            kir::ScalarNode{2, kir::ScalarOp::Mul, sandy::core::DType::F32, 0, 0.0, {0, 1}},
+        },
+    };
+    auto runtimeVariant = first;
+    runtimeVariant.elementwiseInputs = {
+        kir::ElementwiseInput{99, kir::BroadcastMode::RightAligned},
+    };
+    runtimeVariant.output = 100;
+    auto firstSource = sandy::device::emitCudaElementwiseJitSource(first);
+    auto runtimeVariantSource =
+        sandy::device::emitCudaElementwiseJitSource(runtimeVariant);
+    ASSERT_TRUE(firstSource) << firstSource.error();
+    ASSERT_TRUE(runtimeVariantSource) << runtimeVariantSource.error();
+    EXPECT_EQ(
+        firstSource->evaluatorSource,
+        runtimeVariantSource->evaluatorSource);
+    EXPECT_EQ(firstSource->entryName, runtimeVariantSource->entryName);
+
+    auto changedScalarOp = first;
+    changedScalarOp.scalars[2].op = kir::ScalarOp::Add;
+    auto changedScalarOpSource =
+        sandy::device::emitCudaElementwiseJitSource(changedScalarOp);
+    ASSERT_TRUE(changedScalarOpSource) << changedScalarOpSource.error();
+    EXPECT_NE(firstSource->evaluatorSource, changedScalarOpSource->evaluatorSource);
+
+    auto changedConstant = first;
+    changedConstant.scalars[1].constant = 3.0;
+    auto changedConstantSource =
+        sandy::device::emitCudaElementwiseJitSource(changedConstant);
+    ASSERT_TRUE(changedConstantSource) << changedConstantSource.error();
+    EXPECT_NE(firstSource->evaluatorSource, changedConstantSource->evaluatorSource);
+}
+
 TEST(CudaDeviceTest, JitKeyInvalidatesOnAbiAndTemplateChanges) {
     if (auto reason = cuda_device_skip_reason(); !reason.empty())
         GTEST_SKIP() << reason;
@@ -614,6 +656,13 @@ TEST(CudaDeviceTest, JitKeyInvalidatesOnAbiAndTemplateChanges) {
     request.options = {"-DSANDY_JIT_ENTRY_NAME=sandy_jit_key_test"};
     auto original = sandy::device::buildCudaJitCacheKey(0, request);
     ASSERT_TRUE(original) << original.error();
+
+    auto changedSourceRequest = request;
+    changedSourceRequest.source += "\n// changed main source";
+    auto changedSource =
+        sandy::device::buildCudaJitCacheKey(0, changedSourceRequest);
+    ASSERT_TRUE(changedSource) << changedSource.error();
+    EXPECT_NE(*original, *changedSource);
 
     request.abiVersion++;
     auto changedAbi = sandy::device::buildCudaJitCacheKey(0, request);

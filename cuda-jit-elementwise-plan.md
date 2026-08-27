@@ -21,6 +21,10 @@ separate commit. Completed steps are marked in their commit.
   never invocation-owned device buffer handles.
 - Scratch and JIT caches use the same canonical key serialization and hashing
   implementation, with distinct domain tags.
+- The CUDA JIT cache hashes the complete effective compilation unit: main
+  source, generated and embedded headers, entry point, options, ABI, target
+  architecture, and NVRTC version. A kernel family controls reuse by deciding
+  which runtime properties appear in its generated source.
 - Hand-written JIT CUDA lives in real `.cu`/`.cuh` files for syntax highlighting
   and is embedded into the binary at build time.
 - The initial JIT specializes only scalar evaluation. Runtime load/store policies
@@ -77,6 +81,9 @@ Status: complete
 - Launch it on the existing CUDA stream, with interpreter fallback on configured
   JIT failure.
 - Do not include runtime pointers in cache keys.
+- Elementwise emits only the scalar DAG. Shapes, tensor value IDs, broadcast,
+  dtype/access policy, and pointers stay in runtime parameters, so they do not
+  split the full-source JIT cache.
 
 ## Step 5: Correctness, cache, and failure coverage
 
