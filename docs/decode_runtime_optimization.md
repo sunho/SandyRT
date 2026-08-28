@@ -63,6 +63,19 @@ allocates standalone buffers for them and tracks their cross-node lifetime.
 Exported aliases recursively export their backing values so no exported view can
 refer to private executable scratch.
 
+## Engine binding overhead
+
+Input and tensor-tuple declarations are bound before device execution begins.
+They therefore do not split consecutive same-device kernels into separate
+executables; only an actual device transition does. This is important for graphs
+that interleave weight declarations with kernel operations: treating every
+declaration as a boundary produces hundreds of tiny executables and repeats
+scratch setup, import/export binding, and CUDA Graph dispatch for each one.
+
+Each execution node also copies concrete tensor descriptors only for its own
+imports, exports, and operation inputs/outputs. It does not scan and copy every
+value descriptor in the full KernelIR graph for every node.
+
 ## CUDA Graph fixed-binding implementation
 
 Binding stability is generic device information; CUDA recordability is backend
@@ -117,9 +130,9 @@ scratch allocation.
 
 1. Add an opaque multi-op `DeviceExecutable`, an executable description with
    ordered operation IDs, and runtime import/export bindings.
-2. Partition KernelIR into consecutive same-device executable nodes. Inputs,
-   tensor-tuple construction, and cross-device transfers remain engine nodes.
-   Paged append is included in the device executable.
+2. Bind inputs and tensor-tuple declarations up front, then partition KernelIR
+   into consecutive same-device executable nodes. Only cross-device transfers
+   break executable regions. Paged append is included in the device executable.
 3. Mark values consumed outside their producer executable, graph outputs, and
    values consumed by engine nodes as exports. Mark values produced outside an
    executable as imports. Paged tensors mutated by paged append are mutable

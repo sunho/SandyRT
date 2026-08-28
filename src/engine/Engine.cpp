@@ -982,11 +982,25 @@ Result<void> run_execution_node(
     }
 
     device::DeviceExecutableRunState runState;
-    for (const auto& value : graph.values()) {
-        if (value.type.kind == ir::kernel_ir::ValueKind::TensorTuple ||
-            !state.tensorDescs.has(value.id))
-            continue;
-        runState.tensorDescs.emplace(value.id, state.tensorDescs.get(value.id));
+    {
+        auto bindDescriptor = [&](ValueId value) {
+            if (runState.tensorDescs.contains(value) ||
+                graph.value(value).type.kind == ir::kernel_ir::ValueKind::TensorTuple ||
+                !state.tensorDescs.has(value))
+                return;
+            runState.tensorDescs.emplace(value, state.tensorDescs.get(value));
+        };
+        for (auto value : node.bindings.imports)
+            bindDescriptor(value);
+        for (auto value : node.bindings.exports)
+            bindDescriptor(value);
+        for (auto opId : node.bindings.ops) {
+            const auto& op = graph.op(opId);
+            for (auto value : op.inputs())
+                bindDescriptor(value);
+            for (auto value : op.outputs())
+                bindDescriptor(value);
+        }
     }
     auto bind = [&](ValueId value) -> Result<void> {
         if (runState.values.contains(value))
@@ -1519,9 +1533,11 @@ Result<std::vector<RunOutput>> Engine::runValuesImpl(
     auto state = initialize_runtime_state((*cachedPlan)->tensorDescs, scratchPlan.take());
     ScratchBufferGuard scratchGuard(devices_, state);
 
-    for (size_t opIndex = 0; opIndex < graph.ops().size(); opIndex++) {
+    // Inputs and tensor-tuple declarations only bind runtime state. Bind them
+    // before executing device nodes so inputs interleaved in KernelIR do not
+    // artificially split otherwise contiguous same-device executables.
+    for (size_t opIndex = 0; opIndex < graph.ops().size(); ++opIndex) {
         const auto& op = *graph.ops()[opIndex];
-
         if (op.kind() == OpKind::Input) {
             auto opStart = Clock::now();
             Result<void> bound;
@@ -1559,7 +1575,6 @@ Result<std::vector<RunOutput>> Engine::runValuesImpl(
                 return make_error(bound.error());
             continue;
         }
-
         if (op.kind() == OpKind::TensorTupleCreate) {
             auto opStart = Clock::now();
             state.tensorTuples[op.outputs()[0]] =
@@ -1573,8 +1588,14 @@ Result<std::vector<RunOutput>> Engine::runValuesImpl(
                 opIndex,
                 op.id(),
                 op.kind());
-            continue;
         }
+    }
+
+    for (size_t opIndex = 0; opIndex < graph.ops().size(); opIndex++) {
+        const auto& op = *graph.ops()[opIndex];
+
+        if (op.kind() == OpKind::Input || op.kind() == OpKind::TensorTupleCreate)
+            continue;
 
         if (op.kind() == OpKind::PagedAppend && compiled.executionNodes.empty()) {
             auto opStart = Clock::now();

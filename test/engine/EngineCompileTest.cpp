@@ -263,6 +263,52 @@ TEST(ExecutionPlanTest, PartitionsDeviceTransferAndExportsBoundaryValues) {
     EXPECT_EQ(plan->nodeForOp[transfer->id()], -1);
 }
 
+TEST(ExecutionPlanTest, InterleavedInputsDoNotSplitSameDeviceExecutable) {
+    namespace kir = sandy::ir::kernel_ir;
+    kir::Graph graph;
+    auto type = kir::ValueType{
+        kir::ValueKind::Tensor,
+        sandy::core::DType::F32,
+        sandy::core::Shape({1}),
+    };
+    auto firstInput = graph.addValue(type, "first_input", 0);
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 0, ""}, firstInput);
+    auto firstOutput = graph.addValue(type, "first_output", 0);
+    auto* first = graph.addOp<kir::ElementwiseKernelOp>(
+        std::vector<kir::ElementwiseInput>{{firstInput, kir::BroadcastMode::None}},
+        firstOutput,
+        1,
+        std::vector<kir::ScalarNode>{
+            {0, kir::ScalarOp::Load, sandy::core::DType::F32, 0, 0.0, {}},
+            {1, kir::ScalarOp::Tanh, sandy::core::DType::F32, 0, 0.0, {0}},
+        },
+        0);
+    auto secondInput = graph.addValue(type, "second_input", 0);
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 1, ""}, secondInput);
+    auto secondOutput = graph.addValue(type, "second_output", 0);
+    auto* second = graph.addOp<kir::ElementwiseKernelOp>(
+        std::vector<kir::ElementwiseInput>{{secondInput, kir::BroadcastMode::None}},
+        secondOutput,
+        1,
+        std::vector<kir::ScalarNode>{
+            {0, kir::ScalarOp::Load, sandy::core::DType::F32, 0, 0.0, {}},
+            {1, kir::ScalarOp::Tanh, sandy::core::DType::F32, 0, 0.0, {0}},
+        },
+        0);
+    graph.setOutputs({firstOutput, secondOutput});
+    ASSERT_TRUE(graph.verify());
+
+    auto plan = sandy::engine::partitionKernelGraph(graph);
+    ASSERT_TRUE(plan) << plan.error();
+    ASSERT_EQ(plan->nodes.size(), 1u);
+    EXPECT_EQ(plan->nodes[0].executable.ops,
+              std::vector<kir::OpId>({first->id(), second->id()}));
+    EXPECT_EQ(plan->nodes[0].executable.imports,
+              std::vector<kir::ValueId>({firstInput, secondInput}));
+}
+
 TEST_F(EngineCompileTest, CompileLowersAndCompilesKernelGraph) {
     sandy::ir::mid_ir::Graph graph;
     sandy::ir::mid_ir::Builder builder(graph);

@@ -40,7 +40,8 @@ Result<KernelExecutionPlan> partitionKernelGraph(
     for (const auto& opPtr : graph.ops()) {
         const auto& op = *opPtr;
         if (!belongs_to_device_executable(op)) {
-            current = -1;
+            if (op.kind() == OpKind::DeviceTransfer)
+                current = -1;
             continue;
         }
         if (current < 0 || plan.nodes[static_cast<size_t>(current)].device != op.device()) {
