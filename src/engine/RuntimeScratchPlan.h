@@ -28,6 +28,11 @@ struct CachedInvocationPlan {
     RuntimeScratchLayout scratchLayout;
 };
 
+struct CompileTimeScratchPlan {
+    RuntimeScratchLayout layout;
+    std::vector<bool> values;
+};
+
 struct RuntimePlanCacheStats {
     size_t hits = 0;
     size_t misses = 0;
@@ -51,6 +56,10 @@ private:
 
 // Simulates the graph in execution order. Value use counts are consumed here,
 // before execution, and translated into allocator alloc/free events.
+Result<CompileTimeScratchPlan> planCompileTimeScratchLayout(
+    const CompiledKernelGraph& compiled,
+    std::vector<std::unique_ptr<device::Device>>& devices);
+
 Result<RuntimeScratchLayout> planRuntimeScratchLayout(
     const CompiledKernelGraph& compiled,
     const RuntimeTensorDescs& tensorDescs,

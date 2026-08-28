@@ -46,6 +46,11 @@ struct Use {
     uint32_t operand = 0;
 };
 
+enum class ValueLayout {
+    Contiguous,
+    Strided,
+};
+
 struct Def {
     OpId op = kInvalidOpId;
     uint32_t result = 0;
@@ -54,6 +59,7 @@ struct Def {
 struct Value {
     ValueId id = 0;
     ValueType type;
+    ValueLayout layout = ValueLayout::Contiguous;
     DeviceId device = 0;
 
     Def def;
@@ -273,6 +279,11 @@ enum class LayoutTransformKind {
     Contiguous,
 };
 
+enum class LayoutTransformMode {
+    Alias,
+    Materialize,
+};
+
 class LayoutTransformOp final : public Op {
 public:
     LayoutTransformOp(
@@ -281,6 +292,7 @@ public:
         ValueId input,
         ValueId output,
         std::vector<int64_t> dims,
+        LayoutTransformMode mode = LayoutTransformMode::Materialize,
         DeviceId device = 0);
     LayoutTransformOp(
         OpId id,
@@ -289,11 +301,14 @@ public:
         ValueId output,
         std::vector<int64_t> dims,
         std::vector<int64_t> indices,
+        LayoutTransformMode mode = LayoutTransformMode::Materialize,
         DeviceId device = 0);
 
     LayoutTransformKind transform() const { return transform_; }
     const std::vector<int64_t>& dims() const { return dims_; }
     const std::vector<int64_t>& indices() const { return indices_; }
+    LayoutTransformMode mode() const { return mode_; }
+    bool aliasesInput() const { return mode_ == LayoutTransformMode::Alias; }
 
     std::span<const ValueId> inputs() const override { return inputs_; }
     std::span<const ValueId> outputs() const override { return outputs_; }
@@ -307,6 +322,7 @@ private:
     std::array<ValueId, 1> outputs_;
     std::vector<int64_t> dims_;
     std::vector<int64_t> indices_;
+    LayoutTransformMode mode_ = LayoutTransformMode::Materialize;
 };
 
 enum class BroadcastMode {

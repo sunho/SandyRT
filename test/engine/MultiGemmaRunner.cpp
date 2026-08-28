@@ -490,7 +490,13 @@ int main(int argc, char* argv[]) {
 
     auto stageStart = Clock::now();
     sandy::Compiler compiler;
-    auto highGraph = compiler.load_sandygo(programPath);
+    sandy::SandyGoCompileOptions sandyGoOptions;
+    if (architecture == "gemma4a4b26b" ||
+        architecture == "gemma4a4b" ||
+        architecture == "gemma4moe") {
+        sandyGoOptions.configConstants["TOP_K"] = int64_t{1};
+    }
+    auto highGraph = compiler.load_sandygo(programPath, sandyGoOptions);
     print_runner_stage(profile, "load_program", stageStart, Clock::now());
 
     stageStart = Clock::now();

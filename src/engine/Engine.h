@@ -12,8 +12,10 @@
 #include <cstddef>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <span>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace sandy::engine {
@@ -109,6 +111,15 @@ public:
         const EngineRunOptions* options = nullptr);
 
 private:
+    class StaticScratchLease;
+
+    Result<std::unique_ptr<StaticScratchLease>> acquireStaticScratch(
+        const CompiledKernelGraph& compiled);
+    void releaseStaticScratch(
+        CompiledProgramId program,
+        RuntimeScratchPlan plan);
+    void discardStaticScratch(RuntimeScratchPlan plan);
+
     Result<std::vector<RunOutput>> runValuesImpl(
         const CompiledKernelGraph& compiled,
         std::span<const RunInput> inputs,
@@ -118,6 +129,9 @@ private:
 
     std::vector<std::unique_ptr<device::Device>> devices_;
     std::unique_ptr<device::DeviceWiseCopier> copier_;
+    std::mutex staticScratchMutex_;
+    std::unordered_map<CompiledProgramId, RuntimeScratchLayout> staticScratchLayouts_;
+    std::unordered_map<CompiledProgramId, std::vector<RuntimeScratchPlan>> staticScratchAvailable_;
     RuntimePlanCache runtimePlanCache_;
 };
 

@@ -301,6 +301,41 @@ TEST_F(MidIRToKernelIRTest, LowersInputAndWeight) {
     EXPECT_EQ(weightOp.source().name, "layer.weight");
 }
 
+TEST_F(MidIRToKernelIRTest, DecidesLayoutAliasingFromKernelIRContiguity) {
+    mid_ir::Graph midGraph;
+    mid_ir::Builder builder(midGraph);
+
+    auto* input = builder.createInput(
+        0, sandy::core::Shape({2, 3}), sandy::core::DType::F32);
+    auto* aliasReshape = builder.createReshape(input, {6});
+    auto* transposed = builder.createTranspose(input);
+    auto* materializedReshape = builder.createReshape(transposed, {6});
+    mid_ir::Value* outputs[] = {aliasReshape, materializedReshape};
+    builder.setOutputs(outputs);
+
+    auto lowered = kernel_ir::lowerMidIRToKernelIR(midGraph);
+    ASSERT_TRUE(lowered) << lowered.error();
+    auto graph = lowered.take();
+    ASSERT_EQ(graph->ops().size(), 4u);
+
+    const auto& first = static_cast<const kernel_ir::LayoutTransformOp&>(
+        *graph->ops()[1]);
+    const auto& transpose = static_cast<const kernel_ir::LayoutTransformOp&>(
+        *graph->ops()[2]);
+    const auto& second = static_cast<const kernel_ir::LayoutTransformOp&>(
+        *graph->ops()[3]);
+
+    EXPECT_EQ(first.mode(), kernel_ir::LayoutTransformMode::Alias);
+    EXPECT_EQ(graph->value(first.outputs()[0]).layout,
+              kernel_ir::ValueLayout::Contiguous);
+    EXPECT_EQ(transpose.mode(), kernel_ir::LayoutTransformMode::Alias);
+    EXPECT_EQ(graph->value(transpose.outputs()[0]).layout,
+              kernel_ir::ValueLayout::Strided);
+    EXPECT_EQ(second.mode(), kernel_ir::LayoutTransformMode::Materialize);
+    EXPECT_EQ(graph->value(second.outputs()[0]).layout,
+              kernel_ir::ValueLayout::Contiguous);
+}
+
 TEST_F(MidIRToKernelIRTest, LowersPagedTensorInput) {
     mid_ir::Graph midGraph;
     mid_ir::Builder builder(midGraph);

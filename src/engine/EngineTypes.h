@@ -41,6 +41,14 @@ struct CompiledKernelGraph {
     ir::kernel_ir::DeviceId defaultDevice = 0;
     std::unordered_map<ir::kernel_ir::DeviceId, DeviceCompiledGraphId> deviceGraphs;
 
+    // Dense values with compile-time shapes are assigned to this layout once
+    // during compilation. Runtime scratch planning handles only the remaining
+    // dynamic values.
+    std::unordered_map<
+        ir::kernel_ir::DeviceId,
+        device::DeviceScratchLayout> staticScratchLayouts;
+    std::vector<bool> staticScratchValues;
+
     // Legacy single-device fields kept for tests and manually constructed graphs.
     uint32_t device = 0;
     DeviceCompiledGraphId deviceGraph = 0;

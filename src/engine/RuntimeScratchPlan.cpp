@@ -45,6 +45,8 @@ std::vector<bool> excludedValues(const Graph& graph) {
     for (const auto& op : graph.ops()) {
         if (op->kind() != OpKind::LayoutTransform)
             continue;
+        if (!static_cast<const ir::kernel_ir::LayoutTransformOp&>(*op).aliasesInput())
+            continue;
         for (auto input : op->inputs())
             excluded[input] = true;
         for (auto output : op->outputs())
@@ -71,9 +73,11 @@ bool mayRequireDenseAllocation(const Op& op) {
 
 } // namespace
 
-Result<RuntimeScratchLayout> planRuntimeScratchLayout(
+Result<RuntimeScratchLayout> planScratchLayout(
         const CompiledKernelGraph& compiled,
-        const RuntimeTensorDescs& tensorDescs,
+        const RuntimeTensorDescs* tensorDescs,
+        const std::vector<bool>* includedValues,
+        const std::vector<bool>* excludedScratchValues,
         std::vector<std::unique_ptr<device::Device>>& devices) {
     const auto& graph = *compiled.graph;
     auto excluded = excludedValues(graph);
@@ -106,9 +110,20 @@ Result<RuntimeScratchLayout> planRuntimeScratchLayout(
                 for (auto output : op.outputs()) {
                     const auto& value = graph.value(output);
                     if (excluded[output] ||
-                        value.type.kind != ir::kernel_ir::ValueKind::Tensor)
+                        value.type.kind != ir::kernel_ir::ValueKind::Tensor ||
+                        (includedValues && !(*includedValues)[output]) ||
+                        (excludedScratchValues && output < excludedScratchValues->size() &&
+                         (*excludedScratchValues)[output]))
                         continue;
-                    auto allocated = (*allocator)->alloc(output, tensorDescs.get(output));
+                    core::TensorDesc desc;
+                    if (tensorDescs) {
+                        desc = tensorDescs->get(output);
+                    } else {
+                        if (value.type.shape.has_dynamic())
+                            continue;
+                        desc = core::TensorDesc(value.type.shape, value.type.dtype);
+                    }
+                    auto allocated = (*allocator)->alloc(output, std::move(desc));
                     if (!allocated)
                         return make_error(allocated.error());
                     plannedDevice[output] = opDevice;
@@ -157,6 +172,53 @@ Result<RuntimeScratchLayout> planRuntimeScratchLayout(
             plan.devices[id] = std::move(*allocation);
     }
     return plan;
+}
+
+Result<CompileTimeScratchPlan> planCompileTimeScratchLayout(
+        const CompiledKernelGraph& compiled,
+        std::vector<std::unique_ptr<device::Device>>& devices) {
+    std::vector<bool> candidates(compiled.graph->values().size(), false);
+    auto excluded = excludedValues(*compiled.graph);
+    for (const auto& opPtr : compiled.graph->ops()) {
+        const auto& op = *opPtr;
+        if (!mayRequireDenseAllocation(op))
+            continue;
+        for (auto output : op.outputs()) {
+            const auto& value = compiled.graph->value(output);
+            candidates[output] = !excluded[output] &&
+                value.type.kind == ir::kernel_ir::ValueKind::Tensor &&
+                !value.type.shape.has_dynamic();
+        }
+    }
+
+    auto layout = planScratchLayout(compiled, nullptr, &candidates, nullptr, devices);
+    if (!layout)
+        return make_error(layout.error());
+
+    // Only suppress a value from the runtime planner when a device allocator
+    // actually placed it in the fixed pool. Devices may opt out of scratch
+    // planning by returning no allocator.
+    std::vector<bool> fixed(compiled.graph->values().size(), false);
+    for (const auto& [_, deviceLayout] : layout->devices) {
+        for (const auto& [value, __] : deviceLayout.placements)
+            fixed[value] = true;
+    }
+    return CompileTimeScratchPlan{layout.take(), std::move(fixed)};
+}
+
+Result<RuntimeScratchLayout> planRuntimeScratchLayout(
+        const CompiledKernelGraph& compiled,
+        const RuntimeTensorDescs& tensorDescs,
+        std::vector<std::unique_ptr<device::Device>>& devices) {
+    auto layout = planScratchLayout(
+        compiled,
+        &tensorDescs,
+        nullptr,
+        &compiled.staticScratchValues,
+        devices);
+    if (!layout)
+        return make_error(layout.error());
+    return layout.take();
 }
 
 Result<RuntimeScratchPlan> instantiateRuntimeScratch(

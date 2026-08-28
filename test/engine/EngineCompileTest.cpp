@@ -36,6 +36,33 @@ private:
     std::span<const uint8_t> data() const override { return {}; }
 };
 
+class FakeScratchAllocator final : public sandy::device::DeviceScratchAllocator {
+public:
+    Result<void> alloc(
+            sandy::ir::kernel_ir::ValueId value,
+            sandy::core::TensorDesc desc) override {
+        auto numel = desc.shape.numel();
+        if (numel < 0)
+            return make_error("fake scratch requires static shapes");
+        auto bytes = static_cast<size_t>(numel) * sandy::core::dtype_size(desc.dtype);
+        placements[value] = {std::move(desc), cursor};
+        cursor += bytes;
+        return {};
+    }
+
+    Result<void> free(sandy::ir::kernel_ir::ValueId) override { return {}; }
+
+    Result<sandy::device::DeviceScratchLayout> finalizeLayout() override {
+        return sandy::device::DeviceScratchLayout{cursor, std::move(placements)};
+    }
+
+private:
+    size_t cursor = 0;
+    std::unordered_map<
+        sandy::ir::kernel_ir::ValueId,
+        sandy::device::DeviceScratchPlacement> placements;
+};
+
 class FakeDevice final : public sandy::device::Device {
 public:
     Result<sandy::device::DeviceCompiledGraphId> compile(
@@ -60,6 +87,12 @@ public:
         deallocs.push_back(buffer);
         bufferDescs.erase(buffer);
         return {};
+    }
+
+    std::unique_ptr<sandy::device::DeviceScratchAllocator> createScratchAllocator() override {
+        if (!supportsScratch)
+            return nullptr;
+        return std::make_unique<FakeScratchAllocator>();
     }
 
     Result<sandy::device::DeviceBufferId> load(sandy::core::TensorBuffer& src) override {
@@ -110,6 +143,7 @@ public:
     };
 
     bool failCompile = false;
+    bool supportsScratch = false;
     sandy::device::DeviceCompiledGraphId nextGraphId = 100;
     sandy::device::DeviceBufferId nextBufferId = 200;
     std::vector<sandy::ir::kernel_ir::OpKind> compiledOpKinds;
@@ -178,6 +212,87 @@ TEST_F(EngineCompileTest, CompileLowersAndCompilesKernelGraph) {
     EXPECT_EQ(fakePtr->compiledOutputs, std::vector<sandy::ir::kernel_ir::ValueId>({3}));
     ASSERT_NE(compiled->graph, nullptr);
     EXPECT_EQ(compiled->graph->outputs(), std::vector<sandy::ir::kernel_ir::ValueId>({3}));
+}
+
+TEST_F(EngineCompileTest, CompilePlansAndReusesStaticScratchPool) {
+    sandy::ir::mid_ir::Graph graph;
+    sandy::ir::mid_ir::Builder builder(graph);
+    auto* x = builder.createInput(
+        0, sandy::core::Shape({2}), sandy::core::DType::F32);
+    auto* hidden = builder.createTanh(x);
+    auto* out = builder.createReLU(hidden);
+    sandy::ir::mid_ir::Value* outputs[] = {out};
+    builder.setOutputs(outputs);
+
+    FakeDevice* fake = nullptr;
+    auto engine = make_engine(&fake);
+    fake->supportsScratch = true;
+    auto compiledResult = engine.compile(graph);
+    ASSERT_TRUE(compiledResult) << compiledResult.error();
+    auto compiled = compiledResult.take();
+
+    ASSERT_EQ(compiled->staticScratchValues.size(), 3u);
+    EXPECT_FALSE(compiled->staticScratchValues[0]);
+    EXPECT_TRUE(compiled->staticScratchValues[1]);
+    EXPECT_FALSE(compiled->staticScratchValues[2]);
+    ASSERT_TRUE(compiled->staticScratchLayouts.contains(0));
+    EXPECT_TRUE(compiled->staticScratchLayouts.at(0).placements.contains(1));
+
+    std::vector<sandy::engine::TensorBufferPtr> inputs = {
+        std::make_shared<FakeTensorBuffer>(sandy::core::TensorDesc(
+            sandy::core::Shape({2}), sandy::core::DType::F32)),
+    };
+    sandy::engine::TensorMap weights;
+    for (int invocation = 0; invocation < 2; ++invocation) {
+        auto outputsResult = engine.run(*compiled, inputs, weights);
+        ASSERT_TRUE(outputsResult) << outputsResult.error();
+    }
+
+    ASSERT_EQ(fake->runs.size(), 4u);
+    EXPECT_EQ(fake->runs[0].outputs, std::vector<sandy::device::DeviceBufferId>({200}));
+    EXPECT_EQ(fake->runs[2].outputs, std::vector<sandy::device::DeviceBufferId>({200}));
+    EXPECT_EQ(std::count_if(
+        fake->allocDescs.begin(),
+        fake->allocDescs.end(),
+        [](const sandy::core::TensorDesc& desc) {
+            return desc.dtype == sandy::core::DType::U8;
+        }), 1);
+    EXPECT_EQ(std::count(fake->deallocs.begin(), fake->deallocs.end(), 200u), 0);
+}
+
+TEST_F(EngineCompileTest, DynamicShapeFallsBackToRuntimeScratchPool) {
+    sandy::ir::mid_ir::Graph graph;
+    sandy::ir::mid_ir::Builder builder(graph);
+    auto* x = builder.createInput(
+        0, sandy::core::Shape({-1}), sandy::core::DType::F32);
+    auto* hidden = builder.createTanh(x);
+    auto* out = builder.createReLU(hidden);
+    sandy::ir::mid_ir::Value* outputs[] = {out};
+    builder.setOutputs(outputs);
+
+    FakeDevice* fake = nullptr;
+    auto engine = make_engine(&fake);
+    fake->supportsScratch = true;
+    auto compiledResult = engine.compile(graph);
+    ASSERT_TRUE(compiledResult) << compiledResult.error();
+    auto compiled = compiledResult.take();
+    ASSERT_EQ(compiled->staticScratchValues.size(), 3u);
+    EXPECT_FALSE(compiled->staticScratchValues[1]);
+    EXPECT_TRUE(compiled->staticScratchLayouts.empty());
+    EXPECT_TRUE(fake->allocDescs.empty());
+
+    std::vector<sandy::engine::TensorBufferPtr> inputs = {
+        std::make_shared<FakeTensorBuffer>(sandy::core::TensorDesc(
+            sandy::core::Shape({2}), sandy::core::DType::F32)),
+    };
+    auto outputsResult = engine.run(*compiled, inputs, sandy::engine::TensorMap{});
+    ASSERT_TRUE(outputsResult) << outputsResult.error();
+    EXPECT_EQ(std::count_if(
+        fake->allocDescs.begin(),
+        fake->allocDescs.end(),
+        [](const sandy::core::TensorDesc& desc) {
+            return desc.dtype == sandy::core::DType::U8;
+        }), 1);
 }
 
 TEST_F(EngineCompileTest, CompileFailsWithoutDevices) {

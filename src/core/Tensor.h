@@ -15,11 +15,9 @@ enum class DType { F32, F16, BF16, I32, I64, U8 };
 size_t dtype_size(DType dtype);
 const char* dtype_name(DType dtype);
 
-#if defined(__clang__) || defined(__GNUC__)
-using BFloat16 = __bf16;
-#else
-#error "BFloat16 requires compiler __bf16 support"
-#endif
+struct BFloat16 {
+    uint16_t storage;
+};
 
 inline BFloat16 bfloat16_from_bits(uint16_t bits) {
     BFloat16 out;

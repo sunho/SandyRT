@@ -246,16 +246,28 @@ Result<void> dealloc_value(
 
 RuntimeState initialize_runtime_state(
         RuntimeTensorDescs tensorDescs,
-        RuntimeScratchPlan scratch) {
+        const RuntimeScratchPlan& staticScratch,
+        RuntimeScratchPlan dynamicScratch) {
     RuntimeState state;
     state.tensorDescs = std::move(tensorDescs);
-    state.scratchBuffers = std::move(scratch.buffers);
-    for (auto& [value, tensor] : scratch.views) {
+    state.scratchBuffers = std::move(dynamicScratch.buffers);
+    auto bindScratch = [&](const RuntimeScratchPlan& scratch) {
+        for (const auto& [value, tensor] : scratch.views) {
+            state.addBuffer(
+                value,
+                tensor.buffer,
+                tensor.view,
+                scratch.devices.at(value),
+                false);
+        }
+    };
+    bindScratch(staticScratch);
+    for (auto& [value, tensor] : dynamicScratch.views) {
         state.addBuffer(
             value,
             tensor.buffer,
             std::move(tensor.view),
-            scratch.devices.at(value),
+            dynamicScratch.devices.at(value),
             false);
     }
     return state;
@@ -615,6 +627,9 @@ Result<bool> try_alias_layout_op(
         DeviceId opDevice,
         const ir::kernel_ir::LayoutTransformOp& layout,
         RuntimeState& state) {
+    if (!layout.aliasesInput())
+        return false;
+
     auto input = layout.inputs()[0];
     auto output = layout.outputs()[0];
     auto inputBuffer = lookup_runtime_buffer(state.buffers, input);
@@ -683,7 +698,7 @@ Result<bool> try_alias_layout_op(
         if (!isDefault)
             return make_error(isDefault.error());
         if (!*isDefault)
-            return false;
+            return make_error("runtime buffer violates contiguous KernelIR value requirement");
 
         auto view = device.defaultView(state.tensorDescs.get(output));
         if (!view)
@@ -740,7 +755,7 @@ Result<bool> try_alias_layout_op(
         if (!isDefault)
             return make_error(isDefault.error());
         if (!*isDefault)
-            return false;
+            return make_error("runtime buffer violates contiguous KernelIR value requirement");
 
         auto view = device.defaultView(state.tensorDescs.get(output));
         if (!view)
@@ -1077,6 +1092,33 @@ private:
 
 } // namespace
 
+class Engine::StaticScratchLease {
+public:
+    StaticScratchLease(
+            Engine& engine,
+            CompiledProgramId program,
+            RuntimeScratchPlan plan,
+            bool recycle = true)
+        : engine_(&engine), program_(program), plan_(std::move(plan)), recycle_(recycle) {}
+
+    ~StaticScratchLease() {
+        if (!engine_)
+            return;
+        if (recycle_)
+            engine_->releaseStaticScratch(program_, std::move(plan_));
+        else
+            engine_->discardStaticScratch(std::move(plan_));
+    }
+
+    const RuntimeScratchPlan& plan() const { return plan_; }
+
+private:
+    Engine* engine_ = nullptr;
+    CompiledProgramId program_ = 0;
+    RuntimeScratchPlan plan_;
+    bool recycle_ = true;
+};
+
 Engine::Engine(
         std::vector<std::unique_ptr<Device>> devices,
         std::unique_ptr<DeviceWiseCopier> copier)
@@ -1084,6 +1126,53 @@ Engine::Engine(
       copier_(std::move(copier)) {
     if (!copier_)
         copier_ = std::make_unique<HostBounceDeviceWiseCopier>();
+}
+
+Result<std::unique_ptr<Engine::StaticScratchLease>> Engine::acquireStaticScratch(
+        const CompiledKernelGraph& compiled) {
+    RuntimeScratchPlan plan;
+    RuntimeScratchLayout layout;
+    bool recycle = false;
+    {
+        std::lock_guard<std::mutex> lock(staticScratchMutex_);
+        auto available = staticScratchAvailable_.find(compiled.programId);
+        if (available != staticScratchAvailable_.end() && !available->second.empty()) {
+            plan = std::move(available->second.back());
+            available->second.pop_back();
+            return std::make_unique<StaticScratchLease>(
+                *this, compiled.programId, std::move(plan));
+        }
+        auto found = staticScratchLayouts_.find(compiled.programId);
+        if (found != staticScratchLayouts_.end()) {
+            layout = found->second;
+            recycle = true;
+        } else {
+            // Preserve support for manually assembled CompiledKernelGraph
+            // instances that did not pass through Engine::compile.
+            layout.devices = compiled.staticScratchLayouts;
+        }
+    }
+
+    auto instantiated = instantiateRuntimeScratch(layout, devices_);
+    if (!instantiated)
+        return make_error(instantiated.error());
+    return std::make_unique<StaticScratchLease>(
+        *this, compiled.programId, instantiated.take(), recycle);
+}
+
+void Engine::releaseStaticScratch(
+        CompiledProgramId program,
+        RuntimeScratchPlan plan) {
+    std::lock_guard<std::mutex> lock(staticScratchMutex_);
+    staticScratchAvailable_[program].push_back(std::move(plan));
+}
+
+void Engine::discardStaticScratch(RuntimeScratchPlan plan) {
+    for (const auto& [deviceId, buffer] : plan.buffers) {
+        auto device = lookup_device(devices_, deviceId);
+        if (device)
+            (void)(*device)->dealloc(buffer);
+    }
 }
 
 Result<std::unique_ptr<CompiledKernelGraph>> Engine::compile(
@@ -1110,6 +1199,12 @@ Result<std::unique_ptr<CompiledKernelGraph>> Engine::compile(
     if (!verify)
         return make_error(verify.error());
 
+    auto staticScratch = planCompileTimeScratchLayout(*compiled, devices_);
+    if (!staticScratch)
+        return make_error(staticScratch.error());
+    compiled->staticScratchLayouts = staticScratch->layout.devices;
+    compiled->staticScratchValues = std::move(staticScratch->values);
+
     std::unordered_set<DeviceId> executableDevices;
     for (const auto& opPtr : compiled->graph->ops()) {
         const auto& op = *opPtr;
@@ -1134,6 +1229,15 @@ Result<std::unique_ptr<CompiledKernelGraph>> Engine::compile(
     if (auto it = compiled->deviceGraphs.find(compiled->defaultDevice);
         it != compiled->deviceGraphs.end()) {
         compiled->deviceGraph = it->second;
+    }
+
+    auto staticAllocation = instantiateRuntimeScratch(staticScratch->layout, devices_);
+    if (!staticAllocation)
+        return make_error(staticAllocation.error());
+    {
+        std::lock_guard<std::mutex> lock(staticScratchMutex_);
+        staticScratchLayouts_[compiled->programId] = std::move(staticScratch->layout);
+        staticScratchAvailable_[compiled->programId].push_back(staticAllocation.take());
     }
     return compiled;
 }
@@ -1348,6 +1452,9 @@ Result<std::vector<RunOutput>> Engine::runValuesImpl(
         return make_error(cachedPlan.error());
     if (scratchPlanStart == Clock::time_point{})
         scratchPlanStart = Clock::now();
+    auto staticScratch = acquireStaticScratch(compiled);
+    if (!staticScratch)
+        return make_error(staticScratch.error());
     auto scratchPlan = instantiateRuntimeScratch((*cachedPlan)->scratchLayout, devices_);
     scratchPlanEnd = Clock::now();
     profile_stage(
@@ -1358,7 +1465,10 @@ Result<std::vector<RunOutput>> Engine::runValuesImpl(
     if (!scratchPlan)
         return make_error(scratchPlan.error());
 
-    auto state = initialize_runtime_state((*cachedPlan)->tensorDescs, scratchPlan.take());
+    auto state = initialize_runtime_state(
+        (*cachedPlan)->tensorDescs,
+        (*staticScratch)->plan(),
+        scratchPlan.take());
     ScratchBufferGuard scratchGuard(devices_, state);
 
     for (size_t opIndex = 0; opIndex < graph.ops().size(); opIndex++) {

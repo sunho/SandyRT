@@ -321,6 +321,14 @@ const char* layout_transform_name(LayoutTransformKind kind) {
     return "?";
 }
 
+const char* layout_transform_mode_name(LayoutTransformMode mode) {
+    switch (mode) {
+        case LayoutTransformMode::Alias: return "alias";
+        case LayoutTransformMode::Materialize: return "materialize";
+    }
+    return "?";
+}
+
 const char* norm_kind_name(NormKind kind) {
     switch (kind) {
         case NormKind::RMSNorm: return "rms_norm";
@@ -354,6 +362,7 @@ std::string op_attr_string(const Op& op) {
         case OpKind::LayoutTransform: {
             const auto& layout = static_cast<const LayoutTransformOp&>(op);
             return " kind=" + std::string(layout_transform_name(layout.transform())) +
+                   " mode=" + std::string(layout_transform_mode_name(layout.mode())) +
                    " dims=" + int_list_string(layout.dims()) +
                    (layout.indices().empty()
                         ? std::string()
@@ -455,7 +464,14 @@ const char* op_kind_name(OpKind kind) {
 
 ValueId Graph::addValue(ValueType type, std::string debugName, DeviceId device) {
     auto id = nextValueId_++;
-    values_.push_back(Value{id, std::move(type), device, {}, {}, std::move(debugName)});
+    values_.push_back(Value{
+        id,
+        std::move(type),
+        ValueLayout::Contiguous,
+        device,
+        {},
+        {},
+        std::move(debugName)});
     return id;
 }
 
@@ -777,6 +793,7 @@ LayoutTransformOp::LayoutTransformOp(
     ValueId input,
     ValueId output,
     std::vector<int64_t> dims,
+    LayoutTransformMode mode,
     DeviceId device)
     : LayoutTransformOp(
           id,
@@ -785,6 +802,7 @@ LayoutTransformOp::LayoutTransformOp(
           output,
           std::move(dims),
           {},
+          mode,
           device)
 {}
 
@@ -795,13 +813,15 @@ LayoutTransformOp::LayoutTransformOp(
     ValueId output,
     std::vector<int64_t> dims,
     std::vector<int64_t> indices,
+    LayoutTransformMode mode,
     DeviceId device)
     : Op(id, OpKind::LayoutTransform, device),
       transform_(transform),
       inputs_{input},
       outputs_{output},
       dims_(std::move(dims)),
-      indices_(std::move(indices))
+      indices_(std::move(indices)),
+      mode_(mode)
 {}
 
 Result<void> LayoutTransformOp::verify(const Graph& graph) const {
@@ -809,8 +829,23 @@ Result<void> LayoutTransformOp::verify(const Graph& graph) const {
         return result;
     }
     const auto& inputValue = graph.value(inputs_[0]);
+    const auto& outputValue = graph.value(outputs_[0]);
     if (inputValue.type.kind == ValueKind::PagedTensor) {
         return make_error(op_ref(id()) + " layout transform cannot consume paged input");
+    }
+    if (mode_ == LayoutTransformMode::Alias &&
+        (transform_ == LayoutTransformKind::Reshape ||
+         transform_ == LayoutTransformKind::Contiguous) &&
+        inputValue.layout != ValueLayout::Contiguous) {
+        return make_error(op_ref(id()) +
+                          " aliasing reshape/contiguous requires contiguous input");
+    }
+    if (mode_ == LayoutTransformMode::Alias &&
+        (transform_ == LayoutTransformKind::Reshape ||
+         transform_ == LayoutTransformKind::Contiguous) &&
+        outputValue.layout != ValueLayout::Contiguous) {
+        return make_error(op_ref(id()) +
+                          " aliasing reshape/contiguous must produce contiguous output");
     }
     if (transform_ == LayoutTransformKind::Permute && dims_.empty()) {
         return make_error(op_ref(id()) + " permute transform requires dims");

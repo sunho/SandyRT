@@ -684,6 +684,8 @@ Result<void> lower_layout_transform(
         return make_error(output.error());
 
     LayoutTransformKind kind = LayoutTransformKind::Contiguous;
+    LayoutTransformMode mode = LayoutTransformMode::Materialize;
+    ValueLayout outputLayout = ValueLayout::Contiguous;
     std::vector<int64_t> dims;
     std::vector<int64_t> indices;
     switch (op.kind) {
@@ -693,10 +695,15 @@ Result<void> lower_layout_transform(
                 return make_error(attr.error());
             kind = LayoutTransformKind::Reshape;
             dims = (*attr)->intListVal;
+            mode = graph.value(*input).layout == ValueLayout::Contiguous
+                ? LayoutTransformMode::Alias
+                : LayoutTransformMode::Materialize;
             break;
         }
         case mid_ir::OpKind::Transpose:
             kind = LayoutTransformKind::Transpose;
+            mode = LayoutTransformMode::Alias;
+            outputLayout = ValueLayout::Strided;
             break;
         case mid_ir::OpKind::Permute: {
             auto attr = find_attr(op, "dims", mid_ir::AttrValue::IntList);
@@ -704,6 +711,8 @@ Result<void> lower_layout_transform(
                 return make_error(attr.error());
             kind = LayoutTransformKind::Permute;
             dims = (*attr)->intListVal;
+            mode = LayoutTransformMode::Alias;
+            outputLayout = ValueLayout::Strided;
             break;
         }
         case mid_ir::OpKind::Slice: {
@@ -716,18 +725,23 @@ Result<void> lower_layout_transform(
             kind = LayoutTransformKind::Slice;
             dims = (*kindsAttr)->intListVal;
             indices = (*indicesAttr)->intListVal;
+            mode = LayoutTransformMode::Alias;
+            outputLayout = ValueLayout::Strided;
             break;
         }
         default:
             return make_error("unsupported layout transform");
     }
 
+    auto outputId = output.take();
+    graph.value(outputId).layout = outputLayout;
     graph.addOp<LayoutTransformOp>(
         kind,
         input.take(),
-        output.take(),
+        outputId,
         std::move(dims),
-        std::move(indices));
+        std::move(indices),
+        mode);
     return {};
 }
 

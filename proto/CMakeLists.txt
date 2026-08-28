@@ -22,6 +22,7 @@ add_custom_command(
     "${SANDY_INFERENCE_GRPC_HDRS}"
   COMMAND ${SANDY_PROTOBUF_PROTOC}
   ARGS
+    --experimental_allow_proto3_optional
     --grpc_out "${CMAKE_CURRENT_BINARY_DIR}"
     --cpp_out "${CMAKE_CURRENT_BINARY_DIR}"
     -I "${SANDY_INFERENCE_PROTO_PATH}"
