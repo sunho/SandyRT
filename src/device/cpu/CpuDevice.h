@@ -49,6 +49,10 @@ public:
     Result<TensorBufferPtr> readPaged(DevicePagedTensorId src);
 
 private:
+    Result<DeviceCompiledGraphId> compileExecutableGraph(
+        const ir::kernel_ir::Graph& graph,
+        std::span<const ir::kernel_ir::OpId> ops) override;
+    Result<void> destroyCompiledGraph(DeviceCompiledGraphId graph) override;
     Result<DevicePagedPoolId> createPagedPoolImpl(DevicePagedPoolDesc desc) override;
 
     struct CpuDeviceBuffer {

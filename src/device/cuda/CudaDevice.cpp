@@ -17,6 +17,7 @@
 #include <memory>
 #include <span>
 #include <string_view>
+#include <unordered_set>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -197,13 +198,26 @@ Result<void> CudaDevice::ensure_cublas_handle() {
 }
 
 Result<DeviceCompiledGraphId> CudaDevice::compile(const ir::kernel_ir::Graph& graph) {
+    std::vector<ir::kernel_ir::OpId> ops;
+    ops.reserve(graph.ops().size());
+    for (const auto& op : graph.ops())
+        ops.push_back(op->id());
+    return compileExecutableGraph(graph, ops);
+}
+
+Result<DeviceCompiledGraphId> CudaDevice::compileExecutableGraph(
+        const ir::kernel_ir::Graph& graph,
+        std::span<const ir::kernel_ir::OpId> ops) {
     auto verify = graph.verify();
     if (!verify)
         return make_error(verify.error());
 
     CudaDeviceGraph compiled;
+    std::unordered_set<ir::kernel_ir::OpId> included(ops.begin(), ops.end());
     for (const auto& opPtr : graph.ops()) {
         const auto& op = *opPtr;
+        if (!included.contains(op.id()))
+            continue;
         if (op.kind() == ir::kernel_ir::OpKind::Input ||
             op.kind() == ir::kernel_ir::OpKind::TensorTupleCreate ||
             op.kind() == ir::kernel_ir::OpKind::PagedAppend ||
@@ -619,6 +633,12 @@ Result<DeviceBufferId> CudaDevice::alloc(core::TensorDesc desc) {
     auto id = nextBufferId_++;
     buffers_[id] = std::move(buffer);
     return id;
+}
+
+Result<void> CudaDevice::destroyCompiledGraph(DeviceCompiledGraphId graph) {
+    if (graphs_.erase(graph) == 0)
+        return make_error("cuda device compiled graph not found");
+    return {};
 }
 
 Result<void> CudaDevice::dealloc(DeviceBufferId buffer) {

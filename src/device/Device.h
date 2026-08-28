@@ -13,6 +13,8 @@
 
 namespace sandy::device {
 
+class Device;
+
 class DeviceScratchAllocator {
 public:
     virtual ~DeviceScratchAllocator() = default;
@@ -24,11 +26,54 @@ public:
     virtual Result<DeviceScratchLayout> finalizeLayout() = 0;
 };
 
+class DeviceExecutable {
+public:
+    ~DeviceExecutable();
+
+    DeviceExecutable(const DeviceExecutable&) = delete;
+    DeviceExecutable& operator=(const DeviceExecutable&) = delete;
+
+    DeviceCompiledGraphId compiledGraph() const { return compiledGraph_; }
+    const DeviceExecutableDesc& desc() const { return desc_; }
+    const ir::kernel_ir::Graph& graph() const { return *graph_; }
+    bool hasFixedScratch(ir::kernel_ir::ValueId value) const {
+        return fixedViews_.contains(value);
+    }
+    size_t fixedScratchValueCount() const { return fixedViews_.size(); }
+
+private:
+    friend class Device;
+
+    DeviceExecutable(
+        Device& owner,
+        const ir::kernel_ir::Graph& graph,
+        DeviceCompiledGraphId compiledGraph,
+        DeviceExecutableDesc desc);
+
+    Device* owner_ = nullptr;
+    const ir::kernel_ir::Graph* graph_ = nullptr;
+    DeviceCompiledGraphId compiledGraph_ = 0;
+    DeviceExecutableDesc desc_;
+    DeviceBufferId fixedScratchBuffer_ = 0;
+    std::unordered_map<ir::kernel_ir::ValueId, DeviceTensorView> fixedViews_;
+};
+
+using DeviceExecutablePtr = std::shared_ptr<DeviceExecutable>;
+
 class Device {
 public:
+    friend class DeviceExecutable;
+
     virtual ~Device() = default;
 
     virtual Result<DeviceCompiledGraphId> compile(const ir::kernel_ir::Graph& graph) = 0;
+
+    Result<DeviceExecutablePtr> compileExecutable(
+        const ir::kernel_ir::Graph& graph,
+        DeviceExecutableDesc desc);
+    Result<void> runExecutable(
+        const DeviceExecutable& executable,
+        DeviceExecutableRunState& state);
 
     virtual Result<DeviceBufferId> alloc(core::TensorDesc desc) = 0;
     virtual Result<void> dealloc(DeviceBufferId buffer) = 0;
@@ -62,6 +107,10 @@ public:
     virtual Result<TensorBufferPtr> read(DevicePagedTensorView src);
 
 protected:
+    virtual Result<DeviceCompiledGraphId> compileExecutableGraph(
+        const ir::kernel_ir::Graph& graph,
+        std::span<const ir::kernel_ir::OpId> ops);
+    virtual Result<void> destroyCompiledGraph(DeviceCompiledGraphId graph);
     virtual Result<DevicePagedPoolId> createPagedPoolImpl(DevicePagedPoolDesc desc);
 };
 

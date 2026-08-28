@@ -2,7 +2,9 @@
 #include "CudaElementwiseJit.h"
 #include "CudaJit.h"
 #include "CudaJitEmbeddedSources.h"
+#include "Engine.h"
 #include "KernelIR.h"
+#include "MidIR.h"
 #include "TensorCalc.h"
 
 #include <cuda_runtime.h>
@@ -770,6 +772,44 @@ TEST(CudaDeviceTest, ScratchAllocatorFinalizesReusablePlacementLayout) {
               sandy::core::Shape({3}));
     EXPECT_EQ(layout->placements.at(11).desc.shape,
               sandy::core::Shape({5}));
+}
+
+TEST(CudaDeviceTest, EngineExecutableUsesDeviceOwnedFixedScratch) {
+    if (auto reason = cuda_device_skip_reason(); !reason.empty())
+        GTEST_SKIP() << reason;
+    sandy::ir::mid_ir::register_all_ops();
+
+    sandy::ir::mid_ir::Graph graph;
+    sandy::ir::mid_ir::Builder builder(graph);
+    auto* input = builder.createInput(
+        0, sandy::core::Shape({3}), sandy::core::DType::F32);
+    auto* hidden = builder.createTanh(input);
+    auto* output = builder.createReLU(hidden);
+    sandy::ir::mid_ir::Value* outputs[] = {output};
+    builder.setOutputs(outputs);
+
+    std::vector<std::unique_ptr<sandy::device::Device>> devices;
+    devices.push_back(std::make_unique<sandy::device::CudaDevice>());
+    sandy::engine::Engine engine(std::move(devices));
+    auto compiled = engine.compile(graph);
+    ASSERT_TRUE(compiled) << compiled.error();
+    ASSERT_EQ((*compiled)->executionNodes.size(), 1u);
+    EXPECT_GT((*compiled)->executionNodes[0].executable->fixedScratchValueCount(), 0u);
+
+    std::vector<sandy::engine::TensorBufferPtr> inputs = {
+        make_f32_buffer("x", sandy::core::Shape({3}), {-1.0f, 0.0f, 1.0f}),
+    };
+    auto result = engine.run(**compiled, inputs, sandy::engine::TensorMap{});
+    ASSERT_TRUE(result) << result.error();
+    ASSERT_EQ(result->size(), 1u);
+    auto access = (*result)[0]->access();
+    ASSERT_TRUE(access) << access.error();
+    ASSERT_EQ(access->data().size(), 3 * sizeof(float));
+    float values[3]{};
+    std::memcpy(values, access->data().data(), sizeof(values));
+    EXPECT_FLOAT_EQ(values[0], 0.0f);
+    EXPECT_FLOAT_EQ(values[1], 0.0f);
+    EXPECT_NEAR(values[2], std::tanh(1.0f), 1.0e-6f);
 }
 
 TEST(CudaDeviceTest, RunChainedElementwiseF32) {

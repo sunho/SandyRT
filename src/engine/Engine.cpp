@@ -1,5 +1,6 @@
 #include "Engine.h"
 
+#include "ExecutionPlan.h"
 #include "DeviceWiseCopier.h"
 #include "InvocationCacheKey.h"
 #include "MidIRToKernelIR.h"
@@ -246,28 +247,16 @@ Result<void> dealloc_value(
 
 RuntimeState initialize_runtime_state(
         RuntimeTensorDescs tensorDescs,
-        const RuntimeScratchPlan& staticScratch,
-        RuntimeScratchPlan dynamicScratch) {
+        RuntimeScratchPlan scratch) {
     RuntimeState state;
     state.tensorDescs = std::move(tensorDescs);
-    state.scratchBuffers = std::move(dynamicScratch.buffers);
-    auto bindScratch = [&](const RuntimeScratchPlan& scratch) {
-        for (const auto& [value, tensor] : scratch.views) {
-            state.addBuffer(
-                value,
-                tensor.buffer,
-                tensor.view,
-                scratch.devices.at(value),
-                false);
-        }
-    };
-    bindScratch(staticScratch);
-    for (auto& [value, tensor] : dynamicScratch.views) {
+    state.scratchBuffers = std::move(scratch.buffers);
+    for (auto& [value, tensor] : scratch.views) {
         state.addBuffer(
             value,
             tensor.buffer,
             std::move(tensor.view),
-            dynamicScratch.devices.at(value),
+            scratch.devices.at(value),
             false);
     }
     return state;
@@ -946,6 +935,157 @@ Result<void> run_kernel_op(
     return {};
 }
 
+bool is_alias_value(const Graph& graph, ValueId value) {
+    const auto& def = graph.value(value).def;
+    if (def.op == ir::kernel_ir::kInvalidOpId)
+        return false;
+    const auto& op = graph.op(def.op);
+    return op.kind() == OpKind::LayoutTransform &&
+        static_cast<const ir::kernel_ir::LayoutTransformOp&>(op).aliasesInput();
+}
+
+Result<device::DeviceRunValue> runtime_value(
+        const RuntimeState& state,
+        ValueId value) {
+    auto paged = state.pagedTensors.find(value);
+    if (paged != state.pagedTensors.end())
+        return device::DeviceRunValue{paged->second};
+    auto buffer = state.buffers.find(value);
+    auto view = state.views.find(value);
+    if (buffer == state.buffers.end() || view == state.views.end())
+        return make_error("missing executable boundary value %" + std::to_string(value));
+    return device::DeviceRunValue{DeviceTensorView{buffer->second, view->second}};
+}
+
+Result<void> run_execution_node(
+        const CompiledKernelGraph& compiled,
+        const CompiledExecutionNode& node,
+        Device& device,
+        RuntimeState& state,
+        const EngineRunOptions* options) {
+    const auto& graph = *compiled.graph;
+    for (auto value : node.bindings.exports) {
+        const auto& type = graph.value(value).type;
+        if (type.kind != ir::kernel_ir::ValueKind::Tensor ||
+            state.buffers.contains(value) || is_alias_value(graph, value))
+            continue;
+        auto desc = state.tensorDescs.get(value);
+        auto buffer = device.alloc(desc);
+        if (!buffer)
+            return make_error(buffer.error());
+        auto view = device.defaultView(std::move(desc));
+        if (!view) {
+            (void)device.dealloc(*buffer);
+            return make_error(view.error());
+        }
+        state.addBuffer(value, *buffer, view.take(), node.device, true);
+    }
+
+    device::DeviceExecutableRunState runState;
+    for (const auto& value : graph.values()) {
+        if (value.type.kind == ir::kernel_ir::ValueKind::TensorTuple ||
+            !state.tensorDescs.has(value.id))
+            continue;
+        runState.tensorDescs.emplace(value.id, state.tensorDescs.get(value.id));
+    }
+    auto bind = [&](ValueId value) -> Result<void> {
+        if (runState.values.contains(value))
+            return {};
+        auto bound = runtime_value(state, value);
+        if (!bound)
+            return make_error(bound.error());
+        runState.values.emplace(value, bound.take());
+        return {};
+    };
+    for (auto value : node.bindings.imports) {
+        auto result = bind(value);
+        if (!result)
+            return make_error(result.error());
+    }
+    for (auto value : node.bindings.exports) {
+        if (is_alias_value(graph, value))
+            continue;
+        auto result = bind(value);
+        if (!result)
+            return make_error(result.error());
+    }
+
+    if (options && options->profileKernel) {
+        runState.profileKernel = [&](ir::kernel_ir::OpId opId, double elapsedMs) {
+            const auto& op = graph.op(opId);
+            options->profileKernel({
+                static_cast<size_t>(opId),
+                opId,
+                node.device,
+                node.executable->compiledGraph(),
+                op.kind(),
+                op.inputs().size(),
+                op.outputs().size(),
+                elapsedMs,
+            });
+        };
+    }
+
+    const auto firstOpId = node.bindings.ops.front();
+    const auto& firstOp = graph.op(firstOpId);
+    profile_device_run_boundary(
+        options,
+        EngineDeviceRunBoundaryEvent::Boundary::Begin,
+        static_cast<size_t>(firstOpId),
+        firstOpId,
+        node.device,
+        node.executable->compiledGraph(),
+        firstOp.kind(),
+        node.bindings.imports.size(),
+        node.bindings.exports.size());
+    auto start = Clock::now();
+    auto executed = device.runExecutable(*node.executable, runState);
+    auto end = Clock::now();
+    if (!executed)
+        return make_error(executed.error());
+    profile_device_run_boundary(
+        options,
+        EngineDeviceRunBoundaryEvent::Boundary::End,
+        static_cast<size_t>(firstOpId),
+        firstOpId,
+        node.device,
+        node.executable->compiledGraph(),
+        firstOp.kind(),
+        node.bindings.imports.size(),
+        node.bindings.exports.size(),
+        std::chrono::duration<double, std::milli>(end - start).count());
+    profile_stage(options, "executable.device_run", start, end);
+
+    auto merge = [&](ValueId value) -> Result<void> {
+        auto found = runState.values.find(value);
+        if (found == runState.values.end())
+            return make_error("device executable did not produce boundary value %" +
+                              std::to_string(value));
+        if (auto* paged = std::get_if<DevicePagedTensorView>(&found->second)) {
+            state.pagedTensors[value] = *paged;
+            state.views[value].desc = paged->meta.logicalDesc;
+            state.bufferDevices[value] = node.device;
+            return {};
+        }
+        auto* tensor = std::get_if<DeviceTensorView>(&found->second);
+        if (!tensor)
+            return make_error("unsupported executable boundary value type");
+        state.addBuffer(value, tensor->buffer, tensor->view, node.device, false);
+        return {};
+    };
+    for (auto value : node.bindings.exports) {
+        auto result = merge(value);
+        if (!result)
+            return make_error(result.error());
+    }
+    for (auto value : node.bindings.mutableImports) {
+        auto result = merge(value);
+        if (!result)
+            return make_error(result.error());
+    }
+    return {};
+}
+
 Result<RunOutput> read_output_value(
         std::vector<std::unique_ptr<Device>>& devices,
         const Graph& graph,
@@ -1092,33 +1232,6 @@ private:
 
 } // namespace
 
-class Engine::StaticScratchLease {
-public:
-    StaticScratchLease(
-            Engine& engine,
-            CompiledProgramId program,
-            RuntimeScratchPlan plan,
-            bool recycle = true)
-        : engine_(&engine), program_(program), plan_(std::move(plan)), recycle_(recycle) {}
-
-    ~StaticScratchLease() {
-        if (!engine_)
-            return;
-        if (recycle_)
-            engine_->releaseStaticScratch(program_, std::move(plan_));
-        else
-            engine_->discardStaticScratch(std::move(plan_));
-    }
-
-    const RuntimeScratchPlan& plan() const { return plan_; }
-
-private:
-    Engine* engine_ = nullptr;
-    CompiledProgramId program_ = 0;
-    RuntimeScratchPlan plan_;
-    bool recycle_ = true;
-};
-
 Engine::Engine(
         std::vector<std::unique_ptr<Device>> devices,
         std::unique_ptr<DeviceWiseCopier> copier)
@@ -1126,53 +1239,6 @@ Engine::Engine(
       copier_(std::move(copier)) {
     if (!copier_)
         copier_ = std::make_unique<HostBounceDeviceWiseCopier>();
-}
-
-Result<std::unique_ptr<Engine::StaticScratchLease>> Engine::acquireStaticScratch(
-        const CompiledKernelGraph& compiled) {
-    RuntimeScratchPlan plan;
-    RuntimeScratchLayout layout;
-    bool recycle = false;
-    {
-        std::lock_guard<std::mutex> lock(staticScratchMutex_);
-        auto available = staticScratchAvailable_.find(compiled.programId);
-        if (available != staticScratchAvailable_.end() && !available->second.empty()) {
-            plan = std::move(available->second.back());
-            available->second.pop_back();
-            return std::make_unique<StaticScratchLease>(
-                *this, compiled.programId, std::move(plan));
-        }
-        auto found = staticScratchLayouts_.find(compiled.programId);
-        if (found != staticScratchLayouts_.end()) {
-            layout = found->second;
-            recycle = true;
-        } else {
-            // Preserve support for manually assembled CompiledKernelGraph
-            // instances that did not pass through Engine::compile.
-            layout.devices = compiled.staticScratchLayouts;
-        }
-    }
-
-    auto instantiated = instantiateRuntimeScratch(layout, devices_);
-    if (!instantiated)
-        return make_error(instantiated.error());
-    return std::make_unique<StaticScratchLease>(
-        *this, compiled.programId, instantiated.take(), recycle);
-}
-
-void Engine::releaseStaticScratch(
-        CompiledProgramId program,
-        RuntimeScratchPlan plan) {
-    std::lock_guard<std::mutex> lock(staticScratchMutex_);
-    staticScratchAvailable_[program].push_back(std::move(plan));
-}
-
-void Engine::discardStaticScratch(RuntimeScratchPlan plan) {
-    for (const auto& [deviceId, buffer] : plan.buffers) {
-        auto device = lookup_device(devices_, deviceId);
-        if (device)
-            (void)(*device)->dealloc(buffer);
-    }
 }
 
 Result<std::unique_ptr<CompiledKernelGraph>> Engine::compile(
@@ -1199,31 +1265,25 @@ Result<std::unique_ptr<CompiledKernelGraph>> Engine::compile(
     if (!verify)
         return make_error(verify.error());
 
-    auto staticScratch = planCompileTimeScratchLayout(*compiled, devices_);
-    if (!staticScratch)
-        return make_error(staticScratch.error());
-    compiled->staticScratchLayouts = staticScratch->layout.devices;
-    compiled->staticScratchValues = std::move(staticScratch->values);
-
-    std::unordered_set<DeviceId> executableDevices;
-    for (const auto& opPtr : compiled->graph->ops()) {
-        const auto& op = *opPtr;
-        if (op.kind() == OpKind::Input ||
-            op.kind() == OpKind::TensorTupleCreate ||
-            op.kind() == OpKind::PagedAppend ||
-            op.kind() == OpKind::DeviceTransfer)
-            continue;
-        executableDevices.insert(op.device());
-    }
-
-    for (auto deviceId : executableDevices) {
-        auto device = lookup_device(devices_, deviceId);
+    auto executionPlan = partitionKernelGraph(*compiled->graph);
+    if (!executionPlan)
+        return make_error(executionPlan.error());
+    compiled->executionNodeForOp = std::move(executionPlan->nodeForOp);
+    for (auto& node : executionPlan->nodes) {
+        auto device = lookup_device(devices_, node.device);
         if (!device)
             return make_error(device.error());
-        auto deviceGraph = (*device)->compile(*compiled->graph);
-        if (!deviceGraph)
-            return make_error(deviceGraph.error());
-        compiled->deviceGraphs[deviceId] = deviceGraph.take();
+        auto executable = (*device)->compileExecutable(
+            *compiled->graph, node.executable);
+        if (!executable)
+            return make_error(executable.error());
+        auto compiledGraphId = (*executable)->compiledGraph();
+        compiled->deviceGraphs.try_emplace(node.device, compiledGraphId);
+        compiled->executionNodes.push_back(CompiledExecutionNode{
+            node.device,
+            executable.take(),
+            std::move(node.executable),
+        });
     }
 
     if (auto it = compiled->deviceGraphs.find(compiled->defaultDevice);
@@ -1231,14 +1291,6 @@ Result<std::unique_ptr<CompiledKernelGraph>> Engine::compile(
         compiled->deviceGraph = it->second;
     }
 
-    auto staticAllocation = instantiateRuntimeScratch(staticScratch->layout, devices_);
-    if (!staticAllocation)
-        return make_error(staticAllocation.error());
-    {
-        std::lock_guard<std::mutex> lock(staticScratchMutex_);
-        staticScratchLayouts_[compiled->programId] = std::move(staticScratch->layout);
-        staticScratchAvailable_[compiled->programId].push_back(staticAllocation.take());
-    }
     return compiled;
 }
 
@@ -1435,7 +1487,9 @@ Result<std::vector<RunOutput>> Engine::runValuesImpl(
         if (!tensorDescs)
             return make_error(tensorDescs.error());
         scratchPlanStart = Clock::now();
-        auto scratchLayout = planRuntimeScratchLayout(compiled, *tensorDescs, devices_);
+        Result<RuntimeScratchLayout> scratchLayout = compiled.executionNodes.empty()
+            ? planRuntimeScratchLayout(compiled, *tensorDescs, devices_)
+            : RuntimeScratchLayout{};
         scratchPlanEnd = Clock::now();
         if (!scratchLayout)
             return make_error(scratchLayout.error());
@@ -1452,9 +1506,6 @@ Result<std::vector<RunOutput>> Engine::runValuesImpl(
         return make_error(cachedPlan.error());
     if (scratchPlanStart == Clock::time_point{})
         scratchPlanStart = Clock::now();
-    auto staticScratch = acquireStaticScratch(compiled);
-    if (!staticScratch)
-        return make_error(staticScratch.error());
     auto scratchPlan = instantiateRuntimeScratch((*cachedPlan)->scratchLayout, devices_);
     scratchPlanEnd = Clock::now();
     profile_stage(
@@ -1465,10 +1516,7 @@ Result<std::vector<RunOutput>> Engine::runValuesImpl(
     if (!scratchPlan)
         return make_error(scratchPlan.error());
 
-    auto state = initialize_runtime_state(
-        (*cachedPlan)->tensorDescs,
-        (*staticScratch)->plan(),
-        scratchPlan.take());
+    auto state = initialize_runtime_state((*cachedPlan)->tensorDescs, scratchPlan.take());
     ScratchBufferGuard scratchGuard(devices_, state);
 
     for (size_t opIndex = 0; opIndex < graph.ops().size(); opIndex++) {
@@ -1528,7 +1576,7 @@ Result<std::vector<RunOutput>> Engine::runValuesImpl(
             continue;
         }
 
-        if (op.kind() == OpKind::PagedAppend) {
+        if (op.kind() == OpKind::PagedAppend && compiled.executionNodes.empty()) {
             auto opStart = Clock::now();
             auto appended = paged_append_op(
                 devices_,
@@ -1566,6 +1614,23 @@ Result<std::vector<RunOutput>> Engine::runValuesImpl(
                 op.kind());
             if (!transferred)
                 return make_error(transferred.error());
+            continue;
+        }
+
+        if (!compiled.executionNodes.empty() &&
+            op.id() < compiled.executionNodeForOp.size() &&
+            compiled.executionNodeForOp[op.id()] >= 0) {
+            auto nodeIndex = static_cast<size_t>(compiled.executionNodeForOp[op.id()]);
+            const auto& node = compiled.executionNodes[nodeIndex];
+            if (node.bindings.ops.empty() || node.bindings.ops.front() != op.id())
+                continue;
+            auto nodeDevice = lookup_device(devices_, node.device);
+            if (!nodeDevice)
+                return make_error(nodeDevice.error());
+            auto executed = run_execution_node(
+                compiled, node, **nodeDevice, state, options);
+            if (!executed)
+                return make_error(executed.error());
             continue;
         }
 

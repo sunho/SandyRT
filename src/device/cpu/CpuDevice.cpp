@@ -9,6 +9,7 @@
 #include <memory>
 #include <span>
 #include <string>
+#include <unordered_set>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -192,13 +193,26 @@ Result<SimpleElementwiseKernel> validate_simple_elementwise_kernel(
 } // namespace
 
 Result<DeviceCompiledGraphId> CpuDevice::compile(const ir::kernel_ir::Graph& graph) {
+    std::vector<ir::kernel_ir::OpId> ops;
+    ops.reserve(graph.ops().size());
+    for (const auto& op : graph.ops())
+        ops.push_back(op->id());
+    return compileExecutableGraph(graph, ops);
+}
+
+Result<DeviceCompiledGraphId> CpuDevice::compileExecutableGraph(
+        const ir::kernel_ir::Graph& graph,
+        std::span<const ir::kernel_ir::OpId> ops) {
     auto verify = graph.verify();
     if (!verify)
         return make_error(verify.error());
 
     CpuDeviceGraph compiled;
+    std::unordered_set<ir::kernel_ir::OpId> included(ops.begin(), ops.end());
     for (const auto& opPtr : graph.ops()) {
         const auto& op = *opPtr;
+        if (!included.contains(op.id()))
+            continue;
         CpuDeviceKernel kernel;
         kernel.kind = op.kind();
         kernel.inputCount = op.inputs().size();
@@ -317,6 +331,12 @@ Result<DeviceBufferId> CpuDevice::alloc(core::TensorDesc desc) {
     auto id = nextBufferId_++;
     buffers_[id] = std::move(buffer);
     return id;
+}
+
+Result<void> CpuDevice::destroyCompiledGraph(DeviceCompiledGraphId graph) {
+    if (graphs_.erase(graph) == 0)
+        return make_error("cpu device compiled graph not found");
+    return {};
 }
 
 Result<void> CpuDevice::dealloc(DeviceBufferId buffer) {

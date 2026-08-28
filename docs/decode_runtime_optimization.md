@@ -44,27 +44,24 @@ Scratch now has two independent plans and backing pools.
 
 ### Static scratch
 
-At `Engine::compile`, the scratch planner simulates KernelIR lifetimes using the
-compile-time tensor descriptors. Eligible dense tensor results whose shapes are
-fully static are placed by the device scratch allocator. Only values actually
-placed by a device allocator are marked static.
-
-The resulting layout is stored on the compiled program. The engine eagerly
-creates one backing allocation and manages it as a per-program lease pool. A
-concurrent invocation gets a distinct lease; a completed invocation returns its
-allocation for reuse. This keeps fixed scratch allocation and placement out of
-the steady-state invocation path without introducing cross-request buffer races.
+While compiling a `DeviceExecutable`, the device simulates the lifetimes of its
+internal KernelIR values using compile-time tensor descriptors. Eligible dense
+results whose shapes are fully static are placed by the device scratch allocator.
+The executable allocates one fixed backing buffer and owns its layout and views.
+Destroying the executable releases that buffer. Concurrent execution of one
+executable is outside the current synchronous scope.
 
 ### Dynamic scratch
 
-Values with runtime-dependent shapes are excluded from the static plan. The
-existing runtime descriptor inference and lifetime simulation plan only these
-remaining values. They are instantiated from a separate dynamic scratch pool
-for the invocation and released through the existing runtime cleanup path.
+Values with runtime-dependent shapes are excluded from the fixed plan. During
+`Device::runExecutable`, the device directly simulates its command list using
+concrete tensor descriptors, allocates one dynamic backing buffer, and releases
+it before synchronous execution returns.
 
-Graph outputs and alias chains remain outside scratch planning because their
-backing-buffer lifetimes are not represented by the current value-level lifetime
-model. Alias-aware lifetime tracking can relax that restriction later.
+Values exported from an executable remain outside scratch planning. The engine
+allocates standalone buffers for them and tracks their cross-node lifetime.
+Exported aliases recursively export their backing values so no exported view can
+refer to private executable scratch.
 
 ## Multi-op execution and CUDA Graph direction
 
@@ -110,3 +107,45 @@ capture, graph-node parameter updates, and replay.
    scratch lease and invocation shape.
 5. Expand capture eligibility and benchmark 1024-token prefill plus 128-token
    decode after a warm-up request.
+
+## Synchronous device-executable implementation plan
+
+The first implementation deliberately excludes asynchronous submission,
+events, queues, concurrent use of one executable, and executable-instance
+pools. A compiled executable is run synchronously and owns exactly one fixed
+scratch allocation.
+
+1. Add an opaque multi-op `DeviceExecutable`, an executable description with
+   ordered operation IDs, and runtime import/export bindings.
+2. Partition KernelIR into consecutive same-device executable nodes. Inputs,
+   tensor-tuple construction, and cross-device transfers remain engine nodes.
+   Paged append is included in the device executable.
+3. Mark values consumed outside their producer executable, graph outputs, and
+   values consumed by engine nodes as exports. Mark values produced outside an
+   executable as imports. Paged tensors mutated by paged append are mutable
+   imports.
+4. Allocate exported dense tensors as standalone engine-owned buffers. Internal
+   values are never allocated by the engine.
+5. During device-executable compilation, plan all fully static internal dense
+   values with the device scratch allocator, allocate one fixed scratch buffer,
+   and retain it until the executable is destroyed.
+6. During device-executable execution, plan only the remaining dynamic internal
+   values using concrete invocation descriptors. Allocate that dynamic scratch
+   for the synchronous run and release it before returning.
+7. Execute alias-mode layout operations as device-side view-binding commands.
+   Materialize-mode layout operations remain kernels. An exported alias also
+   exports its backing value so it cannot refer to private scratch.
+8. Execute paged append as a device command. The paged tensor remains externally
+   owned mutable state; the command updates its device metadata before later
+   commands consume it.
+9. Switch compiled engine programs to execute device nodes rather than dispatch
+   individual kernels. Preserve the legacy per-op path only for manually built
+   test programs during migration.
+10. Once eager multi-op parity is established, add CUDA Graph capture inside the
+    CUDA executable for eligible fixed-scratch command sequences. An executable
+    containing dynamic scratch or paged append initially remains eager.
+
+The fixed scratch allocation, its placement layout, and future CUDA Graph
+objects are private members of the device executable. Destroying the executable
+releases them. Dynamic scratch has no extra compiled representation: runtime
+planning directly simulates the executable's command list.

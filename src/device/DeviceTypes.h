@@ -5,7 +5,9 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <functional>
 #include <memory>
+#include <span>
 #include <string>
 #include <unordered_map>
 #include <variant>
@@ -66,6 +68,19 @@ using DeviceRunValue = std::variant<
     DeviceTensorView,
     DevicePagedTensorView,
     DeviceTensorTupleView>;
+
+struct DeviceExecutableDesc {
+    std::vector<ir::kernel_ir::OpId> ops;
+    std::vector<ir::kernel_ir::ValueId> imports;
+    std::vector<ir::kernel_ir::ValueId> mutableImports;
+    std::vector<ir::kernel_ir::ValueId> exports;
+};
+
+struct DeviceExecutableRunState {
+    std::unordered_map<ir::kernel_ir::ValueId, DeviceRunValue> values;
+    std::unordered_map<ir::kernel_ir::ValueId, core::TensorDesc> tensorDescs;
+    std::function<void(ir::kernel_ir::OpId, double)> profileKernel;
+};
 
 struct DeviceScratchAllocation {
     DeviceBufferId buffer = 0;

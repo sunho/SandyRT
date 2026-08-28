@@ -51,6 +51,10 @@ public:
     CudaJitCacheStats jitCacheStats() const { return jitCache_.stats(); }
 
 private:
+    Result<DeviceCompiledGraphId> compileExecutableGraph(
+        const ir::kernel_ir::Graph& graph,
+        std::span<const ir::kernel_ir::OpId> ops) override;
+    Result<void> destroyCompiledGraph(DeviceCompiledGraphId graph) override;
     Result<DevicePagedPoolId> createPagedPoolImpl(DevicePagedPoolDesc desc) override;
 
     using KernelProgram = std::variant<

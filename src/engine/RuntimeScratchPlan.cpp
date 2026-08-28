@@ -174,38 +174,6 @@ Result<RuntimeScratchLayout> planScratchLayout(
     return plan;
 }
 
-Result<CompileTimeScratchPlan> planCompileTimeScratchLayout(
-        const CompiledKernelGraph& compiled,
-        std::vector<std::unique_ptr<device::Device>>& devices) {
-    std::vector<bool> candidates(compiled.graph->values().size(), false);
-    auto excluded = excludedValues(*compiled.graph);
-    for (const auto& opPtr : compiled.graph->ops()) {
-        const auto& op = *opPtr;
-        if (!mayRequireDenseAllocation(op))
-            continue;
-        for (auto output : op.outputs()) {
-            const auto& value = compiled.graph->value(output);
-            candidates[output] = !excluded[output] &&
-                value.type.kind == ir::kernel_ir::ValueKind::Tensor &&
-                !value.type.shape.has_dynamic();
-        }
-    }
-
-    auto layout = planScratchLayout(compiled, nullptr, &candidates, nullptr, devices);
-    if (!layout)
-        return make_error(layout.error());
-
-    // Only suppress a value from the runtime planner when a device allocator
-    // actually placed it in the fixed pool. Devices may opt out of scratch
-    // planning by returning no allocator.
-    std::vector<bool> fixed(compiled.graph->values().size(), false);
-    for (const auto& [_, deviceLayout] : layout->devices) {
-        for (const auto& [value, __] : deviceLayout.placements)
-            fixed[value] = true;
-    }
-    return CompileTimeScratchPlan{layout.take(), std::move(fixed)};
-}
-
 Result<RuntimeScratchLayout> planRuntimeScratchLayout(
         const CompiledKernelGraph& compiled,
         const RuntimeTensorDescs& tensorDescs,
@@ -214,7 +182,7 @@ Result<RuntimeScratchLayout> planRuntimeScratchLayout(
         compiled,
         &tensorDescs,
         nullptr,
-        &compiled.staticScratchValues,
+        nullptr,
         devices);
     if (!layout)
         return make_error(layout.error());

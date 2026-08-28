@@ -10,6 +10,10 @@
 #include <variant>
 #include <vector>
 
+namespace sandy::device {
+class DeviceExecutable;
+}
+
 namespace sandy::engine {
 
 using CompiledProgramId = uint64_t;
@@ -34,6 +38,12 @@ struct RunTensorTuple {
 using RunInput = std::variant<TensorBufferPtr, DevicePagedTensorView, RunTensorTuple>;
 using RunOutput = std::variant<TensorBufferPtr, DevicePagedTensorView, RunTensorTuple>;
 
+struct CompiledExecutionNode {
+    ir::kernel_ir::DeviceId device = 0;
+    std::shared_ptr<device::DeviceExecutable> executable;
+    device::DeviceExecutableDesc bindings;
+};
+
 struct CompiledKernelGraph {
     CompiledProgramId programId = 0;
     std::unique_ptr<ir::kernel_ir::Graph> graph;
@@ -41,13 +51,8 @@ struct CompiledKernelGraph {
     ir::kernel_ir::DeviceId defaultDevice = 0;
     std::unordered_map<ir::kernel_ir::DeviceId, DeviceCompiledGraphId> deviceGraphs;
 
-    // Dense values with compile-time shapes are assigned to this layout once
-    // during compilation. Runtime scratch planning handles only the remaining
-    // dynamic values.
-    std::unordered_map<
-        ir::kernel_ir::DeviceId,
-        device::DeviceScratchLayout> staticScratchLayouts;
-    std::vector<bool> staticScratchValues;
+    std::vector<CompiledExecutionNode> executionNodes;
+    std::vector<int32_t> executionNodeForOp;
 
     // Legacy single-device fields kept for tests and manually constructed graphs.
     uint32_t device = 0;

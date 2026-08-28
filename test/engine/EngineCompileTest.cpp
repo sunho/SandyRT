@@ -1,5 +1,6 @@
 #include "Device.h"
 #include "Engine.h"
+#include "ExecutionPlan.h"
 #include "KernelIR.h"
 #include "MidIR.h"
 
@@ -102,6 +103,30 @@ public:
         return id;
     }
 
+    Result<void> appendPaged(
+            sandy::device::DevicePagedTensorId dst,
+            sandy::device::DeviceTensorView denseChunk) override {
+        auto found = pagedMetas.find(dst);
+        if (found == pagedMetas.end())
+            return make_error("fake paged tensor not found");
+        auto growDim = found->second.growDim;
+        auto appended = denseChunk.view.desc.shape.dim(static_cast<int>(growDim));
+        found->second.growLength += appended;
+        auto shape = found->second.logicalDesc.shape.dims();
+        shape[static_cast<size_t>(growDim)] += appended;
+        found->second.logicalDesc.shape = sandy::core::Shape(std::move(shape));
+        pagedAppends.push_back(dst);
+        return {};
+    }
+
+    Result<sandy::device::DevicePagedTensorMeta> pagedMeta(
+            sandy::device::DevicePagedTensorId tensor) const override {
+        auto found = pagedMetas.find(tensor);
+        if (found == pagedMetas.end())
+            return make_error("fake paged tensor not found");
+        return found->second;
+    }
+
     Result<void> run(
             sandy::device::DeviceCompiledGraphId graph,
             sandy::ir::kernel_ir::OpId op,
@@ -153,6 +178,10 @@ public:
     std::vector<sandy::core::TensorDesc> loads;
     std::vector<RunCall> runs;
     std::vector<sandy::device::DeviceBufferId> reads;
+    std::vector<sandy::device::DevicePagedTensorId> pagedAppends;
+    std::unordered_map<
+        sandy::device::DevicePagedTensorId,
+        sandy::device::DevicePagedTensorMeta> pagedMetas;
     std::unordered_map<sandy::device::DeviceBufferId, sandy::core::TensorDesc> bufferDescs;
 };
 
@@ -184,6 +213,56 @@ sandy::engine::Engine make_two_device_engine(FakeDevice** firstPtr, FakeDevice**
 
 } // namespace
 
+TEST(ExecutionPlanTest, PartitionsDeviceTransferAndExportsBoundaryValues) {
+    namespace kir = sandy::ir::kernel_ir;
+    kir::Graph graph;
+    auto type = kir::ValueType{
+        kir::ValueKind::Tensor,
+        sandy::core::DType::F32,
+        sandy::core::Shape({1}),
+    };
+    auto input = graph.addValue(type, "input", 0);
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 0, ""}, input);
+    auto first = graph.addValue(type, "first", 0);
+    auto* firstOp = graph.addOp<kir::ElementwiseKernelOp>(
+        std::vector<kir::ElementwiseInput>{{input, kir::BroadcastMode::None}},
+        first,
+        1,
+        std::vector<kir::ScalarNode>{
+            {0, kir::ScalarOp::Load, sandy::core::DType::F32, 0, 0.0, {}},
+            {1, kir::ScalarOp::Tanh, sandy::core::DType::F32, 0, 0.0, {0}},
+        },
+        0);
+    auto transferred = graph.addValue(type, "transferred", 1);
+    auto* transfer = graph.addOp<kir::DeviceTransferOp>(0, 1, first, transferred);
+    auto output = graph.addValue(type, "output", 1);
+    auto* secondOp = graph.addOp<kir::ElementwiseKernelOp>(
+        std::vector<kir::ElementwiseInput>{{transferred, kir::BroadcastMode::None}},
+        output,
+        1,
+        std::vector<kir::ScalarNode>{
+            {0, kir::ScalarOp::Load, sandy::core::DType::F32, 0, 0.0, {}},
+            {1, kir::ScalarOp::Tanh, sandy::core::DType::F32, 0, 0.0, {0}},
+        },
+        1);
+    graph.setOutputs({output});
+    ASSERT_TRUE(graph.verify());
+
+    auto plan = sandy::engine::partitionKernelGraph(graph);
+    ASSERT_TRUE(plan) << plan.error();
+    ASSERT_EQ(plan->nodes.size(), 2u);
+    EXPECT_EQ(plan->nodes[0].executable.ops,
+              std::vector<kir::OpId>({firstOp->id()}));
+    EXPECT_EQ(plan->nodes[0].executable.exports,
+              std::vector<kir::ValueId>({first}));
+    EXPECT_EQ(plan->nodes[1].executable.ops,
+              std::vector<kir::OpId>({secondOp->id()}));
+    EXPECT_EQ(plan->nodes[1].executable.imports,
+              std::vector<kir::ValueId>({transferred}));
+    EXPECT_EQ(plan->nodeForOp[transfer->id()], -1);
+}
+
 TEST_F(EngineCompileTest, CompileLowersAndCompilesKernelGraph) {
     sandy::ir::mid_ir::Graph graph;
     sandy::ir::mid_ir::Builder builder(graph);
@@ -214,7 +293,7 @@ TEST_F(EngineCompileTest, CompileLowersAndCompilesKernelGraph) {
     EXPECT_EQ(compiled->graph->outputs(), std::vector<sandy::ir::kernel_ir::ValueId>({3}));
 }
 
-TEST_F(EngineCompileTest, CompilePlansAndReusesStaticScratchPool) {
+TEST_F(EngineCompileTest, ExecutableOwnsAndReusesFixedScratch) {
     sandy::ir::mid_ir::Graph graph;
     sandy::ir::mid_ir::Builder builder(graph);
     auto* x = builder.createInput(
@@ -231,12 +310,8 @@ TEST_F(EngineCompileTest, CompilePlansAndReusesStaticScratchPool) {
     ASSERT_TRUE(compiledResult) << compiledResult.error();
     auto compiled = compiledResult.take();
 
-    ASSERT_EQ(compiled->staticScratchValues.size(), 3u);
-    EXPECT_FALSE(compiled->staticScratchValues[0]);
-    EXPECT_TRUE(compiled->staticScratchValues[1]);
-    EXPECT_FALSE(compiled->staticScratchValues[2]);
-    ASSERT_TRUE(compiled->staticScratchLayouts.contains(0));
-    EXPECT_TRUE(compiled->staticScratchLayouts.at(0).placements.contains(1));
+    ASSERT_EQ(compiled->executionNodes.size(), 1u);
+    EXPECT_TRUE(compiled->executionNodes[0].executable->hasFixedScratch(1));
 
     std::vector<sandy::engine::TensorBufferPtr> inputs = {
         std::make_shared<FakeTensorBuffer>(sandy::core::TensorDesc(
@@ -276,9 +351,8 @@ TEST_F(EngineCompileTest, DynamicShapeFallsBackToRuntimeScratchPool) {
     auto compiledResult = engine.compile(graph);
     ASSERT_TRUE(compiledResult) << compiledResult.error();
     auto compiled = compiledResult.take();
-    ASSERT_EQ(compiled->staticScratchValues.size(), 3u);
-    EXPECT_FALSE(compiled->staticScratchValues[1]);
-    EXPECT_TRUE(compiled->staticScratchLayouts.empty());
+    ASSERT_EQ(compiled->executionNodes.size(), 1u);
+    EXPECT_FALSE(compiled->executionNodes[0].executable->hasFixedScratch(1));
     EXPECT_TRUE(fake->allocDescs.empty());
 
     std::vector<sandy::engine::TensorBufferPtr> inputs = {
@@ -293,6 +367,51 @@ TEST_F(EngineCompileTest, DynamicShapeFallsBackToRuntimeScratchPool) {
         [](const sandy::core::TensorDesc& desc) {
             return desc.dtype == sandy::core::DType::U8;
         }), 1);
+}
+
+TEST_F(EngineCompileTest, PagedAppendExecutesInsideDeviceExecutable) {
+    sandy::ir::mid_ir::Graph graph;
+    sandy::ir::mid_ir::Builder builder(graph);
+    auto* cache = builder.createPagedTensorInput(
+        0,
+        sandy::core::Shape({1, -1, 2}),
+        sandy::core::DType::F32,
+        1,
+        4);
+    auto* chunk = builder.createInput(
+        1, sandy::core::Shape({1, 1, 2}), sandy::core::DType::F32);
+    builder.createPagedAppend(cache, chunk);
+    auto* output = builder.createTanh(chunk);
+    sandy::ir::mid_ir::Value* outputs[] = {output};
+    builder.setOutputs(outputs);
+
+    FakeDevice* fake = nullptr;
+    auto engine = make_engine(&fake);
+    auto compiledResult = engine.compile(graph);
+    ASSERT_TRUE(compiledResult) << compiledResult.error();
+    auto compiled = compiledResult.take();
+    ASSERT_EQ(compiled->executionNodes.size(), 1u);
+    ASSERT_EQ(compiled->executionNodes[0].bindings.mutableImports.size(), 1u);
+
+    sandy::device::DevicePagedTensorMeta meta;
+    meta.logicalDesc = sandy::core::TensorDesc(
+        sandy::core::Shape({1, 2, 2}), sandy::core::DType::F32);
+    meta.growDim = 1;
+    meta.pageSize = 4;
+    meta.growLength = 2;
+    fake->pagedMetas[7] = meta;
+
+    sandy::engine::RunInput inputs[] = {
+        sandy::device::DevicePagedTensorView{7, meta},
+        std::make_shared<FakeTensorBuffer>(sandy::core::TensorDesc(
+            sandy::core::Shape({1, 1, 2}), sandy::core::DType::F32)),
+    };
+    auto result = engine.runValues(
+        *compiled, inputs, sandy::engine::TensorMap{});
+    ASSERT_TRUE(result) << result.error();
+    EXPECT_EQ(fake->pagedAppends,
+              std::vector<sandy::device::DevicePagedTensorId>({7}));
+    EXPECT_EQ(fake->pagedMetas.at(7).growLength, 3);
 }
 
 TEST_F(EngineCompileTest, CompileFailsWithoutDevices) {
