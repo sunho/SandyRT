@@ -97,7 +97,10 @@ __device__ int64_t load_index_at_storage(
     return cuda_kernel::load_int_at_storage(tensor, index);
 }
 
-__global__ void gather_kernel(DeviceGatherProgram program, int* errorFlag) {
+__global__ void gather_kernel(
+        DeviceGatherProgram program,
+        ir::kernel_ir::OpId* validationFailure,
+        ir::kernel_ir::OpId op) {
     int64_t linear = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (linear >= program.outputNumel)
         return;
@@ -107,8 +110,7 @@ __global__ void gather_kernel(DeviceGatherProgram program, int* errorFlag) {
     int64_t idStorage = cuda_kernel::storage_index(program.ids, idLinear);
     int64_t tokenId = load_index_at_storage(program.ids, idStorage);
     if (tokenId < 0 || tokenId >= program.vocab) {
-        if (errorFlag)
-            atomicExch(errorFlag, 1);
+        cuda_kernel::record_validation_failure(validationFailure, op);
         return;
     }
 
@@ -286,14 +288,15 @@ Result<DeviceMoeGatherProgram> pack_moe_gather_program(
 __global__ void moe_gather_count_kernel(
         DeviceMoeGatherProgram program,
         int32_t* counts,
-        int* errorFlag) {
+        ir::kernel_ir::OpId* validationFailure,
+        ir::kernel_ir::OpId op) {
     int64_t globalRoute = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (globalRoute >= program.totalRoutes)
         return;
 
     int64_t expert = cuda_kernel::load_int(program.topkIds, globalRoute);
     if (expert < 0 || expert >= program.numExperts) {
-        atomicExch(errorFlag, 1);
+        cuda_kernel::record_validation_failure(validationFailure, op);
         return;
     }
 
@@ -301,15 +304,26 @@ __global__ void moe_gather_count_kernel(
     atomicAdd(&counts[batch * program.numExperts + expert], 1);
 }
 
-__global__ void moe_gather_store_offsets_kernel(
+__global__ void moe_gather_prefix_kernel(
         DeviceMoeGatherProgram program,
-        const int32_t* offsets) {
-    int64_t total = program.batch * (program.numExperts + 1);
-    int64_t linear = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    if (linear >= total)
+        const int32_t* counts,
+        int32_t* cursors) {
+    int64_t batch = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (batch >= program.batch)
         return;
 
-    cuda_kernel::store_int(program.expertOffsets, linear, offsets[linear]);
+    int32_t row = 0;
+    int64_t countBase = batch * program.numExperts;
+    int64_t offsetBase = batch * (program.numExperts + 1);
+    for (int64_t expert = 0; expert < program.numExperts; ++expert) {
+        cuda_kernel::store_int(program.expertOffsets, offsetBase + expert, row);
+        cursors[countBase + expert] = row;
+        row += counts[countBase + expert];
+    }
+    cuda_kernel::store_int(
+        program.expertOffsets,
+        offsetBase + program.numExperts,
+        row);
 }
 
 __global__ void moe_gather_assign_kernel(
@@ -324,6 +338,10 @@ __global__ void moe_gather_assign_kernel(
     int64_t routeInBatch = globalRoute - batch * program.routesPerBatch;
     int64_t token = routeInBatch / program.topK;
     int64_t expert = cuda_kernel::load_int(program.topkIds, globalRoute);
+    if (expert < 0 || expert >= program.numExperts) {
+        routeRows[globalRoute] = -1;
+        return;
+    }
     int32_t row = atomicAdd(&cursors[batch * program.numExperts + expert], 1);
 
     routeRows[globalRoute] = row;
@@ -349,6 +367,8 @@ __global__ void moe_gather_copy_x_kernel(
     int64_t routeInBatch = globalRoute - batch * program.routesPerBatch;
     int64_t token = routeInBatch / program.topK;
     int64_t row = routeRows[globalRoute];
+    if (row < 0)
+        return;
 
     int64_t xIndex = batch * program.seq * program.hidden + token * program.hidden + hiddenIndex;
     int64_t packedIndex =
@@ -374,10 +394,6 @@ Result<void> launch_cuda_gather(
     auto program = packed.take();
     if (program.outputNumel == 0)
         return {};
-
-    // Hot decode path: token ids and router expert ids are expected valid by construction.
-    // Skipping the error-flag round trip avoids one cudaStreamSynchronize per gather.
-    int* errorFlag = nullptr;
 
     int blocks = static_cast<int>(
         (program.outputNumel + cuda_kernel::kBlockSize - 1) /
@@ -422,7 +438,8 @@ Result<void> launch_cuda_gather(
                 output.take(),
                 program.vocab,
                 program.hidden,
-                errorFlag,
+                context.validationFailure,
+                context.op,
             };
             void* arguments[] = {&params};
             return (*jit)->launch(
@@ -435,7 +452,8 @@ Result<void> launch_cuda_gather(
     }
     gather_kernel<<<blocks, cuda_kernel::kBlockSize, 0, context.stream>>>(
         program,
-        errorFlag);
+        context.validationFailure,
+        context.op);
     auto launched = cuda_check(cudaGetLastError(), "cuda gather launch");
     if (!launched)
         return make_error(launched.error());
@@ -457,8 +475,6 @@ Result<void> launch_cuda_moe_gather(
     int32_t* counts = nullptr;
     int32_t* cursors = nullptr;
     int32_t* routeRows = nullptr;
-    int32_t* offsets = nullptr;
-    int* errorFlag = nullptr;
     auto freeTemps = [&]() {
         if (counts) {
             (void)cuda_free_stream_ordered(counts, context.stream, "cudaFreeAsync moe_gather counts");
@@ -471,14 +487,6 @@ Result<void> launch_cuda_moe_gather(
         if (routeRows) {
             (void)cuda_free_stream_ordered(routeRows, context.stream, "cudaFreeAsync moe_gather route rows");
             routeRows = nullptr;
-        }
-        if (offsets) {
-            (void)cuda_free_stream_ordered(offsets, context.stream, "cudaFreeAsync moe_gather offsets");
-            offsets = nullptr;
-        }
-        if (errorFlag) {
-            (void)cuda_free_stream_ordered(errorFlag, context.stream, "cudaFreeAsync moe_gather error flag");
-            errorFlag = nullptr;
         }
     };
 
@@ -498,15 +506,6 @@ Result<void> launch_cuda_moe_gather(
         freeTemps();
         return make_error(allocCursors.error());
     }
-    auto allocOffsets = cuda_malloc_stream_ordered(
-        &offsets,
-        static_cast<size_t>(launchProgram.batch * (launchProgram.numExperts + 1)) * sizeof(int32_t),
-        context.stream,
-        "cudaMallocAsync moe_gather offsets");
-    if (!allocOffsets) {
-        freeTemps();
-        return make_error(allocOffsets.error());
-    }
     if (launchProgram.totalRoutes != 0) {
         auto allocRouteRows = cuda_malloc_stream_ordered(
             &routeRows,
@@ -518,16 +517,6 @@ Result<void> launch_cuda_moe_gather(
             return make_error(allocRouteRows.error());
         }
     }
-    auto allocError = cuda_malloc_stream_ordered(
-        &errorFlag,
-        sizeof(int),
-        context.stream,
-        "cudaMallocAsync moe_gather error flag");
-    if (!allocError) {
-        freeTemps();
-        return make_error(allocError.error());
-    }
-
     auto clearCounts = cuda_check(
         cudaMemsetAsync(
             counts,
@@ -539,14 +528,6 @@ Result<void> launch_cuda_moe_gather(
         freeTemps();
         return make_error(clearCounts.error());
     }
-    auto clearError = cuda_check(
-        cudaMemsetAsync(errorFlag, 0, sizeof(int), context.stream),
-        "cudaMemsetAsync moe_gather error flag");
-    if (!clearError) {
-        freeTemps();
-        return make_error(clearError.error());
-    }
-
     int routeBlocks = static_cast<int>(
         (launchProgram.totalRoutes + cuda_kernel::kBlockSize - 1) /
         cuda_kernel::kBlockSize);
@@ -554,7 +535,8 @@ Result<void> launch_cuda_moe_gather(
         moe_gather_count_kernel<<<routeBlocks, cuda_kernel::kBlockSize, 0, context.stream>>>(
             launchProgram,
             counts,
-            errorFlag);
+            context.validationFailure,
+            context.op);
         auto launched = cuda_check(cudaGetLastError(), "cuda moe_gather count launch");
         if (!launched) {
             freeTemps();
@@ -562,101 +544,18 @@ Result<void> launch_cuda_moe_gather(
         }
     }
 
-    std::vector<int32_t> hostCounts(
-        static_cast<size_t>(launchProgram.batch * launchProgram.numExperts));
-    int hostError = 0;
-    auto copyCounts = cuda_check(
-        cudaMemcpyAsync(
-            hostCounts.data(),
-            counts,
-            hostCounts.size() * sizeof(int32_t),
-            cudaMemcpyDeviceToHost,
-            context.stream),
-        "cudaMemcpyAsync moe_gather counts");
-    if (!copyCounts) {
-        freeTemps();
-        return make_error(copyCounts.error());
-    }
-    auto copyError = cuda_check(
-        cudaMemcpyAsync(
-            &hostError,
-            errorFlag,
-            sizeof(int),
-            cudaMemcpyDeviceToHost,
-            context.stream),
-        "cudaMemcpyAsync moe_gather error flag");
-    if (!copyError) {
-        freeTemps();
-        return make_error(copyError.error());
-    }
-    auto counted = cuda_check(cudaStreamSynchronize(context.stream), "cudaStreamSynchronize moe_gather count");
-    if (!counted) {
-        freeTemps();
-        return make_error(counted.error());
-    }
-    if (hostError != 0) {
-        freeTemps();
-        return make_error("moe_gather topk expert id out of range");
-    }
-
-    std::vector<int32_t> hostOffsets(
-        static_cast<size_t>(launchProgram.batch * (launchProgram.numExperts + 1)));
-    std::vector<int32_t> hostCursors(
-        static_cast<size_t>(launchProgram.batch * launchProgram.numExperts));
-    for (int64_t batch = 0; batch < launchProgram.batch; ++batch) {
-        int32_t row = 0;
-        for (int64_t expert = 0; expert < launchProgram.numExperts; ++expert) {
-            size_t countIndex = static_cast<size_t>(batch * launchProgram.numExperts + expert);
-            size_t offsetIndex = static_cast<size_t>(batch * (launchProgram.numExperts + 1) + expert);
-            hostOffsets[offsetIndex] = row;
-            hostCursors[countIndex] = row;
-            row += hostCounts[countIndex];
-        }
-        hostOffsets[static_cast<size_t>(batch * (launchProgram.numExperts + 1) + launchProgram.numExperts)] = row;
-        if (row != launchProgram.routesPerBatch) {
-            freeTemps();
-            return make_error("cuda moe_gather routed row count mismatch");
-        }
-    }
-
-    auto copyOffsets = cuda_check(
-        cudaMemcpyAsync(
-            offsets,
-            hostOffsets.data(),
-            hostOffsets.size() * sizeof(int32_t),
-            cudaMemcpyHostToDevice,
-            context.stream),
-        "cudaMemcpyAsync moe_gather offsets");
-    if (!copyOffsets) {
-        freeTemps();
-        return make_error(copyOffsets.error());
-    }
-    auto copyCursors = cuda_check(
-        cudaMemcpyAsync(
-            cursors,
-            hostCursors.data(),
-            hostCursors.size() * sizeof(int32_t),
-            cudaMemcpyHostToDevice,
-            context.stream),
-        "cudaMemcpyAsync moe_gather cursors");
-    if (!copyCursors) {
-        freeTemps();
-        return make_error(copyCursors.error());
-    }
-
-    int64_t offsetCount = launchProgram.batch * (launchProgram.numExperts + 1);
-    int offsetBlocks = static_cast<int>(
-        (offsetCount + cuda_kernel::kBlockSize - 1) /
+    int prefixBlocks = static_cast<int>(
+        (launchProgram.batch + cuda_kernel::kBlockSize - 1) /
         cuda_kernel::kBlockSize);
-    moe_gather_store_offsets_kernel<<<
-        offsetBlocks,
+    moe_gather_prefix_kernel<<<
+        prefixBlocks,
         cuda_kernel::kBlockSize,
         0,
-        context.stream>>>(launchProgram, offsets);
-    auto offsetLaunch = cuda_check(cudaGetLastError(), "cuda moe_gather offsets launch");
-    if (!offsetLaunch) {
+        context.stream>>>(launchProgram, counts, cursors);
+    auto prefixLaunch = cuda_check(cudaGetLastError(), "cuda moe_gather prefix launch");
+    if (!prefixLaunch) {
         freeTemps();
-        return make_error(offsetLaunch.error());
+        return make_error(prefixLaunch.error());
     }
 
     if (routeBlocks > 0) {
@@ -692,12 +591,6 @@ Result<void> launch_cuda_moe_gather(
             freeTemps();
             return make_error(copyLaunch.error());
         }
-    }
-
-    auto synced = cuda_check(cudaStreamSynchronize(context.stream), "cudaStreamSynchronize moe_gather");
-    if (!synced) {
-        freeTemps();
-        return make_error(synced.error());
     }
 
     freeTemps();

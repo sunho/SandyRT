@@ -133,7 +133,8 @@ __device__ int64_t load_index_at_storage(
 __device__ bool rope_position(
         DeviceRoPEProgram program,
         int64_t vector,
-        int* errorFlag,
+        ir::kernel_ir::OpId* validationFailure,
+        ir::kernel_ir::OpId op,
         int64_t* positionOut) {
     int64_t seqPosition = vector % program.seq;
     int64_t position = seqPosition;
@@ -146,7 +147,7 @@ __device__ bool rope_position(
     if (program.positionCount == 1) {
         position = load_index_at_storage(program.positionIds, 0) + seqPosition;
         if (position < 0) {
-            atomicExch(errorFlag, 1);
+            cuda_kernel::record_validation_failure(validationFailure, op);
             return false;
         }
         *positionOut = position;
@@ -161,7 +162,7 @@ __device__ bool rope_position(
     int64_t storage = cuda_kernel::storage_index(program.positionIds, positionIndex);
     position = load_index_at_storage(program.positionIds, storage);
     if (position < 0) {
-        atomicExch(errorFlag, 1);
+        cuda_kernel::record_validation_failure(validationFailure, op);
         return false;
     }
     *positionOut = position;
@@ -183,7 +184,10 @@ __device__ void store_rope_pair(
     cuda_kernel::store_float(program.output, secondLinear, first * s + second * c);
 }
 
-__global__ void rope_kernel(DeviceRoPEProgram program, int* errorFlag) {
+__global__ void rope_kernel(
+        DeviceRoPEProgram program,
+        ir::kernel_ir::OpId* validationFailure,
+        ir::kernel_ir::OpId op) {
     int64_t rotatedPairs = program.rotaryDim / 2;
     int64_t skippedPairs = (program.dim - program.rotaryDim) / 2;
     int64_t workPerVector = rotatedPairs + skippedPairs;
@@ -219,7 +223,7 @@ __global__ void rope_kernel(DeviceRoPEProgram program, int* errorFlag) {
 
     int64_t pair = offset;
     int64_t position = 0;
-    if (!rope_position(program, vector, errorFlag, &position))
+    if (!rope_position(program, vector, validationFailure, op, &position))
         return;
 
     if (program.splitHalf) {
@@ -271,32 +275,6 @@ Result<void> launch_cuda_rope(
     if (blockCount > std::numeric_limits<int>::max())
         return make_error("cuda rope block count exceeds grid limit");
 
-    int* errorFlag = nullptr;
-    auto allocated = cuda_malloc_stream_ordered(
-        &errorFlag,
-        sizeof(int),
-        context.stream,
-        "cudaMallocAsync rope error flag");
-    if (!allocated)
-        return make_error(allocated.error());
-    auto freeFlag = [&]() {
-        if (errorFlag) {
-            (void)cuda_free_stream_ordered(
-                errorFlag,
-                context.stream,
-                "cudaFreeAsync rope error flag");
-            errorFlag = nullptr;
-        }
-    };
-
-    auto cleared = cuda_check(
-        cudaMemsetAsync(errorFlag, 0, sizeof(int), context.stream),
-        "cudaMemsetAsync rope error flag");
-    if (!cleared) {
-        freeFlag();
-        return make_error(cleared.error());
-    }
-
     Result<void> launched;
     bool usedJit = false;
     if (program.jitVariants) {
@@ -315,26 +293,27 @@ Result<void> launch_cuda_rope(
                     accesses[0], accesses[1], accesses[2]);
             });
         if (!jit && !program.jitFallbackOnError) {
-            freeFlag();
             return make_error(jit.error());
         }
         if (jit) {
             usedJit = true;
             auto x = pack_jit_tensor_arg(launchProgram.x);
             auto output = pack_jit_tensor_arg(launchProgram.output);
-            if (!x || !output) { freeFlag(); return make_error(!x ? x.error() : output.error()); }
+            if (!x || !output) return make_error(!x ? x.error() : output.error());
             SandyRoPEParams params{};
             params.input = x.take();
             params.output = output.take();
             if (launchProgram.hasPositionIds) {
                 auto positions = pack_jit_tensor_arg(launchProgram.positionIds);
-                if (!positions) { freeFlag(); return make_error(positions.error()); }
+                if (!positions) return make_error(positions.error());
                 params.positions = positions.take();
             }
             params.seq = launchProgram.seq; params.dim = launchProgram.dim;
             params.rotaryDim = launchProgram.rotaryDim; params.vectors = launchProgram.vectors;
             params.positionCount = launchProgram.positionCount;
-            params.theta = launchProgram.theta; params.errorFlag = errorFlag;
+            params.theta = launchProgram.theta;
+            params.validationFailure = context.validationFailure;
+            params.op = context.op;
             void* arguments[] = {&params};
             launched = (*jit)->launch(
                 dim3(static_cast<unsigned>(blockCount)), dim3(cuda_kernel::kBlockSize),
@@ -343,37 +322,12 @@ Result<void> launch_cuda_rope(
     }
     if (!usedJit) {
         rope_kernel<<<static_cast<int>(blockCount), cuda_kernel::kBlockSize, 0, context.stream>>>(
-            launchProgram, errorFlag);
+            launchProgram, context.validationFailure, context.op);
         launched = cuda_check(cudaGetLastError(), "cuda rope launch");
     }
     if (!launched) {
-        freeFlag();
         return make_error(launched.error());
     }
-
-    int hostError = 0;
-    auto copied = cuda_check(
-        cudaMemcpyAsync(
-            &hostError,
-            errorFlag,
-            sizeof(int),
-            cudaMemcpyDeviceToHost,
-            context.stream),
-        "cudaMemcpyAsync rope error flag");
-    if (!copied) {
-        freeFlag();
-        return make_error(copied.error());
-    }
-
-    auto synced = cuda_check(cudaStreamSynchronize(context.stream), "cudaStreamSynchronize rope");
-    if (!synced) {
-        freeFlag();
-        return make_error(synced.error());
-    }
-
-    freeFlag();
-    if (hostError != 0)
-        return make_error("cuda rope position_ids must be non-negative");
     return {};
 }
 

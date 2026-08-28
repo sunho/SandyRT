@@ -19,8 +19,8 @@ extern "C" __global__ void sandy_jit_gather(SandyGatherParams params) {
         SandyGatherIdsAccess>(
         params.ids, idLinear);
     if (tokenId < 0 || tokenId >= params.vocab) {
-        if (params.errorFlag)
-            atomicExch(params.errorFlag, 1);
+        if (params.validationFailure)
+            atomicCAS(params.validationFailure, 0xffffffffu, params.op);
         return;
     }
 

@@ -60,6 +60,9 @@ public:
     CudaGraphCacheStats graphCacheStats() const { return graphCacheStats_; }
 
 private:
+    Result<void> beginExecutableRun() override;
+    Result<void> endExecutableRun() override;
+    void abortExecutableRun() override;
     Result<void> executeCommands(
         DeviceCompiledGraphId graph,
         std::span<const DeviceRunCommand> commands,
@@ -131,6 +134,8 @@ private:
     Result<void> ensure_stream();
     Result<void> ensure_cublas_handle();
     Result<void> ensure_async_memory_pool();
+    Result<void> begin_validation();
+    Result<void> end_validation();
     Result<void> set_device() const;
     Result<void> run_current(
         DeviceCompiledGraphId graph,
@@ -160,6 +165,8 @@ private:
     int cudaDevice_ = 0;
     cudaStream_t stream_ = nullptr;
     cublasHandle_t cublasHandle_ = nullptr;
+    ir::kernel_ir::OpId* validationFailure_ = nullptr;
+    bool executableRunActive_ = false;
     cudaDeviceProp deviceProps_{};
     std::string initializationError_;
     bool asyncMemoryPoolConfigured_ = false;

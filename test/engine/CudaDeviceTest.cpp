@@ -1904,7 +1904,9 @@ TEST(CudaDeviceTest, RunGatherReportsOutOfRangeId) {
     };
     auto run = device.run(*compiled, op->id(), inputs, outputs);
     ASSERT_FALSE(run);
-    EXPECT_NE(run.error().find("embedding id out of range"), std::string::npos);
+    EXPECT_NE(
+        run.error().find("validation failed at op %" + std::to_string(op->id())),
+        std::string::npos);
 }
 
 TEST(CudaDeviceTest, RunMatMulF32) {
@@ -2588,7 +2590,9 @@ TEST(CudaDeviceTest, RunMoeGatherRejectsInvalidExpertId) {
     };
     auto run = device.run(*compiled, op->id(), inputs, outputs);
     ASSERT_FALSE(run);
-    EXPECT_NE(run.error().find("expert id out of range"), std::string::npos);
+    EXPECT_NE(
+        run.error().find("validation failed at op %" + std::to_string(op->id())),
+        std::string::npos);
 }
 
 TEST(CudaDeviceTest, RunMoeScatterSumF32Unbatched) {
@@ -2928,7 +2932,9 @@ TEST(CudaDeviceTest, RunMoeScatterSumRejectsInvalidTokenId) {
     };
     auto run = device.run(*compiled, op->id(), inputs, outputs);
     ASSERT_FALSE(run);
-    EXPECT_NE(run.error().find("token id out of range"), std::string::npos);
+    EXPECT_NE(
+        run.error().find("validation failed at op %" + std::to_string(op->id())),
+        std::string::npos);
 }
 
 TEST(CudaDeviceTest, RunMoeMatMulF32BatchedGroupedExperts) {
@@ -4468,7 +4474,9 @@ TEST(CudaDeviceTest, RunRoPERejectsNegativePositionIds) {
     };
     auto run = device.run(*compiled, op->id(), inputs, outputs);
     ASSERT_FALSE(run);
-    EXPECT_NE(run.error().find("position_ids must be non-negative"), std::string::npos);
+    EXPECT_NE(
+        run.error().find("validation failed at op %" + std::to_string(op->id())),
+        std::string::npos);
 }
 
 TEST(CudaDeviceTest, RunRMSNormF32WithWeight) {

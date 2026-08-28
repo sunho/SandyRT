@@ -110,6 +110,9 @@ public:
     virtual Result<TensorBufferPtr> read(DevicePagedTensorView src);
 
 protected:
+    virtual Result<void> beginExecutableRun();
+    virtual Result<void> endExecutableRun();
+    virtual void abortExecutableRun();
     virtual Result<void> executeCommands(
         DeviceCompiledGraphId graph,
         std::span<const DeviceRunCommand> commands,

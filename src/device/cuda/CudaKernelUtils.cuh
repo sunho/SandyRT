@@ -13,6 +13,17 @@ constexpr int kMaxRank = 8;
 constexpr int kMaxInputs = 8;
 constexpr int kBlockSize = 256;
 
+__device__ inline void record_validation_failure(
+        ir::kernel_ir::OpId* failure,
+        ir::kernel_ir::OpId op) {
+    if (!failure)
+        return;
+    atomicCAS(
+        reinterpret_cast<unsigned int*>(failure),
+        static_cast<unsigned int>(ir::kernel_ir::kInvalidOpId),
+        static_cast<unsigned int>(op));
+}
+
 enum class AccessKind : int {
     Contiguous,
     Strided,

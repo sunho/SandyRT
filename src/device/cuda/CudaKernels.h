@@ -41,6 +41,7 @@ struct CudaLaunchContext {
     cudaStream_t stream = nullptr;
     cublasHandle_t cublas = nullptr;
     ir::kernel_ir::OpId op = ir::kernel_ir::kInvalidOpId;
+    ir::kernel_ir::OpId* validationFailure = nullptr;
     std::span<const CudaDeviceBufferView> inputs;
     std::span<const CudaDeviceBufferView> outputs;
     const cudaDeviceProp* deviceProps = nullptr;

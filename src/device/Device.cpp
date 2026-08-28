@@ -238,6 +238,14 @@ struct BufferCleanup {
     }
 };
 
+struct RunCleanup {
+    std::function<void()> cleanup;
+    ~RunCleanup() {
+        if (cleanup)
+            cleanup();
+    }
+};
+
 } // namespace
 
 DeviceExecutable::DeviceExecutable(
@@ -340,6 +348,11 @@ Result<void> Device::runExecutable(
     for (auto& [value, view] : dynamicScratch->second)
         state.values[value] = std::move(view);
 
+    auto begun = beginExecutableRun();
+    if (!begun)
+        return make_error(begun.error());
+    RunCleanup runCleanup{[this] { abortExecutableRun(); }};
+
     std::unordered_set<ValueId> exports(
         executable.desc_.exports.begin(), executable.desc_.exports.end());
     std::vector<DeviceRunCommand> commands;
@@ -421,8 +434,22 @@ Result<void> Device::runExecutable(
         }
         commands.push_back(std::move(command));
     }
-    return flushCommands();
+    auto flushed = flushCommands();
+    if (!flushed)
+        return make_error(flushed.error());
+    runCleanup.cleanup = {};
+    return endExecutableRun();
 }
+
+Result<void> Device::beginExecutableRun() {
+    return {};
+}
+
+Result<void> Device::endExecutableRun() {
+    return {};
+}
+
+void Device::abortExecutableRun() {}
 
 std::unique_ptr<DeviceScratchAllocator> Device::createScratchAllocator() {
     return nullptr;

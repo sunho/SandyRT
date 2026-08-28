@@ -8,5 +8,6 @@ struct SandyGatherParams {
     SandyJitTensorArg output;
     int64_t vocab;
     int64_t hidden;
-    int32_t* errorFlag;
+    uint32_t* validationFailure;
+    uint32_t op;
 };

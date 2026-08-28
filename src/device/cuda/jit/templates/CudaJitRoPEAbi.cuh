@@ -6,5 +6,6 @@ struct SandyRoPEParams {
     SandyJitTensorArg output;
     int64_t seq, dim, rotaryDim, vectors, positionCount;
     float theta;
-    int32_t* errorFlag;
+    uint32_t* validationFailure;
+    uint32_t op;
 };

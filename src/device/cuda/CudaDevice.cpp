@@ -110,8 +110,17 @@ CudaDevice::CudaDevice(int cudaDevice)
         return;
     }
     auto cublas = ensure_cublas_handle();
-    if (!cublas)
+    if (!cublas) {
         initializationError_ = cublas.error();
+        return;
+    }
+    auto validation = cudaMalloc(
+        reinterpret_cast<void**>(&validationFailure_),
+        sizeof(*validationFailure_));
+    if (validation != cudaSuccess)
+        initializationError_ =
+            std::string("cudaMalloc validation failure flag: ") +
+            cudaGetErrorString(validation);
 }
 
 CudaDevice::~CudaDevice() {
@@ -125,6 +134,11 @@ CudaDevice::~CudaDevice() {
 
     pagedTensors_.clear();
     pagedPools_.clear();
+
+    if (validationFailure_) {
+        cudaFree(validationFailure_);
+        validationFailure_ = nullptr;
+    }
 
     if (stream_) {
         for (auto& item : buffers_) {
@@ -753,7 +767,72 @@ Result<void> CudaDevice::run(
     auto stream = ensure_stream();
     if (!stream)
         return make_error(stream.error());
-    return run_current(graphId, opId, inputs, outputs);
+    if (executableRunActive_)
+        return run_current(graphId, opId, inputs, outputs);
+    auto begun = begin_validation();
+    if (!begun)
+        return make_error(begun.error());
+    auto ran = run_current(graphId, opId, inputs, outputs);
+    if (!ran)
+        return make_error(ran.error());
+    return end_validation();
+}
+
+Result<void> CudaDevice::begin_validation() {
+    if (!validationFailure_)
+        return make_error("cuda validation failure flag is not initialized");
+    return cuda_check(
+        cudaMemsetAsync(
+            validationFailure_,
+            0xff,
+            sizeof(*validationFailure_),
+            stream_),
+        "cudaMemsetAsync validation failure flag");
+}
+
+Result<void> CudaDevice::end_validation() {
+    ir::kernel_ir::OpId failure = ir::kernel_ir::kInvalidOpId;
+    auto copied = cuda_check(
+        cudaMemcpyAsync(
+            &failure,
+            validationFailure_,
+            sizeof(failure),
+            cudaMemcpyDeviceToHost,
+            stream_),
+        "cudaMemcpyAsync validation failure op");
+    if (!copied)
+        return make_error(copied.error());
+    auto synced = cuda_check(
+        cudaStreamSynchronize(stream_),
+        "cudaStreamSynchronize executable validation");
+    if (!synced)
+        return make_error(synced.error());
+    if (failure != ir::kernel_ir::kInvalidOpId)
+        return make_error(
+            "cuda executable validation failed at op %" +
+            std::to_string(failure));
+    return {};
+}
+
+Result<void> CudaDevice::beginExecutableRun() {
+    if (executableRunActive_)
+        return make_error("cuda executable run is already active");
+    auto begun = begin_validation();
+    if (!begun)
+        return make_error(begun.error());
+    executableRunActive_ = true;
+    return {};
+}
+
+Result<void> CudaDevice::endExecutableRun() {
+    if (!executableRunActive_)
+        return make_error("cuda executable run is not active");
+    executableRunActive_ = false;
+    return end_validation();
+}
+
+void CudaDevice::abortExecutableRun() {
+    executableRunActive_ = false;
 }
 
 bool CudaDevice::is_capture_eligible(
@@ -762,10 +841,7 @@ bool CudaDevice::is_capture_eligible(
     if (!command.bindingsFixed)
         return false;
     switch (kernel.kind) {
-        case ir::kernel_ir::OpKind::MoeGatherKernel:
         case ir::kernel_ir::OpKind::MoeMatMulKernel:
-        case ir::kernel_ir::OpKind::MoeScatterSumKernel:
-        case ir::kernel_ir::OpKind::RoPEKernel:
             return false;
         default:
             return true;
@@ -1055,6 +1131,7 @@ Result<void> CudaDevice::run_current(
         stream_,
         cublasHandle_,
         opId,
+        validationFailure_,
         std::span<const CudaDeviceBufferView>(inputViews.data(), inputViewCount),
         std::span<const CudaDeviceBufferView>(outputViews.data(), outputViewCount),
         kernel.kind == ir::kernel_ir::OpKind::AttentionKernel ? &deviceProps_ : nullptr,

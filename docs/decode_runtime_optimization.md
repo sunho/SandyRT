@@ -90,10 +90,11 @@ generic device runner batches commands and retains eager behavior as its default
 `CudaDevice` alone partitions that command stream into recordable and eager
 regions. The initial CUDA policy excludes commands with non-fixed bindings and
 CUDA implementations that perform host-dependent synchronization. In particular,
-grouped `MoeMatMulKernel` is eager; ordinary `MatMulKernel` is recorded through
-its normal cuBLAS calls. Current MoE gather/scatter and RoPE implementations are
-also eager because they copy validation or routing state to the host and
-synchronize the stream.
+grouped `MoeMatMulKernel` remains eager because it reads expert offsets on the
+host; ordinary `MatMulKernel` is recorded through its normal cuBLAS calls. MoE
+gather/scatter and RoPE are recordable when their bindings are fixed. MoE gather
+now computes its expert prefix offsets on the GPU, so routing does not require a
+host round trip before later commands can run.
 
 The CUDA stream and cuBLAS handle are initialized with `CudaDevice`, before any
 capture. Creating the handle outside capture does not exclude cuBLAS work:
@@ -120,6 +121,22 @@ allocations, so their boundary commands are eager; they can write into or read
 from fixed scratch around a captured interior region. Stable engine input/export
 slots are a later extension and will allow those boundary commands to join the
 graph without kernel-node parameter updates.
+
+## Executable-scoped CUDA validation
+
+Validation kernels no longer allocate an error buffer, copy it to the host, and
+synchronize after every operation. `CudaDevice` owns one persistent device-side
+failure slot with a stable address. At the start of a synchronous executable run
+the slot is reset to the invalid-op sentinel. A validating kernel atomically
+records its `OpId` on the first failure, and execution checks the slot once after
+all commands have been submitted. Direct single-op device execution uses the
+same mechanism with a one-op validation scope.
+
+The persistent address makes validation kernels safe to capture and replay in a
+CUDA Graph. Stream ordering ensures the final copy observes all earlier writes.
+This first implementation assumes that one `CudaDevice` does not execute two
+programs concurrently; asynchronous or concurrent execution will require a
+validation slot per in-flight executable instance.
 
 ## Synchronous device-executable implementation plan
 

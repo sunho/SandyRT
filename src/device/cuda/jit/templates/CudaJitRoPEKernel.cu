@@ -13,8 +13,8 @@ __device__ __forceinline__ int64_t sandy_rope_position(
         SandyRoPEPositionType, SandyRoPEPositionAccess>(p.positions, index);
     if (p.positionCount == 1)
         position += seqPosition;
-    if (position < 0)
-        atomicExch(p.errorFlag, 1);
+    if (position < 0 && p.validationFailure)
+        atomicCAS(p.validationFailure, 0xffffffffu, p.op);
     return position;
 }
 

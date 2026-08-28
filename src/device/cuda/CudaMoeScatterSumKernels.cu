@@ -158,7 +158,8 @@ __global__ void moe_scatter_sum_zero_output_kernel(DeviceMoeScatterSumProgram pr
 
 __global__ void moe_scatter_sum_f32_kernel(
         DeviceMoeScatterSumProgram program,
-        int* errorFlag) {
+        ir::kernel_ir::OpId* validationFailure,
+        ir::kernel_ir::OpId op) {
     int64_t linear = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (linear >= program.scatterWork)
         return;
@@ -170,7 +171,7 @@ __global__ void moe_scatter_sum_f32_kernel(
     int64_t metadataIndex = batch * program.rows + row;
     int64_t token = cuda_kernel::load_int(program.tokenIds, metadataIndex);
     if (token < 0 || token >= program.seq) {
-        atomicExch(errorFlag, 1);
+        cuda_kernel::record_validation_failure(validationFailure, op);
         return;
     }
 
@@ -184,7 +185,8 @@ __global__ void moe_scatter_sum_f32_kernel(
 __global__ void moe_scatter_sum_to_float_kernel(
         DeviceMoeScatterSumProgram program,
         float* accum,
-        int* errorFlag) {
+        ir::kernel_ir::OpId* validationFailure,
+        ir::kernel_ir::OpId op) {
     int64_t linear = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (linear >= program.scatterWork)
         return;
@@ -196,7 +198,7 @@ __global__ void moe_scatter_sum_to_float_kernel(
     int64_t metadataIndex = batch * program.rows + row;
     int64_t token = cuda_kernel::load_int(program.tokenIds, metadataIndex);
     if (token < 0 || token >= program.seq) {
-        atomicExch(errorFlag, 1);
+        cuda_kernel::record_validation_failure(validationFailure, op);
         return;
     }
 
@@ -215,29 +217,6 @@ __global__ void moe_scatter_sum_store_accum_kernel(
     cuda_kernel::store_float(program.output, linear, accum[linear]);
 }
 
-Result<int> copy_error_and_sync(
-        const CudaLaunchContext& context,
-        int* errorFlag,
-        const char* name) {
-    int hostError = 0;
-    auto copied = cuda_check(
-        cudaMemcpyAsync(
-            &hostError,
-            errorFlag,
-            sizeof(int),
-            cudaMemcpyDeviceToHost,
-            context.stream),
-        std::string("cudaMemcpyAsync moe_scatter_sum ") + name + " error flag");
-    if (!copied)
-        return make_error(copied.error());
-    auto synced = cuda_check(
-        cudaStreamSynchronize(context.stream),
-        std::string("cudaStreamSynchronize moe_scatter_sum ") + name);
-    if (!synced)
-        return make_error(synced.error());
-    return hostError;
-}
-
 } // namespace
 
 Result<void> launch_cuda_moe_scatter_sum(const CudaLaunchContext& context) {
@@ -250,7 +229,6 @@ Result<void> launch_cuda_moe_scatter_sum(const CudaLaunchContext& context) {
         return make_error(packed.error());
     auto program = packed.take();
 
-    int* errorFlag = nullptr;
     float* accum = nullptr;
     auto freeTemps = [&]() {
         if (accum) {
@@ -260,29 +238,7 @@ Result<void> launch_cuda_moe_scatter_sum(const CudaLaunchContext& context) {
                 "cudaFreeAsync moe_scatter_sum accum");
             accum = nullptr;
         }
-        if (errorFlag) {
-            (void)cuda_free_stream_ordered(
-                errorFlag,
-                context.stream,
-                "cudaFreeAsync moe_scatter_sum error flag");
-            errorFlag = nullptr;
-        }
     };
-
-    auto allocError = cuda_malloc_stream_ordered(
-        &errorFlag,
-        sizeof(int),
-        context.stream,
-        "cudaMallocAsync moe_scatter_sum error flag");
-    if (!allocError)
-        return make_error(allocError.error());
-    auto clearError = cuda_check(
-        cudaMemsetAsync(errorFlag, 0, sizeof(int), context.stream),
-        "cudaMemsetAsync moe_scatter_sum error flag");
-    if (!clearError) {
-        freeTemps();
-        return make_error(clearError.error());
-    }
 
     auto outputBlocks = block_count(program.outputNumel, "output");
     if (!outputBlocks) {
@@ -314,7 +270,10 @@ Result<void> launch_cuda_moe_scatter_sum(const CudaLaunchContext& context) {
                 scatterBlocks.take(),
                 cuda_kernel::kBlockSize,
                 0,
-                context.stream>>>(program, errorFlag);
+                context.stream>>>(
+                    program,
+                    context.validationFailure,
+                    context.op);
             auto scatterLaunch = cuda_check(cudaGetLastError(), "cuda moe_scatter_sum f32 launch");
             if (!scatterLaunch) {
                 freeTemps();
@@ -322,14 +281,7 @@ Result<void> launch_cuda_moe_scatter_sum(const CudaLaunchContext& context) {
             }
         }
 
-        auto hostError = copy_error_and_sync(context, errorFlag, "f32");
-        if (!hostError) {
-            freeTemps();
-            return make_error(hostError.error());
-        }
         freeTemps();
-        if (hostError.take() != 0)
-            return make_error("moe_scatter_sum token id out of range");
         return {};
     }
 
@@ -361,22 +313,16 @@ Result<void> launch_cuda_moe_scatter_sum(const CudaLaunchContext& context) {
             scatterBlocks.take(),
             cuda_kernel::kBlockSize,
             0,
-            context.stream>>>(program, accum, errorFlag);
+            context.stream>>>(
+                program,
+                accum,
+                context.validationFailure,
+                context.op);
         auto scatterLaunch = cuda_check(cudaGetLastError(), "cuda moe_scatter_sum bf16 accum launch");
         if (!scatterLaunch) {
             freeTemps();
             return make_error(scatterLaunch.error());
         }
-    }
-
-    auto hostError = copy_error_and_sync(context, errorFlag, "bf16");
-    if (!hostError) {
-        freeTemps();
-        return make_error(hostError.error());
-    }
-    if (hostError.take() != 0) {
-        freeTemps();
-        return make_error("moe_scatter_sum token id out of range");
     }
 
     if (program.outputNumel > 0) {
@@ -390,14 +336,6 @@ Result<void> launch_cuda_moe_scatter_sum(const CudaLaunchContext& context) {
             freeTemps();
             return make_error(storeLaunch.error());
         }
-    }
-
-    auto synced = cuda_check(
-        cudaStreamSynchronize(context.stream),
-        "cudaStreamSynchronize moe_scatter_sum store");
-    if (!synced) {
-        freeTemps();
-        return make_error(synced.error());
     }
 
     freeTemps();
