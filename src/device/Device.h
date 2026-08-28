@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <memory>
 #include <span>
+#include <unordered_set>
 #include <vector>
 
 namespace sandy::device {
@@ -39,6 +40,7 @@ public:
     bool hasFixedScratch(ir::kernel_ir::ValueId value) const {
         return fixedViews_.contains(value);
     }
+    bool inputsAndOutputsFixed(const ir::kernel_ir::Op& op) const;
     size_t fixedScratchValueCount() const { return fixedViews_.size(); }
 
 private:
@@ -56,6 +58,7 @@ private:
     DeviceExecutableDesc desc_;
     DeviceBufferId fixedScratchBuffer_ = 0;
     std::unordered_map<ir::kernel_ir::ValueId, DeviceTensorView> fixedViews_;
+    std::unordered_set<ir::kernel_ir::ValueId> fixedBindingValues_;
 };
 
 using DeviceExecutablePtr = std::shared_ptr<DeviceExecutable>;
@@ -107,6 +110,10 @@ public:
     virtual Result<TensorBufferPtr> read(DevicePagedTensorView src);
 
 protected:
+    virtual Result<void> executeCommands(
+        DeviceCompiledGraphId graph,
+        std::span<const DeviceRunCommand> commands,
+        const std::function<void(ir::kernel_ir::OpId, double)>& profileKernel);
     virtual Result<DeviceCompiledGraphId> compileExecutableGraph(
         const ir::kernel_ir::Graph& graph,
         std::span<const ir::kernel_ir::OpId> ops);

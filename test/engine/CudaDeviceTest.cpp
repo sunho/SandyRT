@@ -812,6 +812,215 @@ TEST(CudaDeviceTest, EngineExecutableUsesDeviceOwnedFixedScratch) {
     EXPECT_NEAR(values[2], std::tanh(1.0f), 1.0e-6f);
 }
 
+TEST(CudaDeviceTest, EngineExecutableCapturesAndReplaysFixedScratchRegion) {
+    if (auto reason = cuda_device_skip_reason(); !reason.empty())
+        GTEST_SKIP() << reason;
+    sandy::ir::mid_ir::register_all_ops();
+
+    sandy::ir::mid_ir::Graph graph;
+    sandy::ir::mid_ir::Builder builder(graph);
+    auto* input = builder.createInput(
+        0, sandy::core::Shape({3}), sandy::core::DType::F32);
+    auto* first = builder.createTanh(input);
+    auto* middle = builder.createReLU(first);
+    auto* output = builder.createTanh(middle);
+    sandy::ir::mid_ir::Value* outputs[] = {output};
+    builder.setOutputs(outputs);
+
+    auto cuda = std::make_unique<sandy::device::CudaDevice>();
+    auto* cudaPtr = cuda.get();
+    std::vector<std::unique_ptr<sandy::device::Device>> devices;
+    devices.push_back(std::move(cuda));
+    sandy::engine::Engine engine(std::move(devices));
+    auto compiled = engine.compile(graph);
+    ASSERT_TRUE(compiled) << compiled.error();
+
+    std::vector<sandy::engine::TensorBufferPtr> firstInputs = {
+        make_f32_buffer("x", sandy::core::Shape({3}), {-1.0f, 0.0f, 1.0f}),
+    };
+    auto firstResult = engine.run(**compiled, firstInputs, sandy::engine::TensorMap{});
+    ASSERT_TRUE(firstResult) << firstResult.error();
+
+    auto afterCapture = cudaPtr->graphCacheStats();
+    EXPECT_EQ(afterCapture.captures, 1u);
+    EXPECT_EQ(afterCapture.replays, 0u);
+    EXPECT_EQ(afterCapture.captureFailures, 0u);
+
+    std::vector<sandy::engine::TensorBufferPtr> secondInputs = {
+        make_f32_buffer("x", sandy::core::Shape({3}), {2.0f, -2.0f, 0.5f}),
+    };
+    auto secondResult = engine.run(**compiled, secondInputs, sandy::engine::TensorMap{});
+    ASSERT_TRUE(secondResult) << secondResult.error();
+    ASSERT_EQ(secondResult->size(), 1u);
+    auto access = (*secondResult)[0]->access();
+    ASSERT_TRUE(access) << access.error();
+    EXPECT_NEAR(
+        read_f32(access->data(), 0),
+        std::tanh(std::tanh(2.0f)),
+        1.0e-5f);
+    EXPECT_FLOAT_EQ(read_f32(access->data(), 1), 0.0f);
+    EXPECT_NEAR(
+        read_f32(access->data(), 2),
+        std::tanh(std::tanh(0.5f)),
+        1.0e-5f);
+
+    auto afterReplay = cudaPtr->graphCacheStats();
+    EXPECT_EQ(afterReplay.captures, 1u);
+    EXPECT_EQ(afterReplay.replays, 1u);
+    EXPECT_EQ(afterReplay.captureFailures, 0u);
+
+    size_t profiledKernels = 0;
+    sandy::engine::EngineRunOptions profileOptions;
+    profileOptions.profileKernel = [&](const sandy::engine::EngineProfileEvent&) {
+        ++profiledKernels;
+    };
+    auto profiledResult = engine.run(
+        **compiled,
+        secondInputs,
+        sandy::engine::TensorMap{},
+        &profileOptions);
+    ASSERT_TRUE(profiledResult) << profiledResult.error();
+    EXPECT_GT(profiledKernels, 0u);
+    EXPECT_EQ(cudaPtr->graphCacheStats().replays, 1u);
+}
+
+TEST(CudaDeviceTest, EngineExecutableCapturesRegularCublasMatMul) {
+    if (auto reason = cuda_device_skip_reason(); !reason.empty())
+        GTEST_SKIP() << reason;
+    sandy::ir::mid_ir::register_all_ops();
+
+    sandy::ir::mid_ir::Graph graph;
+    sandy::ir::mid_ir::Builder builder(graph);
+    auto* input = builder.createInput(
+        0, sandy::core::Shape({1, 3}), sandy::core::DType::F32);
+    auto* weight = builder.createWeight(
+        "weight", sandy::core::Shape({3, 2}), sandy::core::DType::F32);
+    auto* fixedInput = builder.createReLU(input);
+    auto* multiplied = builder.createMatMul(fixedInput, weight);
+    auto* output = builder.createTanh(multiplied);
+    sandy::ir::mid_ir::Value* outputs[] = {output};
+    builder.setOutputs(outputs);
+
+    auto cuda = std::make_unique<sandy::device::CudaDevice>();
+    auto* cudaPtr = cuda.get();
+    std::vector<std::unique_ptr<sandy::device::Device>> devices;
+    devices.push_back(std::move(cuda));
+    sandy::engine::Engine engine(std::move(devices));
+    auto compiled = engine.compile(graph);
+    ASSERT_TRUE(compiled) << compiled.error();
+
+    sandy::engine::TensorMap hostWeights;
+    hostWeights["weight"] = make_f32_buffer(
+        "weight",
+        sandy::core::Shape({3, 2}),
+        {1.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f});
+    auto deviceWeights = engine.loadWeights(**compiled, hostWeights);
+    ASSERT_TRUE(deviceWeights) << deviceWeights.error();
+
+    std::vector<sandy::engine::TensorBufferPtr> firstInputs = {
+        make_f32_buffer("x", sandy::core::Shape({1, 3}), {-1.0f, 2.0f, 3.0f}),
+    };
+    auto firstResult = engine.run(**compiled, firstInputs, **deviceWeights);
+    ASSERT_TRUE(firstResult) << firstResult.error();
+    EXPECT_EQ(cudaPtr->graphCacheStats().captures, 1u);
+    EXPECT_EQ(cudaPtr->graphCacheStats().captureFailures, 0u);
+
+    std::vector<sandy::engine::TensorBufferPtr> secondInputs = {
+        make_f32_buffer("x", sandy::core::Shape({1, 3}), {1.0f, 0.0f, 1.0f}),
+    };
+    auto secondResult = engine.run(**compiled, secondInputs, **deviceWeights);
+    ASSERT_TRUE(secondResult) << secondResult.error();
+    ASSERT_EQ(secondResult->size(), 1u);
+    auto access = (*secondResult)[0]->access();
+    ASSERT_TRUE(access) << access.error();
+    EXPECT_NEAR(read_f32(access->data(), 0), std::tanh(2.0f), 1.0e-5f);
+    EXPECT_NEAR(read_f32(access->data(), 1), std::tanh(1.0f), 1.0e-5f);
+    EXPECT_EQ(cudaPtr->graphCacheStats().captures, 1u);
+    EXPECT_EQ(cudaPtr->graphCacheStats().replays, 1u);
+    EXPECT_EQ(cudaPtr->graphCacheStats().captureFailures, 0u);
+
+    auto deallocated = engine.deallocWeights(**deviceWeights);
+    ASSERT_TRUE(deallocated) << deallocated.error();
+}
+
+TEST(CudaDeviceTest, ExecutableKeepsGroupedMoeMatMulEager) {
+    if (auto reason = cuda_device_skip_reason(); !reason.empty())
+        GTEST_SKIP() << reason;
+    namespace kir = sandy::ir::kernel_ir;
+
+    kir::Graph graph;
+    auto x = graph.addValue(tensor_type({1, 2}));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 0, ""}, x);
+    auto offsets = graph.addValue(tensor_type({2}, sandy::core::DType::I32));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 1, ""}, offsets);
+    auto weight = graph.addValue(tensor_type({1, 1, 2}));
+    graph.addOp<kir::InputOp>(
+        kir::InputSource{kir::InputSourceKind::Argument, 2, ""}, weight);
+    auto groupedOutput = graph.addValue(tensor_type({1, 1}));
+    auto* grouped = graph.addOp<kir::MoeMatMulKernelOp>(
+        x, offsets, weight, groupedOutput, true);
+    auto output = graph.addValue(tensor_type({1, 1}));
+    auto* final = graph.addOp<kir::ElementwiseKernelOp>(
+        std::vector<kir::ElementwiseInput>{
+            {groupedOutput, kir::BroadcastMode::None},
+        },
+        output,
+        1,
+        std::vector<kir::ScalarNode>{
+            {0, kir::ScalarOp::Load, sandy::core::DType::F32, 0, 0.0, {}},
+            {1, kir::ScalarOp::Tanh, sandy::core::DType::F32, 0, 0.0, {0}},
+        });
+    graph.setOutputs({output});
+    ASSERT_TRUE(graph.verify());
+
+    sandy::device::CudaDevice device;
+    sandy::device::DeviceExecutableDesc desc;
+    desc.ops = {grouped->id(), final->id()};
+    desc.imports = {x, offsets, weight};
+    desc.stableImports = desc.imports;
+    desc.exports = {output};
+    auto executable = device.compileExecutable(graph, std::move(desc));
+    ASSERT_TRUE(executable) << executable.error();
+
+    auto xHost = make_f32_buffer("x", sandy::core::Shape({1, 2}), {1.0f, 2.0f});
+    auto offsetsHost = make_i32_buffer(
+        "offsets", sandy::core::Shape({2}), {0, 1});
+    auto weightHost = make_f32_buffer(
+        "weight", sandy::core::Shape({1, 1, 2}), {3.0f, 4.0f});
+    auto xBuffer = device.load(*xHost);
+    auto offsetsBuffer = device.load(*offsetsHost);
+    auto weightBuffer = device.load(*weightHost);
+    auto outputBuffer = device.alloc(
+        sandy::core::TensorDesc({1, 1}, sandy::core::DType::F32));
+    ASSERT_TRUE(xBuffer) << xBuffer.error();
+    ASSERT_TRUE(offsetsBuffer) << offsetsBuffer.error();
+    ASSERT_TRUE(weightBuffer) << weightBuffer.error();
+    ASSERT_TRUE(outputBuffer) << outputBuffer.error();
+
+    sandy::device::DeviceExecutableRunState state;
+    state.values[x] = tensor_view(device, *xBuffer, xHost->desc());
+    state.values[offsets] = tensor_view(device, *offsetsBuffer, offsetsHost->desc());
+    state.values[weight] = tensor_view(device, *weightBuffer, weightHost->desc());
+    state.values[output] = tensor_view(
+        device,
+        *outputBuffer,
+        sandy::core::TensorDesc({1, 1}, sandy::core::DType::F32));
+    for (const auto& value : graph.values()) {
+        state.tensorDescs.emplace(
+            value.id,
+            sandy::core::TensorDesc(value.type.shape, value.type.dtype));
+    }
+
+    auto ran = device.runExecutable(**executable, state);
+    ASSERT_TRUE(ran) << ran.error();
+    expect_f32_output(device, *outputBuffer, {std::tanh(11.0f)});
+    EXPECT_EQ(device.graphCacheStats().captures, 0u);
+    EXPECT_EQ(device.graphCacheStats().captureFailures, 0u);
+    EXPECT_GT(device.graphCacheStats().eagerRegions, 0u);
+}
+
 TEST(CudaDeviceTest, RunChainedElementwiseF32) {
     if (auto reason = cuda_device_skip_reason(); !reason.empty())
         GTEST_SKIP() << reason;

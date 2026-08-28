@@ -6,12 +6,12 @@ Reduce decode-side CPU overhead in two stages:
 
 1. Move decisions that depend only on KernelIR types and shapes out of the
    invocation path, beginning with layout aliasing and scratch placement.
-2. Replace per-op engine dispatch with multi-op device execution units that can
-   eventually be recorded and replayed as CUDA Graphs.
+2. Replace per-op engine dispatch with multi-op device execution units and
+   record fixed-binding CUDA regions for replay.
 
-This change implements only the KernelIR layout contract and compile-time
-static scratch pool. CUDA Graph capture and the execution-unit refactor remain
-follow-up work.
+The runtime now has the KernelIR layout contract, compile-time static scratch,
+and synchronous multi-op device executables. The first CUDA Graph layer records
+only command regions whose complete binding set has stable addresses.
 
 ## KernelIR layout contract
 
@@ -63,50 +63,50 @@ allocates standalone buffers for them and tracks their cross-node lifetime.
 Exported aliases recursively export their backing values so no exported view can
 refer to private executable scratch.
 
-## Multi-op execution and CUDA Graph direction
+## CUDA Graph fixed-binding implementation
 
-CUDA Graph capture requires an engine abstraction above one-op-at-a-time
-`Device::run`. The intended next layer is a compiled device execution unit:
+Binding stability is generic device information; CUDA recordability is backend
+policy. `DeviceExecutable` classifies values as fixed bindings when they are in
+the executable-owned fixed scratch allocation, are static weight imports, or
+are static aliases of another fixed binding. It exposes only
+`inputsAndOutputsFixed(op)`. It does not mention CUDA Graphs or exclude CUDA
+kernel kinds.
 
-1. Partition each device's KernelIR schedule into consecutive execution units.
-   Engine-owned operations such as cross-device transfers or paged-cache
-   mutation are explicit boundaries.
-2. Compile each unit with a binding schema describing its external inputs,
-   outputs, static scratch slots, dynamic scratch slots, and alias/view updates.
-3. Execute the unit through one device call. An eager unit loops over its kernels
-   internally; a capturable unit records or replays a CUDA Graph.
+Each resolved `DeviceRunCommand` carries the generic `bindingsFixed` result. The
+generic device runner batches commands and retains eager behavior as its default.
+`CudaDevice` alone partitions that command stream into recordable and eager
+regions. The initial CUDA policy excludes commands with non-fixed bindings and
+CUDA implementations that perform host-dependent synchronization. In particular,
+grouped `MoeMatMulKernel` is eager; ordinary `MatMulKernel` is recorded through
+its normal cuBLAS calls. Current MoE gather/scatter and RoPE implementations are
+also eager because they copy validation or routing state to the host and
+synchronize the stream.
 
-Kernel compilation should emit execution metadata rather than leaving capture
-eligibility to the engine. Kernels initially default to eager. Elementwise
-kernels are the first capture candidates when the shared
-`inputs_and_outputs_fixed` analysis proves that all bindings required by the
-unit have stable shapes and compatible storage. This metadata can later expand
-to matmul and other kernel families.
+The CUDA stream and cuBLAS handle are initialized with `CudaDevice`, before any
+capture. Creating the handle outside capture does not exclude cuBLAS work:
+`cublasGemmEx` calls issued between `cudaStreamBeginCapture` and
+`cudaStreamEndCapture` are recorded normally.
 
-A captured graph executable must be tied to the scratch lease whose device
-pointers it recorded. External input/output changes can be handled either by
-updating CUDA kernel-node parameters before replay or by binding stable staging
-slots; the former is the preferred first implementation because it avoids
-copies. The capture cache key must include the compiled unit, concrete dynamic
-shape signature, and scratch-pool slot. Cache misses execute/capture once;
-subsequent decode steps replay the graph.
+On the first invocation of a fixed region, CUDA begins stream capture, invokes
+the existing per-kernel launch functions to record the region, ends capture,
+instantiates `cudaGraphExec_t`, and launches it once for that invocation. There
+is no preliminary eager execution of the same request. Later invocations with
+the same binding signature call only `cudaGraphLaunch`. A signature contains
+the ordered op IDs and every fixed buffer/view identity, including scratch and
+weight buffer IDs, dtype, shape, strides, and storage offset.
 
-The engine should ultimately orchestrate execution units and value ownership,
-not inspect individual kernel kinds. KernelIR compilation decides alias versus
-materialize and eager versus capturable; the device backend owns launches,
-capture, graph-node parameter updates, and replay.
+Capture failure disables that exact region/signature and falls back to eager
+execution without retrying every decode step. Per-kernel profiling also uses
+the eager path because replay has no individual host launch boundary.
 
-## Follow-up sequence
-
-1. Introduce `CompiledExecutionUnit` and a batched device run interface while
-   preserving eager behavior.
-2. Move alias-view binding records into the compiled unit's binding program so
-   the main engine loop no longer handles layout kinds.
-3. Add kernel execution metadata and `inputs_and_outputs_fixed` analysis.
-4. Capture the first fixed elementwise unit and cache graph executables per
-   scratch lease and invocation shape.
-5. Expand capture eligibility and benchmark 1024-token prefill plus 128-token
-   decode after a warm-up request.
+Fixed scratch is safe to capture because its allocation lives until the device
+executable is destroyed. CUDA graph objects are destroyed before that scratch
+buffer. Dynamic scratch remains allocated per invocation and any command that
+touches it is eager. New request inputs and engine exports currently use fresh
+allocations, so their boundary commands are eager; they can write into or read
+from fixed scratch around a captured interior region. Stable engine input/export
+slots are a later extension and will allow those boundary commands to join the
+graph without kernel-node parameter updates.
 
 ## Synchronous device-executable implementation plan
 
@@ -141,11 +141,12 @@ scratch allocation.
 9. Switch compiled engine programs to execute device nodes rather than dispatch
    individual kernels. Preserve the legacy per-op path only for manually built
    test programs during migration.
-10. Once eager multi-op parity is established, add CUDA Graph capture inside the
-    CUDA executable for eligible fixed-scratch command sequences. An executable
-    containing dynamic scratch or paged append initially remains eager.
+10. Batch resolved kernel commands so CUDA can capture consecutive fixed-binding
+    regions. Dynamic scratch and paged append split those regions but do not force
+    unrelated fixed-scratch commands in the executable to remain eager.
 
-The fixed scratch allocation, its placement layout, and future CUDA Graph
-objects are private members of the device executable. Destroying the executable
-releases them. Dynamic scratch has no extra compiled representation: runtime
-planning directly simulates the executable's command list.
+The fixed scratch allocation and placement layout are private members of the
+device executable. CUDA Graph objects are cached by the CUDA compiled graph and
+destroyed before the executable releases fixed scratch. Dynamic scratch has no
+extra compiled representation: runtime planning directly simulates the
+executable's command list.

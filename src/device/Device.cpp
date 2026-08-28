@@ -253,9 +253,21 @@ DeviceExecutable::DeviceExecutable(
 DeviceExecutable::~DeviceExecutable() {
     if (!owner_)
         return;
+    (void)owner_->destroyCompiledGraph(compiledGraph_);
     if (fixedScratchBuffer_ != 0)
         (void)owner_->dealloc(fixedScratchBuffer_);
-    (void)owner_->destroyCompiledGraph(compiledGraph_);
+}
+
+bool DeviceExecutable::inputsAndOutputsFixed(const ir::kernel_ir::Op& op) const {
+    for (auto value : op.inputs()) {
+        if (!fixedBindingValues_.contains(value))
+            return false;
+    }
+    for (auto value : op.outputs()) {
+        if (!fixedBindingValues_.contains(value))
+            return false;
+    }
+    return true;
 }
 
 Result<DeviceExecutablePtr> Device::compileExecutable(
@@ -274,7 +286,37 @@ Result<DeviceExecutablePtr> Device::compileExecutable(
         return make_error(scratch.error());
     executable->fixedScratchBuffer_ = scratch->first;
     executable->fixedViews_ = std::move(scratch->second);
+    for (const auto& [value, _] : executable->fixedViews_)
+        executable->fixedBindingValues_.insert(value);
+    for (auto value : executable->desc_.stableImports)
+        executable->fixedBindingValues_.insert(value);
+    for (auto opId : executable->desc_.ops) {
+        const auto& op = graph.op(opId);
+        if (!is_alias(op) || graph.value(op.outputs()[0]).type.shape.has_dynamic())
+            continue;
+        if (executable->fixedBindingValues_.contains(op.inputs()[0]))
+            executable->fixedBindingValues_.insert(op.outputs()[0]);
+    }
     return executable;
+}
+
+Result<void> Device::executeCommands(
+        DeviceCompiledGraphId graph,
+        std::span<const DeviceRunCommand> commands,
+        const std::function<void(ir::kernel_ir::OpId, double)>& profileKernel) {
+    for (const auto& command : commands) {
+        auto start = std::chrono::steady_clock::now();
+        auto ran = run(graph, command.op, command.inputs, command.outputs);
+        auto end = std::chrono::steady_clock::now();
+        if (!ran)
+            return make_error(ran.error());
+        if (profileKernel) {
+            profileKernel(
+                command.op,
+                std::chrono::duration<double, std::milli>(end - start).count());
+        }
+    }
+    return {};
 }
 
 Result<void> Device::runExecutable(
@@ -300,6 +342,15 @@ Result<void> Device::runExecutable(
 
     std::unordered_set<ValueId> exports(
         executable.desc_.exports.begin(), executable.desc_.exports.end());
+    std::vector<DeviceRunCommand> commands;
+    auto flushCommands = [&]() -> Result<void> {
+        if (commands.empty())
+            return {};
+        auto executed = executeCommands(
+            executable.compiledGraph_, commands, state.profileKernel);
+        commands.clear();
+        return executed;
+    };
     for (auto opId : executable.desc_.ops) {
         const auto& op = executable.graph_->op(opId);
         if (is_alias(op)) {
@@ -310,6 +361,9 @@ Result<void> Device::runExecutable(
             continue;
         }
         if (op.kind() == OpKind::PagedAppend) {
+            auto flushed = flushCommands();
+            if (!flushed)
+                return make_error(flushed.error());
             const auto& append = static_cast<const ir::kernel_ir::PagedAppendOp&>(op);
             auto cacheIt = state.values.find(append.cache());
             auto chunkIt = state.values.find(append.chunk());
@@ -350,32 +404,24 @@ Result<void> Device::runExecutable(
             state.values[output] = DeviceTensorView{*buffer, view.take()};
         }
 
-        std::vector<DeviceRunValue> inputs;
-        std::vector<DeviceRunValue> outputs;
+        DeviceRunCommand command;
+        command.op = op.id();
+        command.bindingsFixed = executable.inputsAndOutputsFixed(op);
         for (auto input : op.inputs()) {
             auto found = state.values.find(input);
             if (found == state.values.end())
                 return make_error("missing executable input value %" + std::to_string(input));
-            inputs.push_back(found->second);
+            command.inputs.push_back(found->second);
         }
         for (auto output : op.outputs()) {
             auto found = state.values.find(output);
             if (found == state.values.end())
                 return make_error("missing executable output value %" + std::to_string(output));
-            outputs.push_back(found->second);
+            command.outputs.push_back(found->second);
         }
-        auto start = std::chrono::steady_clock::now();
-        auto ran = run(executable.compiledGraph_, op.id(), inputs, outputs);
-        auto end = std::chrono::steady_clock::now();
-        if (!ran)
-            return make_error(ran.error());
-        if (state.profileKernel) {
-            state.profileKernel(
-                op.id(),
-                std::chrono::duration<double, std::milli>(end - start).count());
-        }
+        commands.push_back(std::move(command));
     }
-    return {};
+    return flushCommands();
 }
 
 std::unique_ptr<DeviceScratchAllocator> Device::createScratchAllocator() {

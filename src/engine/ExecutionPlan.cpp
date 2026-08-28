@@ -17,6 +17,18 @@ bool belongs_to_device_executable(const Op& op) {
         op.kind() != OpKind::DeviceTransfer;
 }
 
+bool is_stable_import(const ir::kernel_ir::Graph& graph, ValueId value) {
+    const auto& def = graph.value(value).def;
+    if (def.op == ir::kernel_ir::kInvalidOpId)
+        return false;
+    const auto& producer = graph.op(def.op);
+    if (producer.kind() != OpKind::Input)
+        return false;
+    const auto& input = static_cast<const ir::kernel_ir::InputOp&>(producer);
+    return input.source().kind == ir::kernel_ir::InputSourceKind::Weight &&
+        !graph.value(value).type.shape.has_dynamic();
+}
+
 } // namespace
 
 Result<KernelExecutionPlan> partitionKernelGraph(
@@ -110,6 +122,10 @@ Result<KernelExecutionPlan> partitionKernelGraph(
     for (size_t index = 0; index < plan.nodes.size(); ++index) {
         auto& desc = plan.nodes[index].executable;
         desc.imports.assign(imports[index].begin(), imports[index].end());
+        for (auto value : desc.imports) {
+            if (is_stable_import(graph, value))
+                desc.stableImports.push_back(value);
+        }
         desc.mutableImports.assign(mutableImports[index].begin(), mutableImports[index].end());
         desc.exports.assign(exports[index].begin(), exports[index].end());
     }

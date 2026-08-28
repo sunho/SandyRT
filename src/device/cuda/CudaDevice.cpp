@@ -68,11 +68,6 @@ Result<size_t> tensor_byte_size(const core::TensorDesc& desc) {
     return static_cast<size_t>(numel) * core::dtype_size(desc.dtype);
 }
 
-bool kernel_requires_cublas(ir::kernel_ir::OpKind kind) {
-    return kind == ir::kernel_ir::OpKind::MatMulKernel ||
-           kind == ir::kernel_ir::OpKind::MoeMatMulKernel;
-}
-
 bool environment_flag(const char* name, bool defaultValue) {
     const char* value = std::getenv(name);
     if (!value)
@@ -106,13 +101,27 @@ CudaDevice::CudaDevice(int cudaDevice)
     if (queried != cudaSuccess) {
         initializationError_ =
             std::string("cudaGetDeviceProperties: ") + cudaGetErrorString(queried);
+        return;
     }
+
+    auto stream = ensure_stream();
+    if (!stream) {
+        initializationError_ = stream.error();
+        return;
+    }
+    auto cublas = ensure_cublas_handle();
+    if (!cublas)
+        initializationError_ = cublas.error();
 }
 
 CudaDevice::~CudaDevice() {
     cudaSetDevice(cudaDevice_);
     if (stream_)
         cudaStreamSynchronize(stream_);
+
+    for (auto& [_, graph] : graphs_)
+        destroy_captured_regions(graph);
+    graphs_.clear();
 
     pagedTensors_.clear();
     pagedPools_.clear();
@@ -636,8 +645,11 @@ Result<DeviceBufferId> CudaDevice::alloc(core::TensorDesc desc) {
 }
 
 Result<void> CudaDevice::destroyCompiledGraph(DeviceCompiledGraphId graph) {
-    if (graphs_.erase(graph) == 0)
+    auto found = graphs_.find(graph);
+    if (found == graphs_.end())
         return make_error("cuda device compiled graph not found");
+    destroy_captured_regions(found->second);
+    graphs_.erase(found);
     return {};
 }
 
@@ -741,7 +753,228 @@ Result<void> CudaDevice::run(
     auto stream = ensure_stream();
     if (!stream)
         return make_error(stream.error());
+    return run_current(graphId, opId, inputs, outputs);
+}
 
+bool CudaDevice::is_capture_eligible(
+        const CudaDeviceKernel& kernel,
+        const DeviceRunCommand& command) const {
+    if (!command.bindingsFixed)
+        return false;
+    switch (kernel.kind) {
+        case ir::kernel_ir::OpKind::MoeGatherKernel:
+        case ir::kernel_ir::OpKind::MoeMatMulKernel:
+        case ir::kernel_ir::OpKind::MoeScatterSumKernel:
+        case ir::kernel_ir::OpKind::RoPEKernel:
+            return false;
+        default:
+            return true;
+    }
+}
+
+Result<CudaDevice::CudaGraphRegionKey> CudaDevice::graph_region_key(
+        std::span<const DeviceRunCommand> commands) const {
+    CudaGraphRegionKey key;
+    key.ops.reserve(commands.size());
+    for (const auto& command : commands) {
+        key.ops.push_back(command.op);
+        auto append = [&](const DeviceRunValue& value) -> Result<void> {
+            const auto* tensor = std::get_if<DeviceTensorView>(&value);
+            if (!tensor)
+                return make_error("cuda graph fixed binding must be a dense tensor view");
+            key.bindings.push_back(CudaGraphTensorBinding{
+                tensor->buffer,
+                tensor->view.desc.dtype,
+                tensor->view.desc.shape.dims(),
+                tensor->view.strides,
+                tensor->view.storageOffset,
+            });
+            return {};
+        };
+        for (const auto& input : command.inputs) {
+            auto added = append(input);
+            if (!added)
+                return make_error(added.error());
+        }
+        for (const auto& output : command.outputs) {
+            auto added = append(output);
+            if (!added)
+                return make_error(added.error());
+        }
+    }
+    return key;
+}
+
+Result<void> CudaDevice::execute_eager_commands(
+        DeviceCompiledGraphId graph,
+        std::span<const DeviceRunCommand> commands) {
+    for (const auto& command : commands) {
+        auto ran = run_current(graph, command.op, command.inputs, command.outputs);
+        if (!ran)
+            return make_error(ran.error());
+    }
+    return {};
+}
+
+Result<void> CudaDevice::capture_region(
+        DeviceCompiledGraphId graph,
+        std::span<const DeviceRunCommand> commands,
+        CudaCapturedRegion& region) {
+    auto disableAndRunEager = [&]() -> Result<void> {
+        region.captureDisabled = true;
+        graphCacheStats_.captureFailures++;
+        graphCacheStats_.eagerRegions++;
+        (void)cudaGetLastError();
+        return execute_eager_commands(graph, commands);
+    };
+
+    auto synchronized = cuda_check(
+        cudaStreamSynchronize(stream_),
+        "cudaStreamSynchronize before CUDA graph capture");
+    if (!synchronized)
+        return make_error(synchronized.error());
+
+    auto begun = cuda_check(
+        cudaStreamBeginCapture(stream_, cudaStreamCaptureModeThreadLocal),
+        "cudaStreamBeginCapture");
+    if (!begun)
+        return disableAndRunEager();
+
+    auto recorded = execute_eager_commands(graph, commands);
+    if (!recorded) {
+        cudaGraph_t abandoned = nullptr;
+        (void)cudaStreamEndCapture(stream_, &abandoned);
+        if (abandoned)
+            (void)cudaGraphDestroy(abandoned);
+        return disableAndRunEager();
+    }
+
+    auto ended = cuda_check(
+        cudaStreamEndCapture(stream_, &region.graph),
+        "cudaStreamEndCapture");
+    if (!ended) {
+        region.graph = nullptr;
+        return disableAndRunEager();
+    }
+
+    auto instantiated = cuda_check(
+        cudaGraphInstantiate(
+            &region.graphExec,
+            region.graph,
+            nullptr,
+            nullptr,
+            0),
+        "cudaGraphInstantiate");
+    if (!instantiated) {
+        (void)cudaGraphDestroy(region.graph);
+        region.graph = nullptr;
+        return disableAndRunEager();
+    }
+
+    auto launched = cuda_check(
+        cudaGraphLaunch(region.graphExec, stream_),
+        "cudaGraphLaunch after capture");
+    if (!launched)
+        return make_error(launched.error());
+    graphCacheStats_.captures++;
+    return {};
+}
+
+Result<void> CudaDevice::execute_recordable_region(
+        DeviceCompiledGraphId graph,
+        std::span<const DeviceRunCommand> commands) {
+    auto key = graph_region_key(commands);
+    if (!key)
+        return make_error(key.error());
+    auto graphIt = graphs_.find(graph);
+    if (graphIt == graphs_.end())
+        return make_error("cuda device compiled graph not found");
+
+    for (auto& region : graphIt->second.capturedRegions) {
+        if (region.key != *key)
+            continue;
+        if (region.captureDisabled) {
+            graphCacheStats_.eagerRegions++;
+            return execute_eager_commands(graph, commands);
+        }
+        auto replayed = cuda_check(
+            cudaGraphLaunch(region.graphExec, stream_),
+            "cudaGraphLaunch");
+        if (!replayed)
+            return make_error(replayed.error());
+        graphCacheStats_.replays++;
+        return {};
+    }
+
+    CudaCapturedRegion region;
+    region.key = key.take();
+    graphIt->second.capturedRegions.push_back(std::move(region));
+    return capture_region(
+        graph,
+        commands,
+        graphIt->second.capturedRegions.back());
+}
+
+Result<void> CudaDevice::executeCommands(
+        DeviceCompiledGraphId graph,
+        std::span<const DeviceRunCommand> commands,
+        const std::function<void(ir::kernel_ir::OpId, double)>& profileKernel) {
+    auto stream = ensure_stream();
+    if (!stream)
+        return make_error(stream.error());
+    if (profileKernel)
+        return Device::executeCommands(graph, commands, profileKernel);
+
+    auto graphIt = graphs_.find(graph);
+    if (graphIt == graphs_.end())
+        return make_error("cuda device compiled graph not found");
+
+    size_t begin = 0;
+    while (begin < commands.size()) {
+        auto kernel = graphIt->second.kernels.find(commands[begin].op);
+        if (kernel == graphIt->second.kernels.end())
+            return make_error("cuda device kernel op not found");
+        bool recordable = is_capture_eligible(kernel->second, commands[begin]);
+        size_t end = begin + 1;
+        while (end < commands.size()) {
+            auto next = graphIt->second.kernels.find(commands[end].op);
+            if (next == graphIt->second.kernels.end())
+                return make_error("cuda device kernel op not found");
+            if (is_capture_eligible(next->second, commands[end]) != recordable)
+                break;
+            ++end;
+        }
+
+        auto region = commands.subspan(begin, end - begin);
+        Result<void> executed = recordable
+            ? execute_recordable_region(graph, region)
+            : execute_eager_commands(graph, region);
+        if (!executed)
+            return make_error(executed.error());
+        if (!recordable)
+            graphCacheStats_.eagerRegions++;
+        begin = end;
+    }
+    return {};
+}
+
+void CudaDevice::destroy_captured_regions(CudaDeviceGraph& graph) {
+    for (auto& region : graph.capturedRegions) {
+        if (region.graphExec)
+            (void)cudaGraphExecDestroy(region.graphExec);
+        if (region.graph)
+            (void)cudaGraphDestroy(region.graph);
+        region.graphExec = nullptr;
+        region.graph = nullptr;
+    }
+    graph.capturedRegions.clear();
+}
+
+Result<void> CudaDevice::run_current(
+        DeviceCompiledGraphId graphId,
+        ir::kernel_ir::OpId opId,
+        std::span<const DeviceRunValue> inputs,
+        std::span<const DeviceRunValue> outputs) {
     auto graphIt = graphs_.find(graphId);
     if (graphIt == graphs_.end())
         return make_error("cuda device compiled graph not found");
@@ -754,12 +987,6 @@ Result<void> CudaDevice::run(
         return make_error("cuda device input arity mismatch");
     if (outputs.size() != kernel.outputCount)
         return make_error("cuda device output arity mismatch");
-
-    if (kernel_requires_cublas(kernel.kind)) {
-        auto cublas = ensure_cublas_handle();
-        if (!cublas)
-            return make_error(cublas.error());
-    }
 
     constexpr size_t kMaxRunInputs = 8;
     constexpr size_t kMaxRunOutputs = 4;

@@ -72,6 +72,7 @@ using DeviceRunValue = std::variant<
 struct DeviceExecutableDesc {
     std::vector<ir::kernel_ir::OpId> ops;
     std::vector<ir::kernel_ir::ValueId> imports;
+    std::vector<ir::kernel_ir::ValueId> stableImports;
     std::vector<ir::kernel_ir::ValueId> mutableImports;
     std::vector<ir::kernel_ir::ValueId> exports;
 };
@@ -80,6 +81,13 @@ struct DeviceExecutableRunState {
     std::unordered_map<ir::kernel_ir::ValueId, DeviceRunValue> values;
     std::unordered_map<ir::kernel_ir::ValueId, core::TensorDesc> tensorDescs;
     std::function<void(ir::kernel_ir::OpId, double)> profileKernel;
+};
+
+struct DeviceRunCommand {
+    ir::kernel_ir::OpId op = ir::kernel_ir::kInvalidOpId;
+    std::vector<DeviceRunValue> inputs;
+    std::vector<DeviceRunValue> outputs;
+    bool bindingsFixed = false;
 };
 
 struct DeviceScratchAllocation {
