@@ -129,6 +129,7 @@ private:
     struct CudaDeviceGraph {
         absl::flat_hash_map<ir::kernel_ir::OpId, CudaDeviceKernel> kernels;
         std::vector<CudaCapturedRegion> capturedRegions;
+        std::vector<void*> fixedScratchAllocations;
     };
 
     Result<void> ensure_stream();
@@ -158,6 +159,7 @@ private:
         std::span<const DeviceRunCommand> commands,
         CudaCapturedRegion& region);
     void destroy_captured_regions(CudaDeviceGraph& graph);
+    void destroy_fixed_scratch(CudaDeviceGraph& graph);
     Result<CudaDeviceBufferView> buffer_view(DeviceBufferId buffer, bool writable);
     Result<CudaDevicePagedTensorView> paged_tensor_view(DevicePagedTensorId tensor) const;
     Result<void> sync_paged_tensor_table(DevicePagedTensorId tensor);

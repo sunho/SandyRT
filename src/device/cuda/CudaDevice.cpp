@@ -128,8 +128,10 @@ CudaDevice::~CudaDevice() {
     if (stream_)
         cudaStreamSynchronize(stream_);
 
-    for (auto& [_, graph] : graphs_)
+    for (auto& [_, graph] : graphs_) {
         destroy_captured_regions(graph);
+        destroy_fixed_scratch(graph);
+    }
     graphs_.clear();
 
     pagedTensors_.clear();
@@ -595,8 +597,24 @@ Result<DeviceCompiledGraphId> CudaDevice::compileExecutableGraph(
             }
             case ir::kernel_ir::OpKind::MoeMatMulKernel: {
                 const auto& matmul = static_cast<const ir::kernel_ir::MoeMatMulKernelOp&>(op);
+                const auto& xShape = graph.value(op.inputs()[0]).type.shape;
+                const auto& weightShape = graph.value(op.inputs()[2]).type.shape;
+                int xRank = xShape.rank();
+                int64_t batch = xRank == 3 ? xShape.dim(0) : 1;
+                int64_t rows = xRank >= 2 ? xShape.dim(xRank - 2) : -1;
+                int64_t experts = weightShape.rank() == 3
+                    ? weightShape.dim(0)
+                    : -1;
+                constexpr int64_t kMaxRowBatchedRows = 64;
+                bool rowBatched =
+                    (xRank == 2 || xRank == 3) &&
+                    batch > 0 && rows > 0 && rows <= kMaxRowBatchedRows &&
+                    batch <= std::numeric_limits<int>::max() / rows &&
+                    experts > 0;
                 kernel.program = CudaMoeMatMulProgram{
                     matmul.transposeRhs(),
+                    rowBatched,
+                    rowBatched ? batch * rows : 0,
                 };
                 break;
             }
@@ -611,6 +629,29 @@ Result<DeviceCompiledGraphId> CudaDevice::compileExecutableGraph(
         }
 
         compiled.kernels[op.id()] = std::move(kernel);
+    }
+
+    for (auto& [_, kernel] : compiled.kernels) {
+        if (kernel.kind != ir::kernel_ir::OpKind::MoeMatMulKernel)
+            continue;
+        auto& program = std::get<CudaMoeMatMulProgram>(kernel.program);
+        if (!program.rowBatched)
+            continue;
+        size_t pointerBytes =
+            static_cast<size_t>(program.pointerCount) * sizeof(void*);
+        void* scratch = nullptr;
+        auto allocated = cuda_check(
+            cudaMalloc(&scratch, 3 * pointerBytes),
+            "cudaMalloc fixed moe_matmul pointer scratch");
+        if (!allocated) {
+            destroy_fixed_scratch(compiled);
+            return make_error(allocated.error());
+        }
+        compiled.fixedScratchAllocations.push_back(scratch);
+        auto** pointers = static_cast<void**>(scratch);
+        program.weightPointers = pointers;
+        program.inputPointers = pointers + program.pointerCount;
+        program.outputPointers = pointers + 2 * program.pointerCount;
     }
 
     auto id = nextGraphId_++;
@@ -663,6 +704,7 @@ Result<void> CudaDevice::destroyCompiledGraph(DeviceCompiledGraphId graph) {
     if (found == graphs_.end())
         return make_error("cuda device compiled graph not found");
     destroy_captured_regions(found->second);
+    destroy_fixed_scratch(found->second);
     graphs_.erase(found);
     return {};
 }
@@ -842,7 +884,7 @@ bool CudaDevice::is_capture_eligible(
         return false;
     switch (kernel.kind) {
         case ir::kernel_ir::OpKind::MoeMatMulKernel:
-            return false;
+            return std::get<CudaMoeMatMulProgram>(kernel.program).rowBatched;
         default:
             return true;
     }
@@ -1044,6 +1086,14 @@ void CudaDevice::destroy_captured_regions(CudaDeviceGraph& graph) {
         region.graph = nullptr;
     }
     graph.capturedRegions.clear();
+}
+
+void CudaDevice::destroy_fixed_scratch(CudaDeviceGraph& graph) {
+    for (void* allocation : graph.fixedScratchAllocations) {
+        if (allocation)
+            (void)cudaFree(allocation);
+    }
+    graph.fixedScratchAllocations.clear();
 }
 
 Result<void> CudaDevice::run_current(

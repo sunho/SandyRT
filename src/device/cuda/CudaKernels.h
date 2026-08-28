@@ -71,6 +71,11 @@ struct CudaMatMulProgram {
 
 struct CudaMoeMatMulProgram {
     bool transposeRhs = false;
+    bool rowBatched = false;
+    int64_t pointerCount = 0;
+    void** weightPointers = nullptr;
+    void** inputPointers = nullptr;
+    void** outputPointers = nullptr;
 };
 
 struct CudaGatherProgram {

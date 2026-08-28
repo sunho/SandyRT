@@ -89,12 +89,23 @@ Each resolved `DeviceRunCommand` carries the generic `bindingsFixed` result. The
 generic device runner batches commands and retains eager behavior as its default.
 `CudaDevice` alone partitions that command stream into recordable and eager
 regions. The initial CUDA policy excludes commands with non-fixed bindings and
-CUDA implementations that perform host-dependent synchronization. In particular,
-grouped `MoeMatMulKernel` remains eager because it reads expert offsets on the
-host; ordinary `MatMulKernel` is recorded through its normal cuBLAS calls. MoE
-gather/scatter and RoPE are recordable when their bindings are fixed. MoE gather
-now computes its expert prefix offsets on the GPU, so routing does not require a
-host round trip before later commands can run.
+CUDA implementations that perform host-dependent synchronization. General
+large-row `MoeMatMulKernel` uses the grouped-GEMM fallback and remains eager
+because cuBLAS requires its dynamic group dimensions on the host. Small static
+row counts, including decode, use fixed-shape batched GEMV instead and are
+recordable. Ordinary `MatMulKernel` is recorded through its normal cuBLAS calls.
+MoE gather/scatter and RoPE are recordable when their bindings are fixed. MoE
+gather computes its expert prefix offsets on the GPU, so routing does not
+require a host round trip before later commands can run.
+
+For the decode-specialized MoE matmul path, the compiler allocates three device
+pointer arrays from backend-owned fixed scratch. A preparation kernel reads the
+current expert offsets, validates them through the executable validation slot,
+and fills weight/input/output pointers for every routed row. The following
+`cublasGemmBatchedEx` has fixed `M/N/K` and a fixed batch count; only the contents
+of its device pointer arrays change between tokens. Both operations can
+therefore be captured together. Larger row counts retain the grouped fallback
+until a device-scheduled ragged GEMM implementation is available.
 
 The CUDA stream and cuBLAS handle are initialized with `CudaDevice`, before any
 capture. Creating the handle outside capture does not exclude cuBLAS work:

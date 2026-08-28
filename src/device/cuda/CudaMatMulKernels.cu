@@ -216,6 +216,86 @@ Result<void> run_cublas_gemm(
     return cublas_check(status, "cublasGemmEx");
 }
 
+struct DeviceMoeRowPointerProgram {
+    cuda_kernel::TensorArg x;
+    cuda_kernel::TensorArg offsets;
+    cuda_kernel::TensorArg weight;
+    cuda_kernel::TensorArg output;
+    void** weightPointers = nullptr;
+    void** inputPointers = nullptr;
+    void** outputPointers = nullptr;
+    int64_t batch = 0;
+    int64_t rows = 0;
+    int64_t experts = 0;
+    int64_t inFeatures = 0;
+    int64_t outFeatures = 0;
+    int64_t weightSlice = 0;
+    int64_t elementBytes = 0;
+};
+
+__device__ void* moe_element_pointer(
+        const cuda_kernel::TensorArg& tensor,
+        int64_t elementOffset,
+        int64_t elementBytes) {
+    return static_cast<void*>(
+        static_cast<char*>(tensor.data) +
+        (tensor.storageOffset + elementOffset) * elementBytes);
+}
+
+__global__ void prepare_moe_row_pointer_arrays(
+        DeviceMoeRowPointerProgram program,
+        ir::kernel_ir::OpId* validationFailure,
+        ir::kernel_ir::OpId op) {
+    int64_t batchIndex = blockIdx.x;
+    if (batchIndex >= program.batch)
+        return;
+
+    int64_t pointerBase = batchIndex * program.rows;
+    int64_t inputBase = batchIndex * program.rows * program.inFeatures;
+    int64_t outputBase = batchIndex * program.rows * program.outFeatures;
+    for (int64_t row = threadIdx.x; row < program.rows; row += blockDim.x) {
+        int64_t pointerIndex = pointerBase + row;
+        program.weightPointers[pointerIndex] = moe_element_pointer(
+            program.weight,
+            0,
+            program.elementBytes);
+        program.inputPointers[pointerIndex] = moe_element_pointer(
+            program.x,
+            inputBase + row * program.inFeatures,
+            program.elementBytes);
+        program.outputPointers[pointerIndex] = moe_element_pointer(
+            program.output,
+            outputBase + row * program.outFeatures,
+            program.elementBytes);
+    }
+    __syncthreads();
+
+    int64_t offsetBase = batchIndex * (program.experts + 1);
+    for (int64_t expert = threadIdx.x;
+         expert < program.experts;
+         expert += blockDim.x) {
+        int64_t begin = cuda_kernel::load_int(
+            program.offsets, offsetBase + expert);
+        int64_t end = cuda_kernel::load_int(
+            program.offsets, offsetBase + expert + 1);
+        bool valid = begin >= 0 && end >= begin && end <= program.rows;
+        if ((expert == 0 && begin != 0) ||
+            (expert + 1 == program.experts && end != program.rows)) {
+            valid = false;
+        }
+        if (!valid) {
+            cuda_kernel::record_validation_failure(validationFailure, op);
+            continue;
+        }
+        void* weightPointer = moe_element_pointer(
+            program.weight,
+            expert * program.weightSlice,
+            program.elementBytes);
+        for (int64_t row = begin; row < end; ++row)
+            program.weightPointers[pointerBase + row] = weightPointer;
+    }
+}
+
 } // namespace
 
 Result<void> launch_cuda_matmul(
@@ -392,6 +472,68 @@ Result<void> launch_cuda_moe_matmul(
     auto offsets = offsetsArg.take();
     auto weight = weightArg.take();
     auto output = outputArg.take();
+
+    if (program.rowBatched) {
+        int64_t pointerCount = batch * rows;
+        if (pointerCount != program.pointerCount ||
+            !program.weightPointers ||
+            !program.inputPointers ||
+            !program.outputPointers) {
+            return make_error("cuda moe_matmul row-batched pointer scratch mismatch");
+        }
+
+        DeviceMoeRowPointerProgram pointerProgram{
+            x,
+            offsets,
+            weight,
+            output,
+            program.weightPointers,
+            program.inputPointers,
+            program.outputPointers,
+            batch,
+            rows,
+            experts,
+            inFeatures,
+            outFeatures,
+            weight.dims[1] * weight.dims[2],
+            static_cast<int64_t>(core::dtype_size(x.dtype)),
+        };
+        prepare_moe_row_pointer_arrays<<<
+            static_cast<unsigned int>(batch), 256, 0, context.stream>>>(
+                pointerProgram,
+                context.validationFailure,
+                context.op);
+        auto prepared = cuda_check(
+            cudaGetLastError(),
+            "prepare_moe_row_pointer_arrays launch");
+        if (!prepared)
+            return make_error(prepared.error());
+
+        float alpha = 1.0f;
+        float beta = 0.0f;
+        auto status = cublasGemmBatchedEx(
+            context.cublas,
+            program.transposeRhs ? CUBLAS_OP_T : CUBLAS_OP_N,
+            CUBLAS_OP_N,
+            static_cast<int>(outFeatures),
+            1,
+            static_cast<int>(inFeatures),
+            &alpha,
+            reinterpret_cast<const void* const*>(program.weightPointers),
+            cudaType,
+            static_cast<int>(weight.dims[2]),
+            reinterpret_cast<const void* const*>(program.inputPointers),
+            cudaType,
+            static_cast<int>(inFeatures),
+            &beta,
+            reinterpret_cast<void* const*>(program.outputPointers),
+            cudaType,
+            static_cast<int>(outFeatures),
+            static_cast<int>(pointerCount),
+            CUBLAS_COMPUTE_32F,
+            CUBLAS_GEMM_DEFAULT);
+        return cublas_check(status, "cublasGemmBatchedEx moe_matmul rows");
+    }
 
     int64_t offsetCount = batch * (experts + 1);
     std::vector<uint8_t> offsetBytes(
