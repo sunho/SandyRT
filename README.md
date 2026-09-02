@@ -9,7 +9,7 @@ SandyRT is an LLM inference runtime built from scratch in C++20 and CUDA. Models
 ## Features
 
 - **One model, one flat file.** Attention, MoE routing, KV caches, and sampling are plain tensor ops in a single Sandy file, with no class hierarchy or config indirection.
-- **Compiler and kernels from scratch.** Sandy lowers through multi-level IRs into hand-written CUDA kernels JIT-compiled by NVRTC. cuBLAS is used only for dense matmuls.
+- **Compiler and kernels from scratch.** Sandy lowers through multi-level IRs into hand-written CUDA kernels JIT-compiled by NVRTC. Minimal external dependency except cuBLAS used for dense matmuls.
 - **Optimized CUDA backend.**
     - 15,200 tok/s prefill and 128.6 tok/s decode for the 26B MoE (BF16) on a single RTX PRO 6000.
     - CUDA Graph replay cuts decode CUDA API calls ~99% (57,936 → 839 per 128 tokens).
