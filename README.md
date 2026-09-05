@@ -4,7 +4,7 @@ SandyRT is an LLM inference runtime built from scratch in C++20 and CUDA. Models
 
 ## Demo: Gemma 4 MoE (26B-A4B)
 
-<!-- TODO: attach gemma4 moe demo video here -->
+[](https://github.com/user-attachments/assets/69fc141a-f004-4923-a142-97c96725790b)
 
 ## Features
 
