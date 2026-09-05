@@ -13,12 +13,12 @@ SandyRT is an LLM inference runtime built from scratch in C++20 and CUDA. Models
 - **Optimized CUDA backend.**
     - 15,200 tok/s prefill and 128.6 tok/s decode for the 26B MoE (BF16) on a single RTX PRO 6000.
     - CUDA Graph replay cuts decode CUDA API calls ~99% (57,936 → 839 per 128 tokens).
-    - JIT paged decode attention resolves page tables once per page, not per element — 82% less attention GPU time.
-    - NVRTC-fused elementwise chains run as one straight-line kernel per chain instead of one launch per op — +55% prefill throughput.
+    - JIT paged decode attention resolves page tables once per page, not per element.
+    - NVRTC-fused elementwise chains run as one straight-line kernel per chain instead of one launch per op.
 
 ## The Sandy language
 
-Sandy is a small DSL for writing model forward passes. It looks like Go, but every function is a tensor computation the compiler traces into a graph. Weights are referenced by name (`weight_scope` + `@weight`) and resolved against a safetensors checkpoint. A sandy file is fully explicit about its computation without module/class indirections, which makes it easy to read — for humans and machines alike. This makes it a good playground to try hand customizations and optimizations.
+Sandy is a small DSL for writing model forward passes. It looks like Go, but every function is a tensor computation the compiler traces into a graph. It is a a good playground to try hand customizations and optimizations as it's easy to read by human and machine.
 
 ### Paged KV caches
 
@@ -101,13 +101,9 @@ python scripts/run_gemma4a4b26b.py \
   "Explain mixture-of-experts models briefly."
 ```
 
-The prepare step downloads the ~52 GB BF16 checkpoint and converts it (keep ~110 GB free). Details in [`GEMMA4_MOE.md`](GEMMA4_MOE.md).
-
 ## Building
 
 ```bash
 cmake -B build -DSANDY_ENABLE_CUDA=ON      # CPU-only: omit the flag
 cmake --build build -j
 ```
-
-Requires CMake ≥ 3.20, a C++20 compiler, and the CUDA toolkit for the GPU backend. Add `-DSANDY_ENABLE_SERVER=ON` for the gRPC server, which pairs with an OpenAI-compatible chat frontend (`scripts/chat_openai_server.py`).
